@@ -73,7 +73,7 @@ const REMOTE_COMPACTION_V2_FEATURE = "remote_compaction_v2";
 export const REMOTE_COMPACTION_CHECKPOINT_SUMMARY =
   "[Remote Responses compaction checkpoint]\n\n" +
   "Detailed context before this checkpoint is retained in the native replay artifact and is available only to compatible Responses models.";
-const RETAINED_MESSAGE_TOKEN_BUDGET = 20_000;
+const RETAINED_MESSAGE_TOKEN_BUDGET = 64_000;
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 export type RemoteCompactionDetails = {
