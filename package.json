@@ -7,11 +7,11 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/algal/pi-openai-server-compaction.git"
+    "url": "git+https://github.com/angribot/pi-openai-server-compaction.git"
   },
-  "homepage": "https://github.com/algal/pi-openai-server-compaction#readme",
+  "homepage": "https://github.com/angribot/pi-openai-server-compaction#readme",
   "bugs": {
-    "url": "https://github.com/algal/pi-openai-server-compaction/issues"
+    "url": "https://github.com/angribot/pi-openai-server-compaction/issues"
   },
   "keywords": [
     "pi-package",
@@ -38,9 +38,9 @@
     "extensions": ["./index.ts"]
   },
   "peerDependencies": {
-    "@earendil-works/pi-coding-agent": ">=0.80.9 <0.81.0",
-    "@earendil-works/pi-ai": ">=0.80.9 <0.81.0",
-    "@earendil-works/pi-agent-core": ">=0.80.9 <0.81.0"
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-agent-core": "*"
   },
   "peerDependenciesMeta": {
     "@earendil-works/pi-coding-agent": { "optional": true },
@@ -57,9 +57,9 @@
     "ws": "^8.18.0"
   },
   "devDependencies": {
-    "@earendil-works/pi-agent-core": "0.80.9",
-    "@earendil-works/pi-ai": "0.80.9",
-    "@earendil-works/pi-coding-agent": "0.80.9",
+    "@earendil-works/pi-agent-core": "0.83.0",
+    "@earendil-works/pi-ai": "0.83.0",
+    "@earendil-works/pi-coding-agent": "0.83.0",
     "@types/node": "^24.10.0",
     "@types/ws": "^8.18.1",
     "typescript": "^5.9.3"

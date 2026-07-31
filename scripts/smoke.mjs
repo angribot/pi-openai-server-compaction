@@ -110,6 +110,10 @@ const {
 const {
   selectInputItemsForContinuation,
 } = await import(pathToFileURL(join(repoRoot, "src", "openai-ws-stream.ts")).href);
+const {
+  isDirectOpenAIResponsesModel,
+  isOpenAIResponsesProviderModel,
+} = await import(pathToFileURL(join(repoRoot, "src", "openai.ts")).href);
 
 const targetModelKey = "openai:openai-responses:gpt-5.4-nano";
 const reconstructed = reconstructRemoteCompactionStateFromBranch({
@@ -225,6 +229,17 @@ assert.equal(
     baseUrl: "https://api.openai.com/v1",
   }),
   "https://api.openai.com/v1/responses",
+);
+const proxyResponsesModel = {
+  provider: "openai",
+  api: "openai-responses",
+  baseUrl: "https://proxy.example.com/v1",
+};
+assert.equal(isOpenAIResponsesProviderModel(proxyResponsesModel), true);
+assert.equal(isDirectOpenAIResponsesModel(proxyResponsesModel), false);
+assert.equal(
+  remoteCompactionV2EndpointUrl(proxyResponsesModel),
+  "https://proxy.example.com/v1/responses",
 );
 assert.equal(
   remoteCompactionV2EndpointUrl({

@@ -54,9 +54,12 @@ export function isOpenAIResponsesModel(model: unknown): model is ModelLike {
   );
 }
 
+export function isOpenAIResponsesProviderModel(model: unknown): model is ModelLike {
+  return isRecord(model) && model.api === "openai-responses" && model.provider === "openai";
+}
+
 export function isDirectOpenAIResponsesModel(model: ModelLike): boolean {
-  if (model.api !== "openai-responses") return false;
-  if (model.provider !== "openai") return false;
+  if (!isOpenAIResponsesProviderModel(model)) return false;
   const host = hostnameFromBaseUrl(model.baseUrl);
   return host === undefined || host === "api.openai.com";
 }
@@ -88,7 +91,7 @@ export function supportsPreviousResponseId(
 
 export function supportsRemoteCompactionModel(model: unknown): model is ModelLike {
   if (!isOpenAIResponsesModel(model)) return false;
-  return isDirectOpenAIResponsesModel(model) || isOpenAICodexResponsesModel(model);
+  return isOpenAIResponsesProviderModel(model) || isOpenAICodexResponsesModel(model);
 }
 
 export function resolveCompactThreshold(
