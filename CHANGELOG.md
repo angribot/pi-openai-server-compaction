@@ -2,9 +2,9 @@
 
 This changelog intentionally starts at **0.1.0**.
 
-## Unreleased
-- target Pi 0.80.9 and the `@earendil-works/*` package namespace
-- align compaction fallback, Responses payload normalization, Codex identity headers, and WebSocket behavior with Pi 0.80.9
+## 0.2.0 - 2026-07-31
+- target Pi 0.83.0 and the `@earendil-works/*` package namespace while leaving Pi peer dependencies unpinned
+- align compaction fallback, Responses payload normalization, Codex identity headers, and WebSocket behavior with Pi 0.83.0
 - replace the legacy `/responses/compact` call with Codex's current Responses compaction v2 protocol
 - stream a normal Responses request with a trailing `compaction_trigger` and persist the returned `compaction` item
 - retain recent user messages with the same 20K-token budget shape used by Codex while continuing to read legacy version 1 session artifacts

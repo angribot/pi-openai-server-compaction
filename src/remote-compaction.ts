@@ -24,7 +24,7 @@ import { complete } from "@earendil-works/pi-ai/compat";
 import { isRecord } from "./config.ts";
 import {
   hostnameFromBaseUrl,
-  isDirectOpenAIResponsesModel,
+  isOpenAIResponsesProviderModel,
   isOpenAICodexResponsesModel,
   supportsRemoteCompactionModel,
   modelKey,
@@ -125,7 +125,7 @@ function resolveCodexResponsesEndpoint(model: Model<any>): string {
 }
 
 export function remoteCompactionV2EndpointUrl(model: Model<any>): string {
-  if (isDirectOpenAIResponsesModel(model)) {
+  if (isOpenAIResponsesProviderModel(model)) {
     return resolveDirectOpenAIResponsesEndpoint(model);
   }
   if (isOpenAICodexResponsesModel(model)) {
@@ -228,7 +228,7 @@ export function buildRemoteCompactionHeaders(params: {
     accept: "text/event-stream",
     "content-type": "application/json",
   });
-  if (isDirectOpenAIResponsesModel(params.model)) {
+  if (isOpenAIResponsesProviderModel(params.model)) {
     return commonHeaders;
   }
   if (isOpenAICodexResponsesModel(params.model)) {

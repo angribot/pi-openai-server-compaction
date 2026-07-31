@@ -13,7 +13,7 @@ import type {
 import { streamSimpleOpenAIResponses } from "@earendil-works/pi-ai/compat";
 import { createOpenAIWebSocketStreamFn } from "./openai-ws-stream.ts";
 import { loadConfig } from "./config.ts";
-import { isDirectOpenAIResponsesModel } from "./openai.ts";
+import { isOpenAIResponsesProviderModel } from "./openai.ts";
 
 const websocketStream = createOpenAIWebSocketStreamFn();
 
@@ -23,7 +23,7 @@ export const streamOpenAIResponsesWithPhase2B: StreamFunction = (
   options,
 ) => {
   const cfg = loadConfig(process.cwd());
-  if (!cfg.enabled || !isDirectOpenAIResponsesModel(model)) {
+  if (!cfg.enabled || !isOpenAIResponsesProviderModel(model)) {
     return streamSimpleOpenAIResponses(
       model as Model<"openai-responses">,
       context as Context,
