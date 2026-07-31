@@ -765,12 +765,7 @@ async function main(): Promise<void> {
     });
 
     await runSameProcessTest(sameProcessDir, workspaceDir);
-    if (primaryModelProvider === "openai") {
-      await runReducedPlaintextReplayTest(reducedPlaintextDir, reducedPlaintextWorkspaceDir);
-    } else {
-      console.log("== reduced-plaintext replay test ==");
-      console.log("skipped for non-direct OpenAI provider");
-    }
+    await runReducedPlaintextReplayTest(reducedPlaintextDir, reducedPlaintextWorkspaceDir);
     await runForkTest(forkDir, workspaceDir);
     await runResumeTest(resumeDir, workspaceDir);
     await runResumeAfterModelSwitchTest(resumeAfterSwitchDir, workspaceDir);

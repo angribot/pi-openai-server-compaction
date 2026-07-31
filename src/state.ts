@@ -1,9 +1,8 @@
 /**
  * In-memory per-session runtime state.
  *
- * This data is intentionally ephemeral. Persisted remote compaction artifacts
- * live in Pi session entries; this module only caches the currently active
- * continuation and reconstructed replay state for the running process.
+ * Persisted remote compaction artifacts live in Pi session entries; this module
+ * only caches reconstructed replay state and the latest Responses request shape.
  */
 import type {
   RemoteCompactionSessionState,
@@ -11,35 +10,14 @@ import type {
   ResponsesTextConfig,
 } from "./remote-compaction.ts";
 
-export type ContinuationState = {
-  responseId: string;
-  modelKey: string;
-  updatedAt: number;
-  contextLength?: number;
-};
-
 export type ResponsesRequestShapeState = {
   updatedAt: number;
   reasoning?: ResponsesReasoningConfig;
   text?: ResponsesTextConfig;
 };
 
-const continuationBySessionId = new Map<string, ContinuationState>();
 const remoteCompactionBySessionId = new Map<string, RemoteCompactionSessionState>();
 const requestShapeBySessionId = new Map<string, ResponsesRequestShapeState>();
-
-export function getContinuationState(sessionId: string): ContinuationState | undefined {
-  return continuationBySessionId.get(sessionId);
-}
-
-export function setContinuationState(sessionId: string, state: ContinuationState): void {
-  continuationBySessionId.set(sessionId, state);
-}
-
-export function clearContinuationState(sessionId: string | undefined): void {
-  if (!sessionId) return;
-  continuationBySessionId.delete(sessionId);
-}
 
 export function getRemoteCompactionState(
   sessionId: string,
@@ -77,8 +55,7 @@ export function clearResponsesRequestShapeState(sessionId: string | undefined): 
   requestShapeBySessionId.delete(sessionId);
 }
 
-export function clearAllContinuationState(): void {
-  continuationBySessionId.clear();
+export function clearAllRuntimeState(): void {
   remoteCompactionBySessionId.clear();
   requestShapeBySessionId.clear();
 }

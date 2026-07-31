@@ -2,6 +2,19 @@
 
 This changelog intentionally starts at **0.1.0**.
 
+## Unreleased
+
+- enable remote compaction by exact `model.api === "openai-responses"` instead of provider name or endpoint classification
+- support custom providers and relays through their configured Responses base URL
+- stop registering or overriding providers; replay remote replacement history through `before_provider_request`
+- remove the extension-owned WebSocket client, provider stream override, socket lifecycle, and live `previous_response_id` continuation state
+- remove ordinary-request mutation of `store`, `context_management`, and `previous_response_id`
+- reduce configuration to `enabled` and `notify`; Pi continues to own compaction thresholds
+- remove direct `ws` and `@types/ws` dependencies
+- make reduced-plaintext live replay provider-agnostic
+- limit committed tests to the remote-compaction project's core contract and keep cross-extension transport validation external
+- document the current raw transport capability gap: the compaction RPC remains HTTP/SSE until Pi exposes a provider-aware raw transport seam
+
 ## 0.2.0 - 2026-07-31
 - target Pi 0.83.0 and the `@earendil-works/*` package namespace while leaving Pi peer dependencies unpinned
 - align compaction fallback, Responses payload normalization, Codex identity headers, and WebSocket behavior with Pi 0.83.0

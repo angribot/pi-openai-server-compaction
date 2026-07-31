@@ -1,131 +1,129 @@
 # Validation
 
-## Current Responses compaction v2 validation
+## Current implementation scope
 
-The full live Pi RPC suite passes with both:
+The current extension:
 
-- `openai/gpt-5.6-luna` through the direct OpenAI Responses API
-- `openai-codex/gpt-5.6-sol` through the ChatGPT Codex subscription backend
+- enables remote compaction only for `model.api === "openai-responses"`;
+- does not register or override providers;
+- sends the compaction RPC directly over HTTP/SSE;
+- persists a Responses compaction v2 artifact in Pi session history;
+- injects reconstructed replacement history into later compatible ordinary requests;
+- leaves transport selection for those ordinary requests to Pi's provider path.
 
-The validated compaction request uses the normal Responses endpoint with a trailing `{ "type": "compaction_trigger" }`. Both backends returned an opaque `compaction` output item, persisted as `details.remoteCompaction` with `implementation: "responses_compaction_v2"`.
+`openai-codex-responses`, Azure-specific APIs, extension-owned WebSocket transport, and live `previous_response_id` continuation are no longer part of the current implementation.
 
-Validated continuity on both providers includes same-process recall, fork safety, resume/reload, and model-switch round trips. The direct OpenAI suite also includes reduced-plaintext replay; that test recovered a generated secret absent from all visible retained history and from the portable Pi summary.
+## Offline validation
+
+The project-owned offline suite is:
+
+```bash
+npm test
+```
+
+It consists of TypeScript checking and `scripts/smoke.mjs`. The suite was rerun after the compaction-only refactor and documentation update; both typecheck and smoke passed.
+
+The smoke contract covers:
+
+- provider-agnostic exact API gating;
+- generic Responses endpoint resolution;
+- compaction request and header construction;
+- SSE event parsing and artifact validation;
+- retained-history construction;
+- persisted detail reconstruction and usage normalization;
+- ordinary payload history injection;
+- removal of conflicting replay fields;
+- the requirement that this extension does not register a provider.
+
+Cross-extension transport fixtures are intentionally absent.
+
+## Runtime validation after the refactor
+
+### Reloaded real session
+
+After reloading the modified extension, a real `openai-responses` session performed remote compaction successfully.
+
+The persisted session event contained:
+
+- `fromHook: true`;
+- `tokensBefore: 143530`;
+- `details.remoteCompaction.version: 2`;
+- `implementation: responses_compaction_v2`;
+- a matching provider/API/model key;
+- replacement history containing retained explicit messages and exactly one opaque `compaction` item with encrypted content.
+
+The first ordinary request after compaction completed successfully with a much smaller submitted context while retaining the task's goals, constraints, modified-file state, and next steps. This validates the current `before_provider_request` replay path in a reloaded process.
+
+### Provider-agnostic relay session
+
+A separately configured third-party provider using `api: "openai-responses"` also completed remote compaction v2, continued for ordinary turns, compacted a second time, and continued again.
+
+This validates that current eligibility and endpoint resolution are not tied to a built-in provider name.
+
+An independently configured transport extension handled the ordinary provider requests over WebSocket, while the compaction RPC remained HTTP/SSE. That split is the current known transport limitation rather than the final desired transport architecture. It is documented in [`TODO.md`](TODO.md), not encoded as a cross-project test here.
+
+## Credentialed live harness
+
+The maintained live harness is:
+
+`tests/live/openai-compaction-rpc-live.ts`
+
+It exercises the extension's own continuity contract:
+
+1. same-process recall across compaction;
+2. reduced-plaintext replay where the portable summary omits the secret;
+3. fork safety;
+4. resume/reload continuity;
+5. model switch away and back;
+6. resume after a model-switch round trip.
+
+The reduced-plaintext scenario now applies to any eligible configured provider instead of checking for a specific provider name.
+
+Credentialed live runs are not part of `npm test`. Record a new full live run when preparing a release or changing protocol, reconstruction, or lifecycle behavior.
+
+## Responses compaction v2 protocol evidence
+
+The v2 request uses the normal Responses endpoint with a trailing:
+
+```json
+{ "type": "compaction_trigger" }
+```
+
+A valid result must include a completed response and exactly one opaque `compaction` output item. That item is persisted in `details.remoteCompaction` and replayed as part of later explicit Responses input.
+
+Earlier direct probes and live harness runs established that replaying the opaque artifact can recover information intentionally omitted from the portable text summary. Legacy version 1 session artifacts from the former `/responses/compact` implementation remain readable for compatibility, but new compactions use v2.
 
 ## Controlled product-defaults benchmark
 
-A retained GPT-5.6 Sol benchmark compared Pi 0.80.9's actual default
-compaction policy, this extension's actual Responses compaction/replay policy,
-and a full-context control. It increased task difficulty by replacing filler
-with exact state at a fixed roughly 50K-token history, without imposing an
-output cap from one arm on the other.
+A retained GPT-5.6 Sol benchmark compared Pi 0.80.9's actual default compaction policy, this extension's Responses compaction/replay policy, and a full-context control. It increased task difficulty by replacing filler with exact state at a fixed roughly 50K-token history, without imposing an output cap from one arm on another.
 
-On held-out seeds 301–304, full context scored 600/600, native scored 468/600
-(78.0%), and Pi default scored 288/600 (48.0%). Native used 4.58x Pi's mean
-compaction output tokens, 2.52x its compaction cost, and 1.29x its downstream
-input tokens. Pi had zero length-stopped summaries. All five native artifacts
-above 10K output tokens scored 75/75, while the three below 5K scored 39, 26,
-and 28. The supported conclusion is that the native default policy preserved
-more old state in aggregate while using more resources and exhibiting high
-allocation variability—not that it was more accurate at an equal budget.
+On held-out seeds 301–304:
+
+- full context: 600/600;
+- native compaction/replay: 468/600 (78.0%);
+- Pi default compaction: 288/600 (48.0%).
+
+Native compaction used more output, compaction cost, and downstream input, with substantial allocation variability. The supported conclusion is that the native default policy preserved more old state in aggregate while using more resources—not that it was more accurate at an equal budget.
 
 See:
 
-- `benchmarks/product-defaults/REPORT.md`
-- `benchmarks/product-defaults/README.md`
-- `benchmarks/product-defaults/CALIBRATION.md`
+- `benchmarks/product-defaults/REPORT.md`;
+- `benchmarks/product-defaults/README.md`;
+- `benchmarks/product-defaults/CALIBRATION.md`.
 
 ## Correction to the earlier matched-cap benchmark
 
-The earlier native-vs-text run set each text summary's maximum output tokens
-after observing its paired native request's output usage. That creates a
-one-sided, post-treatment cap and is not a symmetric matched-budget comparison.
-Its raw results remain reproducible, but its same-budget interpretation is
-superseded by the methodological note in:
+The earlier native-vs-text run selected each text summary's maximum output tokens after observing its paired native request's output usage. That creates a one-sided, post-treatment cap and is not a symmetric matched-budget comparison.
 
-- `benchmarks/native-vs-text/REPORT.md`
-- `benchmarks/native-vs-text/README.md`
+Its raw results remain reproducible, but its same-budget interpretation is superseded by the methodological notes in:
 
-## Legacy `/responses/compact` validation
+- `benchmarks/native-vs-text/REPORT.md`;
+- `benchmarks/native-vs-text/README.md`.
 
-Before the v2 migration, a direct manual probe against the OpenAI API succeeded:
+## Current limitations
 
-1. `POST /v1/responses/compact`
-   - returned `object: "response.compaction"`
-   - returned an `output` array containing:
-     - a preserved `message` item
-     - a `compaction` item with large `encrypted_content`
-
-2. A follow-up `POST /v1/responses`
-   - used the returned compaction output plus a new user message
-   - correctly recovered hidden prior information from the compaction artifact
-
-### Concrete probe
-
-Compressed history contained the fact:
-- `My launch code is ORANGE-17.`
-
-After compaction, the next request included:
-- the returned `compaction` item
-- a fresh user message: `What is my launch code?`
-
-The model replied:
-- `Your launch code is ORANGE-17.`
-
-## Meaning
-
-This confirms that the OpenAI compaction endpoint is real, returns opaque compaction artifacts, and that replaying those artifacts in later Responses requests does preserve continuity across the compaction boundary.
-
-## Live Pi RPC tests
-
-A full live Pi RPC test run also passed using this extension.
-
-The maintained regression harness now lives at:
-- `tests/live/openai-compaction-rpc-live.ts`
-
-Validated end-to-end for:
-- direct OpenAI Responses (`openai/*`)
-- OpenAI Codex subscription provider (`openai-codex/*`)
-
-Validated end-to-end:
-
-1. **Same-process continuity across compaction**
-   - prompt stored a secret
-   - `/compact` equivalent RPC compaction was run with custom instructions explicitly telling the text summary to omit the secret
-   - compaction response contained `details.remoteCompaction.replacementHistory`
-   - the current direct OpenAI and OpenAI Codex paths return a `compaction` artifact item
-   - legacy session entries containing `compaction_summary` remain supported for replay compatibility
-   - a later prompt in the same session correctly recovered the secret
-
-2. **`/model`-style switching mid-session**
-   - after compaction and successful recall, the session switched to another direct OpenAI Responses model
-   - the next prompt completed successfully
-   - the session then switched back to the original direct OpenAI Responses model
-   - remote continuity still worked after the round-trip
-   - Pi remained usable and cost totals stayed non-zero
-
-3. **Fork safety after compaction**
-   - after compaction, a fork was created from an earlier user message
-   - the forked session stayed usable and answered correctly on the next prompt
-
-4. **Resume/reload continuity after remote compaction**
-   - a session was compacted
-   - Pi was restarted on the saved session file
-   - the resumed session correctly recovered the secret even though the portable text summary omitted it
-
-5. **Resume/reload after a `/model` round-trip**
-   - a session was compacted under one direct OpenAI model
-   - the session switched to another OpenAI Responses model for a completed turn
-   - the session switched back and successfully recalled the hidden secret
-   - Pi was restarted on the saved session file
-   - the resumed session still recovered the secret, confirming reconstructed replay excluded the intervening other-model turn
-
-This confirms the extension uses Responses compaction v2 artifacts in a way that materially affects continuity, while keeping Pi operational across key session features on both the direct API provider and the OpenAI Codex subscription provider.
-
-## Hardening notes
-
-After the first successful live pass, an additional cleanup/hardening pass was applied:
-
-- in-memory remote history is now only extended when the active model still matches the compaction model, preventing cross-model pollution during `/model` round-trips
-- local portable-summary generation now falls back to Pi's built-in compaction helper if the full-branch summary attempt fails
-- remote compaction output is now shape-checked before being persisted or reconstructed from session details
-- the WebSocket connection manager now handles reconnect scheduling and pre-open close/error cases more defensively
+- The target endpoint must implement Responses compaction v2.
+- The compaction RPC currently uses direct HTTP/SSE because Pi has no public provider-aware raw transport seam that preserves the unconsumed event stream.
+- An independent provider transport can carry ordinary replay requests but cannot transparently intercept the compaction RPC today.
+- The extension does not provide automatic context management, provider persistence, or live response continuation.
+- Cross-extension transport composition is validated externally and is not a repository test matrix.

@@ -8,7 +8,6 @@
  */
 import { randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { arch, platform, release } from "node:os";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import type { SessionBeforeCompactEvent, ToolInfo } from "@earendil-works/pi-coding-agent";
@@ -24,8 +23,6 @@ import { complete } from "@earendil-works/pi-ai/compat";
 import { isRecord } from "./config.ts";
 import {
   hostnameFromBaseUrl,
-  isOpenAIResponsesProviderModel,
-  isOpenAICodexResponsesModel,
   supportsRemoteCompactionModel,
   modelKey,
 } from "./openai.ts";
@@ -111,27 +108,23 @@ function normalizeBaseUrl(baseUrl: string | undefined, fallback: string): string
   return trimmed.replace(/\/+$/, "");
 }
 
-function resolveDirectOpenAIResponsesEndpoint(model: Model<any>): string {
-  const baseUrl = normalizeBaseUrl(typeof model.baseUrl === "string" ? model.baseUrl : undefined, "https://api.openai.com/v1");
-  if (baseUrl.endsWith("/responses")) return baseUrl;
-  return baseUrl.endsWith("/v1") ? `${baseUrl}/responses` : `${baseUrl}/v1/responses`;
+function assertRemoteCompactionModel(model: unknown): void {
+  if (!supportsRemoteCompactionModel(model)) {
+    throw new Error("Remote compaction v2 requires an openai-responses model.");
+  }
 }
 
-function resolveCodexResponsesEndpoint(model: Model<any>): string {
-  const baseUrl = normalizeBaseUrl(typeof model.baseUrl === "string" ? model.baseUrl : undefined, "https://chatgpt.com/backend-api");
-  if (baseUrl.endsWith("/codex/responses")) return baseUrl;
-  if (baseUrl.endsWith("/codex")) return `${baseUrl}/responses`;
-  return `${baseUrl}/codex/responses`;
+function resolveResponsesEndpoint(model: Model<any>): string {
+  const baseUrl = normalizeBaseUrl(
+    typeof model.baseUrl === "string" ? model.baseUrl : undefined,
+    "https://api.openai.com/v1",
+  );
+  return baseUrl.endsWith("/responses") ? baseUrl : `${baseUrl}/responses`;
 }
 
 export function remoteCompactionV2EndpointUrl(model: Model<any>): string {
-  if (isOpenAIResponsesProviderModel(model)) {
-    return resolveDirectOpenAIResponsesEndpoint(model);
-  }
-  if (isOpenAICodexResponsesModel(model)) {
-    return resolveCodexResponsesEndpoint(model);
-  }
-  throw new Error("Remote compaction v2 is not supported for this model.");
+  assertRemoteCompactionModel(model);
+  return resolveResponsesEndpoint(model);
 }
 
 function resolveCodexHome(): string {
@@ -173,31 +166,6 @@ export function buildCodexIdentityHeaders(sessionId?: string): Record<string, st
   };
 }
 
-export function buildCodexWebSocketHeaders(sessionId: string): Record<string, string> {
-  return {
-    "x-client-request-id": sessionId,
-    ...buildCodexIdentityHeaders(sessionId),
-  };
-}
-
-function extractCodexAccountId(token: string): string {
-  const parts = token.split(".");
-  if (parts.length !== 3) {
-    throw new Error("Failed to extract accountId from Codex token");
-  }
-  const payload = JSON.parse(Buffer.from(parts[1], "base64url").toString("utf8")) as {
-    [key: string]: unknown;
-  };
-  const auth = isRecord(payload["https://api.openai.com/auth"])
-    ? payload["https://api.openai.com/auth"]
-    : undefined;
-  const accountId = auth?.chatgpt_account_id;
-  if (typeof accountId !== "string" || !accountId) {
-    throw new Error("Failed to extract accountId from Codex token");
-  }
-  return accountId;
-}
-
 function withRemoteCompactionV2Feature(headers: Record<string, string>): Record<string, string> {
   const configuredFeatures = Object.entries(headers)
     .find(([name]) => name.toLowerCase() === "x-codex-beta-features")?.[1]
@@ -214,33 +182,28 @@ function withRemoteCompactionV2Feature(headers: Record<string, string>): Record<
   };
 }
 
+function hasHeader(headers: Record<string, string> | undefined, name: string): boolean {
+  const expected = name.toLowerCase();
+  return Object.keys(headers ?? {}).some((headerName) => headerName.toLowerCase() === expected);
+}
+
 export function buildRemoteCompactionHeaders(params: {
   model: Model<any>;
-  apiKey: string;
+  apiKey?: string;
   headers?: Record<string, string>;
   sessionId?: string;
 }): Record<string, string> {
+  assertRemoteCompactionModel(params.model);
   const codexIdentityHeaders = buildCodexIdentityHeaders(params.sessionId);
-  const commonHeaders = withRemoteCompactionV2Feature({
-    authorization: `Bearer ${params.apiKey}`,
+  return withRemoteCompactionV2Feature({
+    ...(params.apiKey && !hasHeader(params.headers, "authorization")
+      ? { authorization: `Bearer ${params.apiKey}` }
+      : {}),
     ...codexIdentityHeaders,
     ...(params.headers ?? {}),
     accept: "text/event-stream",
     "content-type": "application/json",
   });
-  if (isOpenAIResponsesProviderModel(params.model)) {
-    return commonHeaders;
-  }
-  if (isOpenAICodexResponsesModel(params.model)) {
-    return {
-      ...commonHeaders,
-      "chatgpt-account-id": extractCodexAccountId(params.apiKey),
-      originator: "pi",
-      "user-agent": `pi-openai-server-compaction (${platform()} ${release()}; ${arch()})`,
-      "OpenAI-Beta": "responses=experimental",
-    };
-  }
-  throw new Error("Remote compaction v2 headers are not supported for this model.");
 }
 
 function isAssistantPhase(value: unknown): value is AssistantPhase {
@@ -346,6 +309,13 @@ function parseThinkingSignature(value: unknown): ResponseItem | undefined {
 
 function isResponseItem(value: unknown): value is ResponseItem {
   return isRecord(value) && typeof value.type === "string";
+}
+
+function isCompactionItem(value: unknown): value is ResponseItem {
+  return isRecord(value) &&
+    value.type === "compaction" &&
+    typeof value.encrypted_content === "string" &&
+    value.encrypted_content.length > 0;
 }
 
 function buildPortableSummaryPrompt(conversation: string, customInstructions?: string): string {
@@ -680,7 +650,7 @@ export function buildToolsPayload(
 export async function generatePortableSummary(params: {
   messages: AgentMessage[];
   model: Model<any>;
-  apiKey: string;
+  apiKey?: string;
   headers?: Record<string, string>;
   customInstructions?: string;
   signal?: AbortSignal;
@@ -724,7 +694,7 @@ export async function generateBestEffortLocalSummary(params: {
   preparation: CompactionPreparation;
   messages: AgentMessage[];
   model: Model<any>;
-  apiKey: string;
+  apiKey?: string;
   headers?: Record<string, string>;
   customInstructions?: string;
   signal?: AbortSignal;
@@ -894,8 +864,15 @@ export function parseRemoteCompactionV2Events(events: unknown[]): RemoteCompacti
       const message = typeof error?.message === "string" ? error.message : "Response failed";
       throw new Error(`OpenAI remote compaction v2 failed: ${message}`);
     }
-    if (event.type === "response.output_item.done" && isResponseItem(event.item)) {
-      if (event.item.type === "compaction") compactionItems.push(event.item);
+    if (
+      event.type === "response.output_item.done" &&
+      isRecord(event.item) &&
+      event.item.type === "compaction"
+    ) {
+      if (!isCompactionItem(event.item)) {
+        throw new Error("OpenAI remote compaction v2 returned an invalid compaction item.");
+      }
+      compactionItems.push(event.item);
       continue;
     }
     if (event.type === "response.completed") {
@@ -918,7 +895,7 @@ export function parseRemoteCompactionV2Events(events: unknown[]): RemoteCompacti
 
 export async function callRemoteCompactionEndpoint(params: {
   model: Model<any>;
-  apiKey: string;
+  apiKey?: string;
   headers?: Record<string, string>;
   sessionId?: string;
   input: ResponseItem[];
@@ -929,10 +906,6 @@ export async function callRemoteCompactionEndpoint(params: {
   text?: ResponsesTextConfig;
   signal?: AbortSignal;
 }): Promise<RemoteCompactionResult> {
-  if (!supportsRemoteCompactionModel(params.model)) {
-    throw new Error("Remote compaction v2 is currently only enabled for supported OpenAI-compatible Responses models.");
-  }
-
   const response = await fetch(remoteCompactionV2EndpointUrl(params.model), {
     method: "POST",
     headers: buildRemoteCompactionHeaders({

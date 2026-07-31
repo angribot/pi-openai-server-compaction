@@ -1,86 +1,160 @@
-# TESTPLAN
+# Test plan
 
-## Goals
+## Test ownership rule
 
-1. Verify supported OpenAI-compatible Responses sessions use the expected continuity path:
-   - `store: true`
-   - `context_management`
-   - `previous_response_id` when safe
-   - `/v1/responses` with a trailing `compaction_trigger` during Pi compaction
-2. Verify Pi remains usable:
-   - `/model`
-   - `/tree`
-   - session resume/reload
-   - cost totals on WS path are non-zero and plausible
+Tests committed to this repository must be necessary to cover the remote-compaction extension's own core contract.
 
-## Suggested manual tests
+Do not commit:
 
-### 1. Baseline supported turn
-- Start Pi with this extension enabled.
-- Use either:
-  - a direct `openai/*` Responses model, or
-  - an `openai-codex/*` model
-- Confirm normal response succeeds.
+- cross-extension loading matrices;
+- provider allowlist fixtures from a transport extension;
+- HTTP-versus-WebSocket composition matrices;
+- machine-specific provider names or settings;
+- temporary live probes.
 
-### 2. Live continuation path
-- Run a multi-turn session with tool calls.
-- For direct `openai/*`, confirm later requests use `previous_response_id` or WS continuation.
-- For `openai-codex/*`, confirm normal Codex transport behavior remains intact.
-- Confirm no obvious continuity drop across normal turns.
+Cross-extension composition remains an external, ephemeral validation. A defect found there should be reduced to the owning project's interface before becoming a repository test.
 
-### 3. Remote compaction path
-- Force `/compact` in a supported session.
-- Confirm extension returns a Pi compaction entry.
-- Inspect the session JSONL and confirm `details.remoteCompaction.replacementHistory` exists.
-- Continue the session and confirm later compatible turns still behave coherently.
-- Confirm `details.remoteCompaction.implementation` is `responses_compaction_v2`.
-- Confirm replacement history ends with an opaque `compaction` item and retains only the recent user-message budget outside that item.
+## Core goals
 
-### 4. `/model` safety
-- After remote compaction, switch to another model with `/model`.
-- Confirm the session continues normally.
-- Switch back to the original direct OpenAI model.
-- Confirm the session still works, does not crash, and does not reuse polluted remote history.
-- Restart or reload after that round-trip and confirm reconstructed remote replay still excludes the intervening other-model turns.
+1. Verify remote compaction is enabled exactly for `model.api === "openai-responses"`.
+2. Verify provider names do not control eligibility.
+3. Verify the extension never registers or overrides a provider.
+4. Verify the compaction request reproduces the current Responses request shape where required.
+5. Verify a successful response contains one valid opaque compaction artifact.
+6. Verify persisted artifacts reconstruct safe replacement history after lifecycle changes.
+7. Verify later compatible ordinary requests receive replacement history through `before_provider_request`.
+8. Verify incompatible APIs and models are left untouched.
+9. Verify remote failure preserves Pi's local compaction fallback.
 
-### 5. Tree/fork safety
-- Compact, then use `/tree` or fork navigation.
-- Confirm session remains usable.
-- Confirm stale WS / previous-response state is not reused incorrectly.
+## Offline automated checks
 
-### 6. Resume/reload safety
-- Compact remotely.
-- Restart Pi or reload extensions.
-- Resume the same session.
-- Confirm remote compaction state is reconstructed from compaction details.
-
-### 7. Cost accounting
-- Use the supported provider path for several turns.
-- Confirm footer/session stats show non-zero token/cost totals.
-- Compare rough totals against dashboard/provider logs when possible.
-
-## Automated live test
+Run:
 
 ```bash
-cd /home/algal/gits/pi-openai-server-compaction
-node --experimental-strip-types ./tests/live/openai-compaction-rpc-live.ts
-PI_OPENAI_SERVER_COMPACTION_TEST_MODEL=openai/gpt-5.6-luna node --experimental-strip-types ./tests/live/openai-compaction-rpc-live.ts
-PI_OPENAI_SERVER_COMPACTION_TEST_MODEL=openai-codex/gpt-5.6-sol node --experimental-strip-types ./tests/live/openai-compaction-rpc-live.ts
+npm test
 ```
 
-The automated live harness lives in `tests/live/openai-compaction-rpc-live.ts`.
+This runs TypeScript checking and `scripts/smoke.mjs`.
 
-Current automated coverage includes:
-- compaction continuity in the same session
-- `/model`-style switch away and back again
-- fork after compaction
-- resume/reload after compaction
-- resume/reload after switching away from and back to the compacted model
+Required smoke coverage:
 
-Recommended follow-up live regression:
-- explicit tree navigation after an intervening other-model turn, followed by restart
+- extension entrypoint loads;
+- `openai-responses` eligibility is provider-agnostic;
+- non-`openai-responses` APIs are rejected;
+- endpoint normalization uses the model's configured Responses base URL;
+- compaction request body ends with a `compaction_trigger`;
+- request headers opt into compaction v2 and SSE;
+- SSE event parsing accepts one completed compaction result;
+- malformed, missing, or duplicate compaction artifacts are rejected;
+- usage and cost normalization round-trip through persisted details;
+- v1 and v2 persisted details reconstruct safely;
+- remote replacement history is injected into the final ordinary payload;
+- conflicting `messages` and `previous_response_id` fields are removed during replay;
+- the extension does not call `registerProvider`.
 
-## Controlled compaction benchmark
+## Manual core validation
 
-The native-vs-text benchmark, reproduction instructions, retained evidence, and report live under:
-- `benchmarks/native-vs-text/`
+### 1. Eligible provider
+
+- Select any model configured with `api: "openai-responses"`.
+- Start or reload Pi with this extension enabled.
+- Execute a normal turn.
+- Force a compaction.
+- Confirm the session receives a Pi compaction entry rather than an extension crash.
+
+### 2. Persisted artifact
+
+Inspect the session JSONL and confirm:
+
+- `details.remoteCompaction.version` is `2`;
+- `details.remoteCompaction.implementation` is `responses_compaction_v2`;
+- `replacementHistory` is an array;
+- it contains exactly one opaque `compaction` item with encrypted content;
+- the model key matches the provider, API, and model that performed compaction.
+
+### 3. Same-session continuation
+
+- Store a fact before compaction.
+- Ask the portable summary to omit that fact where the harness permits custom instructions.
+- Compact remotely.
+- Ask for the fact afterward.
+- Confirm the model can recover it from the opaque artifact.
+
+### 4. Repeated compaction
+
+- Continue the session after the first remote compaction.
+- Perform another compaction.
+- Confirm the second request uses reconstructed explicit remote history and returns a new valid artifact.
+- Continue again and verify coherence.
+
+### 5. Model compatibility
+
+- Compact under one eligible model.
+- Switch to a different or incompatible model and complete a turn.
+- Switch back to the original model.
+- Confirm incompatible turns do not pollute reconstructed remote history.
+
+### 6. Resume, tree, and fork
+
+After a successful remote compaction, separately verify:
+
+- process restart or session resume;
+- extension reload;
+- tree navigation;
+- fork from an earlier point.
+
+The session must remain usable, and matching remote state must reconstruct only where the active branch and model allow it.
+
+### 7. Remote failure fallback
+
+Use an eligible model whose endpoint does not implement compaction v2, or inject a controlled remote failure outside committed tests.
+
+Confirm:
+
+- a successful local summary is still returned when available;
+- otherwise Pi's default compaction path remains available;
+- no invalid remote artifact is persisted.
+
+## Credentialed live regression
+
+Run:
+
+```bash
+npm run test:live
+```
+
+Override the target model when necessary:
+
+```bash
+PI_OPENAI_SERVER_COMPACTION_TEST_MODEL=provider/model npm run test:live
+```
+
+The maintained harness is:
+
+`tests/live/openai-compaction-rpc-live.ts`
+
+Its core scenarios are:
+
+- same-process continuity;
+- reduced-plaintext replay;
+- fork after compaction;
+- resume/reload after compaction;
+- model switch away and back;
+- resume after a model-switch round trip.
+
+The reduced-plaintext scenario applies to any configured eligible provider; it is not limited by provider name.
+
+## Current transport limitation
+
+The compaction RPC currently uses direct HTTP/SSE. Ordinary post-compaction requests remain transport-neutral after history injection.
+
+Do not add a cross-extension test for the missing raw transport seam to this repository. The capability gap, rejected workarounds, and future acceptance criteria are documented in [`TODO.md`](TODO.md).
+
+## Benchmarks
+
+Benchmark evidence and reproduction instructions remain under:
+
+- `benchmarks/product-defaults/`;
+- `benchmarks/native-vs-text/`.
+
+Benchmarks measure compaction/replay quality and resource use. They are not transport composition tests.
