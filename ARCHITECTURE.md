@@ -10,7 +10,7 @@ It must remain:
 
 - **provider-agnostic** — eligibility is based on `model.api`, not a provider name;
 - **ordinary-request transport-neutral** — it rewrites a completed provider payload but does not register a provider or select its transport;
-- **session-portable** — Pi keeps a readable text summary and authoritative JSONL history alongside the opaque artifact;
+- **native-continuity first** — compatible Responses models replay the opaque artifact; the session stores a fixed checkpoint marker rather than a second model-generated summary;
 - **independently loadable** — remote compaction continues to work without a separate transport extension.
 
 The current Pi API does not provide a provider-aware raw transport seam for the compaction RPC itself. That request therefore remains HTTP/SSE; the known gap is tracked in [`TODO.md`](TODO.md).
@@ -49,17 +49,12 @@ The extension does not add `store`, `context_management`, or `previous_response_
 4. It chooses the explicit Responses history:
    - reconstructed remote history when the session was compacted before;
    - otherwise the current Pi branch converted to Responses items.
-5. It starts two independent operations in parallel:
-   - a portable local text summary;
-   - a Responses compaction v2 request.
-6. `src/remote-compaction.ts` sends a normal Responses request with a trailing `compaction_trigger` directly over HTTP/SSE.
-7. The parser requires one completed response and exactly one opaque `compaction` item.
-8. On remote success, Pi persists:
-   - the readable local summary;
+5. `src/remote-compaction.ts` sends one normal Responses request with a trailing `compaction_trigger` directly over HTTP/SSE.
+6. The parser requires one completed response and exactly one opaque `compaction` item.
+7. On remote success, Pi persists:
+   - a fixed native replay checkpoint marker in `CompactionEntry.summary`;
    - `details.remoteCompaction` containing version, implementation, model key, replacement history, and optional usage.
-9. On remote failure:
-   - a successful local summary is returned by itself;
-   - otherwise Pi's default compaction path remains available.
+8. On remote failure, the handler returns `undefined` so Pi's default compaction path runs sequentially. An aborted request returns `{ cancel: true }`.
 
 ### Ordinary turn after remote compaction
 
@@ -111,12 +106,7 @@ CompactionEntry.details.remoteCompaction
 
 Version 1 legacy artifacts remain readable for session compatibility.
 
-The portable text summary remains important for:
-
-- readable and exportable session history;
-- tree and fork semantics;
-- switching to an incompatible model;
-- fallback when a provider cannot consume the opaque artifact.
+The checkpoint marker is intentionally not a portable text summary. It explains that detailed pre-compaction context is retained in the native replay artifact and requires a compatible Responses model. Switching to an incompatible model may therefore lose access to detailed pre-compaction context; native replay continuity is the preferred path.
 
 ## Runtime state
 
@@ -141,7 +131,7 @@ Runtime state is cleared or reconstructed across session start, switch, fork, tr
 Pi lifecycle orchestration:
 
 - gate on exact `openai-responses` API type;
-- run local and remote compaction;
+- run remote compaction and hand failures back to Pi's default path;
 - persist remote details through Pi's compaction entry;
 - reconstruct state from the active branch;
 - inject replacement history in `before_provider_request`;
@@ -162,7 +152,7 @@ Responses compaction protocol implementation:
 - retain recent user items under the compaction replay budget;
 - normalize usage and cost;
 - reconstruct v1 and v2 persisted artifacts;
-- generate or fall back to a portable text summary.
+- provide the fixed native replay checkpoint marker.
 
 ### `src/openai.ts`
 
@@ -187,11 +177,11 @@ Pi owns compaction thresholds. A provider or transport extension owns transport 
 - Never extend remote history with an assistant completion from a different provider/model.
 - Validate persisted artifacts before reconstructing them.
 - Require exactly one opaque compaction item from a completed remote response.
-- Preserve the portable local summary even when remote compaction succeeds.
+- Store a fixed native replay checkpoint marker instead of running a second summary request.
 - Leave an ordinary payload untouched until a matching remote artifact exists.
 - Do not register or override providers.
 - Do not own WebSocket or `previous_response_id` state.
-- Fall back to local compaction when the remote RPC fails.
+- Return control to Pi's default compaction when the remote RPC fails.
 
 ## Testing boundary
 

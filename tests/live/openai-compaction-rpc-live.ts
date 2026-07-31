@@ -49,6 +49,9 @@ const primaryModelId = primaryModel.includes("/") ? primaryModel.split("/").at(-
 const defaultRequestTimeoutMs = 120_000;
 const idlePollIntervalMs = 500;
 const compactionPadding = "context-padding ".repeat(7_000);
+const remoteCompactionCheckpointSummary =
+  "[Remote Responses compaction checkpoint]\n\n" +
+  "Detailed context before this checkpoint is retained in the native replay artifact and is available only to compatible Responses models.";
 
 function expect(condition: unknown, message: string): asserts condition {
   if (!condition) {
@@ -374,16 +377,10 @@ async function runSameProcessTest(sessionDir: string, workspaceDir: string): Pro
     });
     await client.waitIdle();
 
-    const compactResponse = await client.send(
-      {
-        type: "compact",
-        customInstructions: `Create a useful summary, but do NOT include the exact project codename ${secret}. Redact any exact identifiers and codewords.`,
-      },
-      240_000,
-    );
+    const compactResponse = await client.send({ type: "compact" }, 240_000);
     const compactData = asRecord(compactResponse.data, "compact.data");
     const summary = asString(compactData.summary, "compact.data.summary");
-    expect(!summary.includes(secret), `Summary still contains secret; test is inconclusive. Summary: ${summary}`);
+    expect(summary === remoteCompactionCheckpointSummary, `Unexpected compaction checkpoint summary: ${summary}`);
 
     const remoteCompaction = nestedRecord(nestedRecord(compactData.details).remoteCompaction);
     expect(
@@ -494,15 +491,12 @@ async function runReducedPlaintextReplayTest(sessionDir: string, workspaceDir: s
     });
     await client.waitIdle();
 
-    const compactResponse = await client.send(
-      {
-        type: "compact",
-        customInstructions: "Create a useful summary, but redact any exact identifiers or codewords invented earlier.",
-      },
-      240_000,
-    );
+    const compactResponse = await client.send({ type: "compact" }, 240_000);
     const compactData = asRecord(compactResponse.data, "reduced-plaintext compact.data");
-    void asString(compactData.summary, "reduced-plaintext compact.data.summary");
+    expect(
+      asString(compactData.summary, "reduced-plaintext compact.data.summary") === remoteCompactionCheckpointSummary,
+      "Expected the fixed native replay checkpoint summary",
+    );
 
     const remoteCompaction = nestedRecord(nestedRecord(compactData.details).remoteCompaction);
     expect(
@@ -555,7 +549,7 @@ async function runForkTest(sessionDir: string, workspaceDir: string): Promise<vo
       message: `${compactionPadding}\nSecond prompt before compaction. Reply only with SECOND-OK.`,
     });
     await client.waitIdle();
-    await client.send({ type: "compact", customInstructions: "Summarize briefly." }, 240_000);
+    await client.send({ type: "compact" }, 240_000);
 
     const forkData = asRecord(
       (await client.send({ type: "get_fork_messages" }, 30_000)).data,
@@ -597,19 +591,10 @@ async function runResumeTest(sessionDir: string, workspaceDir: string): Promise<
     });
     await client.waitIdle();
 
-    const compactResponse = await client.send(
-      {
-        type: "compact",
-        customInstructions: `Summarize the conversation but do not include the exact project codename ${secret}. Redact all exact identifiers and codewords.`,
-      },
-      240_000,
-    );
+    const compactResponse = await client.send({ type: "compact" }, 240_000);
     const compactData = asRecord(compactResponse.data, "resume compact.data");
     const summary = asString(compactData.summary, "resume compact.data.summary");
-    expect(
-      !summary.includes(secret),
-      `Resume-test summary still contains secret; test is inconclusive. Summary: ${summary}`,
-    );
+    expect(summary === remoteCompactionCheckpointSummary, `Unexpected resume checkpoint summary: ${summary}`);
 
     const state = await client.getState();
     sessionFile = asString(state.sessionFile, "resume get_state.data.sessionFile");
@@ -660,19 +645,10 @@ async function runResumeAfterModelSwitchTest(sessionDir: string, workspaceDir: s
     });
     await client.waitIdle();
 
-    const compactResponse = await client.send(
-      {
-        type: "compact",
-        customInstructions: `Create a useful summary, but do NOT include the exact project codename ${secret}. Redact any exact identifiers and codewords.`,
-      },
-      240_000,
-    );
+    const compactResponse = await client.send({ type: "compact" }, 240_000);
     const compactData = asRecord(compactResponse.data, "resume-after-switch compact.data");
     const summary = asString(compactData.summary, "resume-after-switch compact.data.summary");
-    expect(
-      !summary.includes(secret),
-      `Resume-after-switch summary still contains secret; test is inconclusive. Summary: ${summary}`,
-    );
+    expect(summary === remoteCompactionCheckpointSummary, `Unexpected resume-after-switch checkpoint summary: ${summary}`);
 
     await client.send({
       type: "set_model",

@@ -3,6 +3,10 @@
 This changelog intentionally starts at **0.1.0**.
 
 ## Unreleased
+- run only the remote Responses compaction request on the successful path instead of concurrently generating a second local summary
+- persist a fixed native replay checkpoint marker: `[Remote Responses compaction checkpoint]` plus its compatibility note
+- return control to Pi's default compaction on remote failure and preserve explicit cancellation on abort, including while credentials are resolving
+- update the compaction contract, validation plan, and architecture docs for native-continuity-first behavior
 
 ## 0.3.0 - 2026-07-31
 - enable remote compaction by exact `model.api === "openai-responses"` instead of provider name or endpoint classification

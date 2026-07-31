@@ -7,8 +7,9 @@ The current extension:
 - enables remote compaction only for `model.api === "openai-responses"`;
 - does not register or override providers;
 - sends the compaction RPC directly over HTTP/SSE;
-- persists a Responses compaction v2 artifact in Pi session history;
+- persists a Responses compaction v2 artifact and fixed native replay checkpoint marker in Pi session history;
 - injects reconstructed replacement history into later compatible ordinary requests;
+- returns control to Pi's default compaction path after a remote failure;
 - leaves transport selection for those ordinary requests to Pi's provider path.
 
 `openai-codex-responses`, Azure-specific APIs, extension-owned WebSocket transport, and live `previous_response_id` continuation are no longer part of the current implementation.
@@ -32,6 +33,8 @@ The smoke contract covers:
 - retained-history construction;
 - persisted detail reconstruction and usage normalization;
 - ordinary payload history injection;
+- fixed checkpoint marker construction and one-request success path;
+- remote failure and abort fallback semantics;
 - removal of conflicting replay fields;
 - the requirement that this extension does not register a provider.
 
@@ -71,13 +74,13 @@ The maintained live harness is:
 It exercises the extension's own continuity contract:
 
 1. same-process recall across compaction;
-2. reduced-plaintext replay where the portable summary omits the secret;
+2. reduced-plaintext replay where the native artifact retains the secret while the checkpoint marker does not;
 3. fork safety;
 4. resume/reload continuity;
 5. model switch away and back;
 6. resume after a model-switch round trip.
 
-The reduced-plaintext scenario now applies to any eligible configured provider instead of checking for a specific provider name.
+The reduced-plaintext scenario now applies to any eligible configured provider instead of checking for a specific provider name. It verifies native artifact recovery, not portable-summary quality.
 
 Credentialed live runs are not part of `npm test`. Record a new full live run when preparing a release or changing protocol, reconstruction, or lifecycle behavior.
 
@@ -89,9 +92,9 @@ The v2 request uses the normal Responses endpoint with a trailing:
 { "type": "compaction_trigger" }
 ```
 
-A valid result must include a completed response and exactly one opaque `compaction` output item. That item is persisted in `details.remoteCompaction` and replayed as part of later explicit Responses input.
+A valid result must include a completed response and exactly one opaque `compaction` output item. That item is persisted in `details.remoteCompaction` and replayed as part of later explicit Responses input. The corresponding `CompactionEntry.summary` is the fixed native replay checkpoint marker, not a second model-generated summary.
 
-Earlier direct probes and live harness runs established that replaying the opaque artifact can recover information intentionally omitted from the portable text summary. Legacy version 1 session artifacts from the former `/responses/compact` implementation remain readable for compatibility, but new compactions use v2.
+Earlier direct probes and live harness runs established that replaying the opaque artifact can recover information omitted from the checkpoint marker. Legacy version 1 session artifacts from the former `/responses/compact` implementation remain readable for compatibility, but new compactions use v2.
 
 ## Controlled product-defaults benchmark
 
@@ -123,6 +126,7 @@ Its raw results remain reproducible, but its same-budget interpretation is super
 ## Current limitations
 
 - The target endpoint must implement Responses compaction v2.
+- Compatible-model continuity depends on replaying the opaque artifact; incompatible models may not recover detailed pre-compaction context from the fixed marker.
 - The compaction RPC currently uses direct HTTP/SSE because Pi has no public provider-aware raw transport seam that preserves the unconsumed event stream.
 - An independent provider transport can carry ordinary replay requests but cannot transparently intercept the compaction RPC today.
 - The extension does not provide automatic context management, provider persistence, or live response continuation.
