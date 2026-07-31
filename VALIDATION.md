@@ -9,7 +9,7 @@ The current extension:
 - sends the compaction RPC directly over HTTP/SSE;
 - persists a Responses compaction v2 artifact and fixed native replay checkpoint marker in Pi session history;
 - injects reconstructed replacement history into later compatible ordinary requests;
-- returns control to Pi's default compaction path after a remote failure;
+- retries transient remote failures twice, then cancels without invoking Pi's text compactor;
 - leaves transport selection for those ordinary requests to Pi's provider path.
 
 `openai-codex-responses`, Azure-specific APIs, extension-owned WebSocket transport, and live `previous_response_id` continuation are no longer part of the current implementation.
@@ -34,7 +34,7 @@ The smoke contract covers:
 - persisted detail reconstruction and usage normalization;
 - ordinary payload history injection;
 - fixed checkpoint marker construction and one-request success path;
-- remote failure and abort fallback semantics;
+- remote retry, final cancellation, and abort semantics;
 - removal of conflicting replay fields;
 - the requirement that this extension does not register a provider.
 

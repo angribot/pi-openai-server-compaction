@@ -27,7 +27,7 @@ model.api === "openai-responses"
 
 Provider name and endpoint hostname do not decide eligibility. `openai-codex-responses`, `azure-openai-responses`, and other APIs are outside the current scope.
 
-An eligible endpoint must still implement Responses compaction v2. If it rejects or cannot complete the remote request, Pi falls back to its local compaction behavior.
+An eligible endpoint must still implement Responses compaction v2. If it rejects or cannot complete the remote request after bounded retries, the extension cancels compaction rather than invoking Pi's text compactor.
 
 ## High-level flow
 
@@ -54,7 +54,7 @@ The extension does not add `store`, `context_management`, or `previous_response_
 7. On remote success, Pi persists:
    - a fixed native replay checkpoint marker in `CompactionEntry.summary`;
    - `details.remoteCompaction` containing version, implementation, model key, replacement history, and optional usage.
-8. On remote failure, the handler returns `undefined` so Pi's default compaction path runs sequentially. An aborted request returns `{ cancel: true }`.
+8. Transient HTTP or stream failures retry the same v2 request at most twice. Fatal failures, exhausted retries, and aborted requests return `{ cancel: true }`, so Pi's text compactor never replaces native replay semantics.
 
 ### Ordinary turn after remote compaction
 
@@ -131,7 +131,7 @@ Runtime state is cleared or reconstructed across session start, switch, fork, tr
 Pi lifecycle orchestration:
 
 - gate on exact `openai-responses` API type;
-- run remote compaction and hand failures back to Pi's default path;
+- run remote compaction with bounded v2 stream retries and cancel on final failure;
 - persist remote details through Pi's compaction entry;
 - reconstruct state from the active branch;
 - inject replacement history in `before_provider_request`;
@@ -181,7 +181,7 @@ Pi owns compaction thresholds. A provider or transport extension owns transport 
 - Leave an ordinary payload untouched until a matching remote artifact exists.
 - Do not register or override providers.
 - Do not own WebSocket or `previous_response_id` state.
-- Return control to Pi's default compaction when the remote RPC fails.
+- Never fall back to Pi's text compactor after an eligible remote RPC fails.
 
 ## Testing boundary
 

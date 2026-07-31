@@ -17,7 +17,7 @@ Remote compaction is enabled by API type, not provider name:
 | `azure-openai-responses` | No |
 | Other APIs | No |
 
-Any provider can participate when its model uses `openai-responses` and its Responses endpoint supports the compaction protocol. Unsupported endpoints fall back to Pi's normal local compaction behavior. A remote failure is handled sequentially: the extension returns control to Pi instead of starting a second summary request.
+Any provider can participate when its model uses `openai-responses` and its Responses endpoint supports the compaction protocol. The extension retries transient remote failures twice, then cancels compaction instead of falling back to Pi's text compactor. This preserves native replay semantics and prevents an opaque checkpoint from being irreversibly replaced by a summary that cannot read it.
 
 ## Independent transport composition
 
@@ -55,7 +55,7 @@ The package maintains:
 - **Native replay history** — retained user items plus the opaque compaction item, for compatible future Responses requests.
 - **Checkpoint marker** — a fixed two-line `CompactionEntry.summary` explaining that detailed context is retained in the native artifact and requires a compatible Responses model.
 
-The marker is intentionally not a second model-generated summary. This keeps successful compaction to one remote request and follows Codex's native compaction behavior. Switching to an incompatible model may therefore lose access to detailed pre-compaction context. Pi's local session JSONL remains authoritative for the persisted artifact.
+The marker is intentionally not a second model-generated summary. A successful logical compaction may retry the same remote request after a transient transport or stream failure, but it never starts a separate summary request. Switching to an incompatible model may therefore lose access to detailed pre-compaction context. Pi's local session JSONL remains authoritative for the persisted artifact.
 
 ## Install
 
@@ -136,7 +136,7 @@ See:
 
 1. Run Pi with `--no-extensions` to bypass all extensions.
 2. Inspect session JSONL for `compaction.details.remoteCompaction`.
-3. If the endpoint rejects remote compaction, the extension returns control to Pi's default compaction path.
+3. If the endpoint rejects remote compaction or transient retries are exhausted, the extension cancels compaction and does not invoke Pi's text compactor.
 
 ## Repository layout
 

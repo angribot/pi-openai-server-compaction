@@ -74,6 +74,9 @@ export const REMOTE_COMPACTION_CHECKPOINT_SUMMARY =
   "[Remote Responses compaction checkpoint]\n\n" +
   "Detailed context before this checkpoint is retained in the native replay artifact and is available only to compatible Responses models.";
 const RETAINED_MESSAGE_TOKEN_BUDGET = 64_000;
+const MAX_REMOTE_COMPACTION_V2_STREAM_RETRIES = 2;
+const REMOTE_COMPACTION_STREAM_IDLE_TIMEOUT_MS = 300_000;
+const REMOTE_COMPACTION_RETRY_BASE_DELAY_MS = 200;
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 export type RemoteCompactionDetails = {
@@ -96,6 +99,25 @@ export type RemoteCompactionResult = {
   output: ResponseItem[];
   usage?: RemoteCompactionUsageSnapshot;
 };
+
+export type RemoteCompactionRetry = {
+  attempt: number;
+  maxRetries: number;
+  delayMs: number;
+  error: Error;
+};
+
+class RemoteCompactionRequestError extends Error {
+  readonly retryable: boolean;
+  readonly retryDelayMs?: number;
+
+  constructor(message: string, retryable: boolean, retryDelayMs?: number) {
+    super(message);
+    this.name = "RemoteCompactionRequestError";
+    this.retryable = retryable;
+    this.retryDelayMs = retryDelayMs;
+  }
+}
 
 function normalizeBaseUrl(baseUrl: string | undefined, fallback: string): string {
   const trimmed = baseUrl?.trim();
@@ -745,24 +767,81 @@ type RemoteCompactionV2Events = {
   usage?: unknown;
 };
 
+type RemoteCompactionRequestParams = {
+  model: Model<any>;
+  apiKey?: string;
+  headers?: Record<string, string>;
+  sessionId?: string;
+  input: ResponseItem[];
+  instructions?: string;
+  tools: Record<string, unknown>[];
+  parallelToolCalls: boolean;
+  reasoning?: ResponsesReasoningConfig;
+  text?: ResponsesTextConfig;
+  signal?: AbortSignal;
+  onRetry?: (retry: RemoteCompactionRetry) => void;
+};
+
+function parseSseBlock(block: string): unknown[] {
+  const data = block
+    .split("\n")
+    .filter((line) => line.startsWith("data:"))
+    .map((line) => line.slice(5).trimStart())
+    .join("\n")
+    .trim();
+  if (!data || data === "[DONE]") return [];
+  try {
+    return [JSON.parse(data) as unknown];
+  } catch {
+    return [];
+  }
+}
+
+function normalizeSseNewlines(text: string): string {
+  return text.replace(/\r\n?/g, "\n");
+}
+
 function parseSseData(text: string): unknown[] {
-  return text
-    .replace(/\r\n/g, "\n")
+  return normalizeSseNewlines(text)
     .split("\n\n")
-    .flatMap((block) => {
-      const data = block
-        .split("\n")
-        .filter((line) => line.startsWith("data:"))
-        .map((line) => line.slice(5).trimStart())
-        .join("\n")
-        .trim();
-      if (!data || data === "[DONE]") return [];
-      try {
-        return [JSON.parse(data) as unknown];
-      } catch {
-        return [];
-      }
-    });
+    .flatMap(parseSseBlock);
+}
+
+function parseRetryDelayMs(code: unknown, message: unknown): number | undefined {
+  if (code !== "rate_limit_exceeded" || typeof message !== "string") return undefined;
+  const match = /try again in\s*(\d+(?:\.\d+)?)\s*(ms|s|seconds?)/i.exec(message);
+  if (!match) return undefined;
+  const value = Number.parseFloat(match[1]);
+  if (!Number.isFinite(value) || value < 0) return undefined;
+  return match[2].toLowerCase() === "ms" ? value : value * 1_000;
+}
+
+const FATAL_REMOTE_COMPACTION_ERROR_CODES = new Set([
+  "bio_policy",
+  "context_length_exceeded",
+  "cyber_policy",
+  "insufficient_quota",
+  "invalid_prompt",
+  "server_is_overloaded",
+  "slow_down",
+  "usage_limit_reached",
+  "usage_not_included",
+]);
+
+function isRetryableApiErrorCode(code: unknown): boolean {
+  return typeof code !== "string" || !FATAL_REMOTE_COMPACTION_ERROR_CODES.has(code);
+}
+
+function responseFailedError(event: Record<string, unknown>): RemoteCompactionRequestError {
+  const response = isRecord(event.response) ? event.response : undefined;
+  const error = response && isRecord(response.error) ? response.error : undefined;
+  const code = error?.code;
+  const message = typeof error?.message === "string" ? error.message : "Response failed";
+  return new RemoteCompactionRequestError(
+    `OpenAI remote compaction v2 failed: ${message}`,
+    isRetryableApiErrorCode(code),
+    parseRetryDelayMs(code, message),
+  );
 }
 
 export function parseRemoteCompactionV2Events(events: unknown[]): RemoteCompactionV2Events {
@@ -774,13 +853,25 @@ export function parseRemoteCompactionV2Events(events: unknown[]): RemoteCompacti
     if (!isRecord(event)) continue;
     if (event.type === "error") {
       const message = typeof event.message === "string" ? event.message : "Unknown Responses API error";
-      throw new Error(`OpenAI remote compaction v2 failed: ${message}`);
+      throw new RemoteCompactionRequestError(
+        `OpenAI remote compaction v2 failed: ${message}`,
+        isRetryableApiErrorCode(event.code),
+        parseRetryDelayMs(event.code, message),
+      );
     }
     if (event.type === "response.failed") {
+      throw responseFailedError(event);
+    }
+    if (event.type === "response.incomplete") {
       const response = isRecord(event.response) ? event.response : undefined;
-      const error = response && isRecord(response.error) ? response.error : undefined;
-      const message = typeof error?.message === "string" ? error.message : "Response failed";
-      throw new Error(`OpenAI remote compaction v2 failed: ${message}`);
+      const details = response && isRecord(response.incomplete_details)
+        ? response.incomplete_details
+        : undefined;
+      const reason = typeof details?.reason === "string" ? details.reason : "unknown";
+      throw new RemoteCompactionRequestError(
+        `OpenAI remote compaction v2 returned an incomplete response: ${reason}`,
+        true,
+      );
     }
     if (
       event.type === "response.output_item.done" &&
@@ -788,7 +879,10 @@ export function parseRemoteCompactionV2Events(events: unknown[]): RemoteCompacti
       event.item.type === "compaction"
     ) {
       if (!isCompactionItem(event.item)) {
-        throw new Error("OpenAI remote compaction v2 returned an invalid compaction item.");
+        throw new RemoteCompactionRequestError(
+          "OpenAI remote compaction v2 returned an invalid compaction item.",
+          false,
+        );
       }
       compactionItems.push(event.item);
       continue;
@@ -801,61 +895,275 @@ export function parseRemoteCompactionV2Events(events: unknown[]): RemoteCompacti
   }
 
   if (!completed) {
-    throw new Error("OpenAI remote compaction v2 stream ended before response.completed.");
+    throw new RemoteCompactionRequestError(
+      "OpenAI remote compaction v2 stream ended before response.completed.",
+      true,
+    );
   }
   if (compactionItems.length !== 1) {
-    throw new Error(
+    throw new RemoteCompactionRequestError(
       `OpenAI remote compaction v2 expected exactly one compaction item, got ${compactionItems.length}.`,
+      false,
     );
   }
   return { compactionItem: compactionItems[0], usage };
 }
 
-export async function callRemoteCompactionEndpoint(params: {
-  model: Model<any>;
-  apiKey?: string;
-  headers?: Record<string, string>;
-  sessionId?: string;
-  input: ResponseItem[];
-  instructions?: string;
-  tools: Record<string, unknown>[];
-  parallelToolCalls: boolean;
-  reasoning?: ResponsesReasoningConfig;
-  text?: ResponsesTextConfig;
-  signal?: AbortSignal;
-}): Promise<RemoteCompactionResult> {
-  const response = await fetch(remoteCompactionV2EndpointUrl(params.model), {
-    method: "POST",
-    headers: buildRemoteCompactionHeaders({
-      model: params.model,
-      apiKey: params.apiKey,
-      headers: params.headers,
-      sessionId: params.sessionId,
-    }),
-    body: JSON.stringify(buildRemoteCompactionRequestBody({
-      model: params.model,
-      input: params.input,
-      instructions: params.instructions,
-      tools: params.tools,
-      parallelToolCalls: params.parallelToolCalls,
-      reasoning: params.reasoning,
-      text: params.text,
-      sessionId: params.sessionId,
-    })),
-    signal: params.signal,
-  });
+function abortError(): Error {
+  return new DOMException("This operation was aborted", "AbortError");
+}
 
-  if (!response.ok) {
-    const text = await response.text().catch(() => "");
-    throw new Error(`OpenAI remote compaction v2 failed (${response.status}): ${text || response.statusText}`);
+function throwIfAborted(signal: AbortSignal | undefined): void {
+  if (signal?.aborted) throw signal.reason instanceof Error ? signal.reason : abortError();
+}
+
+async function abortableDelay(delayMs: number, signal: AbortSignal | undefined): Promise<void> {
+  throwIfAborted(signal);
+  await new Promise<void>((resolve, reject) => {
+    let settled = false;
+    const finish = (callback: () => void) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      signal?.removeEventListener("abort", onAbort);
+      callback();
+    };
+    const onAbort = () => finish(() => {
+      reject(signal?.reason instanceof Error ? signal.reason : abortError());
+    });
+    const timer = setTimeout(() => finish(resolve), delayMs);
+    signal?.addEventListener("abort", onAbort, { once: true });
+    if (signal?.aborted) onAbort();
+  });
+}
+
+function retryBackoffMs(retry: number): number {
+  const base = REMOTE_COMPACTION_RETRY_BASE_DELAY_MS * 2 ** Math.max(0, retry - 1);
+  const jitter = 0.9 + Math.random() * 0.2;
+  return Math.floor(base * jitter);
+}
+
+function asRemoteCompactionError(
+  error: unknown,
+  signal: AbortSignal | undefined,
+): RemoteCompactionRequestError {
+  if (signal?.aborted) throw signal.reason instanceof Error ? signal.reason : abortError();
+  if (error instanceof RemoteCompactionRequestError) return error;
+  if (error instanceof Error && error.name === "AbortError") throw error;
+  const message = error instanceof Error ? error.message : String(error);
+  return new RemoteCompactionRequestError(`OpenAI remote compaction v2 failed: ${message}`, true);
+}
+
+function parseHttpErrorCode(text: string): string | undefined {
+  try {
+    const parsed = JSON.parse(text) as unknown;
+    if (!isRecord(parsed) || !isRecord(parsed.error)) return undefined;
+    return typeof parsed.error.code === "string" ? parsed.error.code : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function isRetryableHttpFailure(status: number, text: string): boolean {
+  if (status === 400 || status === 429) return false;
+  return isRetryableApiErrorCode(parseHttpErrorCode(text));
+}
+
+function isTerminalResponseEvent(value: unknown): boolean {
+  return isRecord(value) && (
+    value.type === "error" ||
+    value.type === "response.completed" ||
+    value.type === "response.failed" ||
+    value.type === "response.incomplete"
+  );
+}
+
+async function readStreamChunk(
+  reader: ReadableStreamDefaultReader<Uint8Array>,
+  signal: AbortSignal | undefined,
+): Promise<ReadableStreamReadResult<Uint8Array>> {
+  throwIfAborted(signal);
+  return await new Promise((resolve, reject) => {
+    let settled = false;
+    const finish = (callback: () => void) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(idleTimer);
+      signal?.removeEventListener("abort", onAbort);
+      callback();
+    };
+    const onAbort = () => {
+      void reader.cancel().catch(() => {});
+      finish(() => reject(signal?.reason instanceof Error ? signal.reason : abortError()));
+    };
+    const idleTimer = setTimeout(() => {
+      void reader.cancel().catch(() => {});
+      finish(() => reject(new RemoteCompactionRequestError(
+        "OpenAI remote compaction v2 stream idle timeout.",
+        true,
+      )));
+    }, REMOTE_COMPACTION_STREAM_IDLE_TIMEOUT_MS);
+    signal?.addEventListener("abort", onAbort, { once: true });
+    if (signal?.aborted) {
+      onAbort();
+      return;
+    }
+    reader.read().then(
+      (chunk) => finish(() => resolve(chunk)),
+      (error) => finish(() => reject(error)),
+    );
+  });
+}
+
+async function readResponseText(
+  response: Response,
+  signal: AbortSignal | undefined,
+): Promise<string> {
+  if (!response.body) return "";
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let text = "";
+  try {
+    while (true) {
+      const chunk = await readStreamChunk(reader, signal);
+      if (chunk.done) break;
+      text += decoder.decode(chunk.value, { stream: true });
+    }
+    return text + decoder.decode();
+  } finally {
+    reader.releaseLock();
+  }
+}
+
+async function readRemoteCompactionEvents(
+  response: Response,
+  signal: AbortSignal | undefined,
+): Promise<unknown[]> {
+  if (!response.body) {
+    throw new RemoteCompactionRequestError("OpenAI remote compaction v2 returned an empty stream.", true);
   }
 
-  const responseText = await response.text();
-  const parsed = parseRemoteCompactionV2Events(parseSseData(responseText));
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  const events: unknown[] = [];
+  let buffer = "";
+  let skipLeadingLineFeed = false;
+
+  const appendDecoded = (decoded: string, final = false) => {
+    if (skipLeadingLineFeed && (decoded.length > 0 || final)) {
+      if (decoded.startsWith("\n")) decoded = decoded.slice(1);
+      skipLeadingLineFeed = false;
+    }
+    const endedWithCarriageReturn = !final && decoded.endsWith("\r");
+    if (endedWithCarriageReturn) {
+      decoded = decoded.slice(0, -1);
+      skipLeadingLineFeed = true;
+    }
+    buffer += normalizeSseNewlines(decoded);
+    if (endedWithCarriageReturn) buffer += "\n";
+  };
+
+  try {
+    while (true) {
+      const chunk = await readStreamChunk(reader, signal);
+      if (chunk.done) break;
+
+      appendDecoded(decoder.decode(chunk.value, { stream: true }));
+      let boundary = buffer.indexOf("\n\n");
+      while (boundary >= 0) {
+        const parsed = parseSseBlock(buffer.slice(0, boundary));
+        events.push(...parsed);
+        buffer = buffer.slice(boundary + 2);
+        if (parsed.some(isTerminalResponseEvent)) {
+          await reader.cancel().catch(() => {});
+          return events;
+        }
+        boundary = buffer.indexOf("\n\n");
+      }
+    }
+    appendDecoded(decoder.decode(), true);
+    events.push(...parseSseData(buffer));
+    return events;
+  } finally {
+    reader.releaseLock();
+  }
+}
+
+async function callRemoteCompactionAttempt(
+  params: RemoteCompactionRequestParams,
+): Promise<RemoteCompactionResult> {
+  throwIfAborted(params.signal);
+  let response: Response;
+  try {
+    response = await fetch(remoteCompactionV2EndpointUrl(params.model), {
+      method: "POST",
+      headers: buildRemoteCompactionHeaders({
+        model: params.model,
+        apiKey: params.apiKey,
+        headers: params.headers,
+        sessionId: params.sessionId,
+      }),
+      body: JSON.stringify(buildRemoteCompactionRequestBody({
+        model: params.model,
+        input: params.input,
+        instructions: params.instructions,
+        tools: params.tools,
+        parallelToolCalls: params.parallelToolCalls,
+        reasoning: params.reasoning,
+        text: params.text,
+        sessionId: params.sessionId,
+      })),
+      signal: params.signal,
+    });
+  } catch (error) {
+    throw asRemoteCompactionError(error, params.signal);
+  }
+
+  if (!response.ok) {
+    let text = "";
+    try {
+      text = await readResponseText(response, params.signal);
+    } catch (error) {
+      throw asRemoteCompactionError(error, params.signal);
+    }
+    throw new RemoteCompactionRequestError(
+      `OpenAI remote compaction v2 failed (${response.status}): ${text || response.statusText}`,
+      isRetryableHttpFailure(response.status, text),
+    );
+  }
+
+  const parsed = parseRemoteCompactionV2Events(
+    await readRemoteCompactionEvents(response, params.signal),
+  );
   return {
     output: buildRemoteCompactionV2History(params.input, parsed.compactionItem),
     usage: extractRemoteCompactionUsage(params.model, parsed.usage),
   };
+}
+
+export async function callRemoteCompactionEndpoint(
+  params: RemoteCompactionRequestParams,
+): Promise<RemoteCompactionResult> {
+  let retries = 0;
+  while (true) {
+    try {
+      return await callRemoteCompactionAttempt(params);
+    } catch (error) {
+      const remoteError = asRemoteCompactionError(error, params.signal);
+      if (!remoteError.retryable || retries >= MAX_REMOTE_COMPACTION_V2_STREAM_RETRIES) {
+        throw remoteError;
+      }
+      retries += 1;
+      const delayMs = remoteError.retryDelayMs ?? retryBackoffMs(retries);
+      params.onRetry?.({
+        attempt: retries,
+        maxRetries: MAX_REMOTE_COMPACTION_V2_STREAM_RETRIES,
+        delayMs,
+        error: remoteError,
+      });
+      await abortableDelay(delayMs, params.signal);
+    }
+  }
 }
 
 export function buildRemoteCompactionDetails(
