@@ -95,7 +95,6 @@ const { default: extensionFactory } = await import(pathToFileURL(join(repoRoot, 
 assert.equal(typeof extensionFactory, "function", "extension entrypoint should export a function");
 
 const {
-  buildCodexWebSocketHeaders,
   buildRemoteCompactionHeaders,
   buildRemoteCompactionDetails,
   buildRemoteCompactionRequestBody,
@@ -108,12 +107,13 @@ const {
   remoteCompactionV2EndpointUrl,
 } = await import(pathToFileURL(join(repoRoot, "src", "remote-compaction.ts")).href);
 const {
-  selectInputItemsForContinuation,
-} = await import(pathToFileURL(join(repoRoot, "src", "openai-ws-stream.ts")).href);
-const {
-  isDirectOpenAIResponsesModel,
-  isOpenAIResponsesProviderModel,
+  modelKey,
+  supportsRemoteCompactionModel,
 } = await import(pathToFileURL(join(repoRoot, "src", "openai.ts")).href);
+const {
+  clearAllRuntimeState,
+  setRemoteCompactionState,
+} = await import(pathToFileURL(join(repoRoot, "src", "state.ts")).href);
 
 const targetModelKey = "openai:openai-responses:gpt-5.4-nano";
 const reconstructed = reconstructRemoteCompactionStateFromBranch({
@@ -231,23 +231,37 @@ assert.equal(
   "https://api.openai.com/v1/responses",
 );
 const proxyResponsesModel = {
-  provider: "openai",
+  provider: "example-provider",
   api: "openai-responses",
+  id: "gpt-5.4-nano",
   baseUrl: "https://proxy.example.com/v1",
 };
-assert.equal(isOpenAIResponsesProviderModel(proxyResponsesModel), true);
-assert.equal(isDirectOpenAIResponsesModel(proxyResponsesModel), false);
+assert.equal(supportsRemoteCompactionModel(proxyResponsesModel), true);
 assert.equal(
   remoteCompactionV2EndpointUrl(proxyResponsesModel),
   "https://proxy.example.com/v1/responses",
 );
 assert.equal(
   remoteCompactionV2EndpointUrl({
+    ...proxyResponsesModel,
+    baseUrl: "https://proxy.example.com/gateway",
+  }),
+  "https://proxy.example.com/gateway/responses",
+);
+assert.equal(
+  supportsRemoteCompactionModel({
+    provider: "openai-codex",
+    api: "openai-codex-responses",
+  }),
+  false,
+);
+assert.throws(
+  () => remoteCompactionV2EndpointUrl({
     provider: "openai-codex",
     api: "openai-codex-responses",
     baseUrl: "https://chatgpt.com/backend-api",
   }),
-  "https://chatgpt.com/backend-api/codex/responses",
+  /requires an openai-responses model/,
 );
 
 const parsedV2Events = parseRemoteCompactionV2Events([
@@ -261,6 +275,33 @@ const parsedV2Events = parseRemoteCompactionV2Events([
   },
 ]);
 assert.equal(parsedV2Events.compactionItem.type, "compaction");
+assert.throws(
+  () => parseRemoteCompactionV2Events([
+    { type: "response.completed", response: {} },
+  ]),
+  /expected exactly one compaction item, got 0/,
+);
+assert.throws(
+  () => parseRemoteCompactionV2Events([
+    { type: "response.output_item.done", item: { type: "compaction" } },
+    { type: "response.completed", response: {} },
+  ]),
+  /invalid compaction item/,
+);
+assert.throws(
+  () => parseRemoteCompactionV2Events([
+    {
+      type: "response.output_item.done",
+      item: { type: "compaction", encrypted_content: "FIRST" },
+    },
+    {
+      type: "response.output_item.done",
+      item: { type: "compaction", encrypted_content: "SECOND" },
+    },
+    { type: "response.completed", response: {} },
+  ]),
+  /expected exactly one compaction item, got 2/,
+);
 const v2History = buildRemoteCompactionV2History(
   [
     { type: "message", role: "user", content: [{ type: "input_text", text: "retain user" }] },
@@ -311,7 +352,7 @@ assert.equal(compactedHistory[1].role, "assistant");
 
 const compactionHeaders = buildRemoteCompactionHeaders({
   model: {
-    provider: "openai",
+    provider: "example-provider",
     api: "openai-responses",
     id: "gpt-5.4-nano",
   },
@@ -327,10 +368,20 @@ assert.equal(compactionHeaders["x-extra"], "yes");
 assert.equal(compactionHeaders["x-codex-beta-features"], "remote_compaction_v2");
 assert.equal(compactionHeaders.accept, "text/event-stream");
 
-const websocketHeaders = buildCodexWebSocketHeaders("session-123");
-assert.equal(websocketHeaders["x-client-request-id"], "session-123");
-assert.equal(websocketHeaders.session_id, "session-123");
-assert.equal(websocketHeaders["x-codex-window-id"], "session-123:0");
+const headerAuthenticatedCompactionHeaders = buildRemoteCompactionHeaders({
+  model: proxyResponsesModel,
+  headers: { Authorization: "Custom credential" },
+});
+assert.equal(headerAuthenticatedCompactionHeaders.Authorization, "Custom credential");
+assert.equal("authorization" in headerAuthenticatedCompactionHeaders, false);
+
+const configuredAuthorizationHeaders = buildRemoteCompactionHeaders({
+  model: proxyResponsesModel,
+  apiKey: "ignored-api-key",
+  headers: { Authorization: "Custom credential" },
+});
+assert.equal(configuredAuthorizationHeaders.Authorization, "Custom credential");
+assert.equal("authorization" in configuredAuthorizationHeaders, false);
 
 const detailsRoundTrip = extractRemoteCompactionDetails({
   remoteCompaction: buildRemoteCompactionDetails(
@@ -354,35 +405,144 @@ assert.ok(detailsRoundTrip, "expected remote compaction details round trip");
 assert.equal(detailsRoundTrip.usage?.cacheWrite, 40);
 assert.equal(detailsRoundTrip.usage?.cost.total, 10);
 
-const incrementalInput = selectInputItemsForContinuation({
-  context: {
-    messages: [
-      {
-        role: "user",
-        content: [{ type: "text", text: "old user" }],
-      },
-      {
-        role: "assistant",
-        content: [{ type: "text", text: "old assistant" }],
-      },
-      {
-        role: "user",
-        content: [{ type: "text", text: "new user" }],
-      },
-    ],
+const handlers = new Map();
+const fakePi = {
+  registerProvider() {
+    assert.fail("remote compaction must not register or override providers");
   },
-  model: { input: ["text"] },
-  session: { lastContextLength: 2 },
-  currentModelKey: targetModelKey,
-  remoteCompactionState: undefined,
-  previousResponseId: "resp_123",
+  on(name, handler) {
+    handlers.set(name, handler);
+  },
+  getAllTools() {
+    return [];
+  },
+  getActiveTools() {
+    return [];
+  },
+  getThinkingLevel() {
+    return undefined;
+  },
+};
+extensionFactory(fakePi);
+
+const beforeProviderRequest = handlers.get("before_provider_request");
+assert.equal(typeof beforeProviderRequest, "function");
+const sessionId = "provider-agnostic-session";
+const injectedHistory = [
+  { type: "message", role: "user", content: [{ type: "input_text", text: "retained" }] },
+  { type: "compaction", encrypted_content: "OPAQUE" },
+];
+setRemoteCompactionState(sessionId, {
+  compactionEntryId: "cmp-provider-agnostic",
+  modelKey: modelKey(proxyResponsesModel),
+  replacementHistory: injectedHistory,
+  explicitHistory: injectedHistory,
 });
-assert.deepEqual(incrementalInput, [
-  {
-    type: "message",
-    role: "user",
-    content: "new user",
+const requestContext = {
+  cwd: repoRoot,
+  model: proxyResponsesModel,
+  hasUI: false,
+  ui: { notify() {} },
+  sessionManager: {
+    getSessionId() {
+      return sessionId;
+    },
   },
-]);
+};
+const patchedPayload = beforeProviderRequest(
+  {
+    payload: {
+      model: proxyResponsesModel.id,
+      input: [{ type: "message", role: "user", content: "stale full history" }],
+      messages: ["legacy"],
+      previous_response_id: "resp_stale",
+    },
+  },
+  requestContext,
+);
+assert.deepEqual(patchedPayload.input, injectedHistory);
+assert.equal("messages" in patchedPayload, false);
+assert.equal("previous_response_id" in patchedPayload, false);
+
+const untouchedCodexPayload = beforeProviderRequest(
+  { payload: { model: "gpt-5.4-nano", input: [] } },
+  {
+    ...requestContext,
+    model: {
+      provider: "openai-codex",
+      api: "openai-codex-responses",
+      id: "gpt-5.4-nano",
+    },
+  },
+);
+assert.equal(untouchedCodexPayload, undefined);
+
+const sessionBeforeCompact = handlers.get("session_before_compact");
+assert.equal(typeof sessionBeforeCompact, "function");
+const requestBodies = [];
+const originalFetch = globalThis.fetch;
+try {
+  globalThis.fetch = async (input, init) => {
+    const body = typeof init?.body === "string"
+      ? init.body
+      : input instanceof Request
+        ? await input.clone().text()
+        : "";
+    requestBodies.push(body);
+    return new Response(JSON.stringify({ error: { message: "controlled failure" } }), {
+      status: 400,
+      headers: { "content-type": "application/json" },
+    });
+  };
+
+  const message = {
+    role: "user",
+    content: [{ type: "text", text: "retain this context" }],
+    timestamp: Date.now(),
+  };
+  const fallbackResult = await sessionBeforeCompact(
+    {
+      preparation: {
+        firstKeptEntryId: "keep-after-fallback",
+        messagesToSummarize: [message],
+        turnPrefixMessages: [],
+        isSplitTurn: false,
+        tokensBefore: 100,
+        fileOps: { read: new Set(), written: new Set(), edited: new Set() },
+        settings: { enabled: true, reserveTokens: 1000, keepRecentTokens: 100 },
+      },
+      branchEntries: [{ type: "message", id: "message-1", message }],
+      reason: "manual",
+      willRetry: false,
+      signal: new AbortController().signal,
+    },
+    {
+      ...requestContext,
+      model: {
+        ...proxyResponsesModel,
+        name: "Header-authenticated proxy",
+        reasoning: false,
+        input: ["text"],
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+        contextWindow: 100_000,
+        maxTokens: 4096,
+      },
+      modelRegistry: {
+        async getApiKeyAndHeaders() {
+          return { ok: true, headers: { Authorization: "Custom credential" } };
+        },
+      },
+      getSystemPrompt() {
+        return "system prompt";
+      },
+    },
+  );
+  assert.ok(requestBodies.some((body) => body.includes("compaction_trigger")));
+  assert.equal(fallbackResult?.compaction?.details?.remoteCompaction, undefined);
+} finally {
+  globalThis.fetch = originalFetch;
+}
+
+clearAllRuntimeState();
 
 console.log("smoke ok");

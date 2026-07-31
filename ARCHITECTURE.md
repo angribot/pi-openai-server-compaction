@@ -1,239 +1,225 @@
 # Architecture
 
-This document is a compact map of how the extension works.
+This document describes the current compaction-only architecture after removing provider override, WebSocket, and live `previous_response_id` ownership from this extension.
 
-It is written for both human readers and code-reading agents that need to answer questions like:
+## Design goals
 
-- where is provider payload patching done?
-- where is remote compaction called?
-- where is state persisted vs cached?
-- how do normal turns differ from post-compaction turns?
+The extension has one responsibility: add remote Responses compaction and replay to models whose API is exactly `openai-responses`.
 
-## Design goal
+It must remain:
 
-The package adds **OpenAI-native continuity** to Pi for supported OpenAI-compatible Responses models while still preserving Pi's normal local session semantics.
+- **provider-agnostic** — eligibility is based on `model.api`, not a provider name;
+- **ordinary-request transport-neutral** — it rewrites a completed provider payload but does not register a provider or select its transport;
+- **session-portable** — Pi keeps a readable text summary and authoritative JSONL history alongside the opaque artifact;
+- **independently loadable** — remote compaction continues to work without a separate transport extension.
 
-In practice, that means keeping two representations of context alive at once:
+The current Pi API does not provide a provider-aware raw transport seam for the compaction RPC itself. That request therefore remains HTTP/SSE; the known gap is tracked in [`TODO.md`](TODO.md).
 
-1. **Portable Pi representation**
-   - normal Pi session JSONL entries
-   - a readable text compaction summary
-   - used for Pi features like resume, branch/tree operations, model switching, and non-OpenAI replay
+## Eligibility
 
-2. **OpenAI-native representation**
-   - for direct `openai/*`: `previous_response_id` for live continuation when safe
-   - for supported backends: opaque replacement history returned by Responses compaction v2
-   - used only for compatible future OpenAI/OpenAI Codex turns
+Remote compaction is enabled only when:
+
+```ts
+model.api === "openai-responses"
+```
+
+Provider name and endpoint hostname do not decide eligibility. `openai-codex-responses`, `azure-openai-responses`, and other APIs are outside the current scope.
+
+An eligible endpoint must still implement Responses compaction v2. If it rejects or cannot complete the remote request, Pi falls back to its local compaction behavior.
 
 ## High-level flow
 
-### Normal supported turn
+### Ordinary turn before any remote compaction
 
-1. Pi prepares a provider request.
-2. `src/index.ts` handles `before_provider_request`.
-3. For direct `openai/*`, `src/openai.ts` patches the payload with:
-   - `store: true`
-   - `context_management`
-   - maybe `previous_response_id`
-4. For direct `openai/*`, the registered provider override in `src/custom-stream.ts` chooses the custom WS-backed stream.
-5. `src/openai-ws-stream.ts` either:
-   - sends the request over the OpenAI Responses WebSocket transport, or
-   - falls back to Pi's default HTTP Responses streaming path.
-6. For `openai-codex/*`, the extension mostly leaves the built-in Codex provider transport alone and only injects reconstructed remote-compaction history when needed.
-7. When a compatible assistant message completes, `src/index.ts` records the new `responseId` as continuation state only for the backends that support `previous_response_id`.
+1. Pi builds the provider request.
+2. `src/index.ts` observes `before_provider_request` for eligible Responses models.
+3. The extension records the current `reasoning` and `text` request shape for a later compaction request.
+4. With no active remote artifact, it returns no payload change.
+5. Pi's provider implementation sends the request through its independently selected transport.
+
+The extension does not add `store`, `context_management`, or `previous_response_id`.
 
 ### Compaction turn
 
-1. Pi decides to compact or receives an explicit compact command.
-2. `src/index.ts` handles `session_before_compact`.
-3. In parallel, it tries to:
-   - generate a **portable local summary**
-   - request Responses compaction v2
-4. `src/remote-compaction.ts` converts Pi messages to OpenAI Responses `input` items, appends a `compaction_trigger`, and streams the compaction response from the normal Responses endpoint.
-5. If remote compaction succeeds, the returned opaque replacement history is stored in:
-   - `CompactionEntry.details.remoteCompaction`
-6. Pi still keeps a text summary so the session remains understandable and portable.
+1. Pi emits `session_before_compact`.
+2. `src/index.ts` verifies that the extension is enabled and the active model uses `openai-responses`.
+3. It resolves authentication through Pi's model registry.
+4. It chooses the explicit Responses history:
+   - reconstructed remote history when the session was compacted before;
+   - otherwise the current Pi branch converted to Responses items.
+5. It starts two independent operations in parallel:
+   - a portable local text summary;
+   - a Responses compaction v2 request.
+6. `src/remote-compaction.ts` sends a normal Responses request with a trailing `compaction_trigger` directly over HTTP/SSE.
+7. The parser requires one completed response and exactly one opaque `compaction` item.
+8. On remote success, Pi persists:
+   - the readable local summary;
+   - `details.remoteCompaction` containing version, implementation, model key, replacement history, and optional usage.
+9. On remote failure:
+   - a successful local summary is returned by itself;
+   - otherwise Pi's default compaction path remains available.
 
-### Post-compaction continuation
+### Ordinary turn after remote compaction
 
-For later direct OpenAI Responses turns, the extension prefers:
+1. Session lifecycle reconstruction places the latest compatible remote artifact in runtime state.
+2. Pi builds an ordinary `openai-responses` payload.
+3. `before_provider_request` replaces its `input` with normalized explicit remote history.
+4. The patch removes conflicting legacy `messages` and `previous_response_id` fields.
+5. Pi's selected provider transport sends the final ordinary request.
+6. Compatible completed messages are converted to Responses items and appended to runtime explicit history.
 
-- the persisted/reconstructed remote replacement history, when model-compatible
-- otherwise safe live continuation using `previous_response_id`
-- otherwise ordinary full-input replay / Pi fallback behavior
+This payload seam is how ordinary post-compaction requests compose with an independent provider transport without either extension importing the other.
 
-## Persisted state vs runtime state
+## Current transport boundary
 
-### Persisted in Pi session history
+There are two distinct paths:
 
-Persisted state lives in the session JSONL file and survives reloads:
+```text
+Remote compaction RPC
+  session_before_compact
+    -> callRemoteCompactionEndpoint
+    -> global fetch
+    -> HTTP/SSE
 
-- normal Pi `message` entries
-- Pi `compaction` entries
-- `compaction.details.remoteCompaction`
+Ordinary post-compaction request
+  Pi provider request construction
+    -> before_provider_request history replacement
+    -> selected provider transport
+```
 
-The persisted `remoteCompaction` payload is the important bridge to Codex-style behavior. Version 2 contains retained user messages plus the opaque `compaction` item returned by Responses compaction v2. Version 1 entries from the legacy `/responses/compact` implementation remain readable for session compatibility.
+The second path is transport-neutral. The first is not currently interceptable by another extension because Pi exposes payload/header hooks but no public raw request transport middleware that carries provider, model, session, and operation metadata while preserving the unconsumed Responses event stream.
 
-### Runtime-only state
+Unsafe workarounds such as global fetch monkey-patching, URL-based provider inference, or a private cross-extension registry are intentionally rejected. See [`TODO.md`](TODO.md).
 
-Runtime-only state lives in memory and is rebuilt when needed:
+## Persisted state
 
-- latest safe `responseId` for incremental continuation
-- reconstructed remote compaction replay state for the active session
-- active WebSocket session manager(s)
+Pi session JSONL is authoritative. The extension persists no separate database.
 
-This state is managed by:
+A successful v2 compaction stores:
 
-- `src/state.ts`
-- `src/openai-ws-stream.ts`
-- `src/index.ts`
+```text
+CompactionEntry.details.remoteCompaction
+  version: 2
+  provider: openai-responses-compaction
+  implementation: responses_compaction_v2
+  modelKey: provider:api:model
+  replacementHistory: retained explicit items + opaque compaction item
+  usage: optional normalized usage snapshot
+```
 
-## Key modules
+Version 1 legacy artifacts remain readable for session compatibility.
+
+The portable text summary remains important for:
+
+- readable and exportable session history;
+- tree and fork semantics;
+- switching to an incompatible model;
+- fallback when a provider cannot consume the opaque artifact.
+
+## Runtime state
+
+`src/state.ts` keeps only ephemeral per-session caches:
+
+- reconstructed remote compaction state;
+- the latest observed Responses `reasoning` and `text` request shape.
+
+It does not keep:
+
+- WebSocket connections;
+- provider registrations;
+- response continuation IDs;
+- transport fallback state.
+
+Runtime state is cleared or reconstructed across session start, switch, fork, tree navigation, compaction, model selection, and shutdown as appropriate.
+
+## Module responsibilities
 
 ### `src/index.ts`
 
-The orchestration layer.
+Pi lifecycle orchestration:
 
-Responsibilities:
-- register the custom provider override
-- patch outgoing provider payloads
-- hook into Pi compaction lifecycle
-- merge local and remote compaction results
-- reconstruct remote state on session start/tree/compaction
-- clear ephemeral state on switch/fork/tree/model/shutdown
+- gate on exact `openai-responses` API type;
+- run local and remote compaction;
+- persist remote details through Pi's compaction entry;
+- reconstruct state from the active branch;
+- inject replacement history in `before_provider_request`;
+- extend compatible runtime history after completed messages;
+- clear ephemeral state on lifecycle boundaries.
 
-If you want to understand the extension as a whole, start here.
+It must not call `registerProvider`.
 
 ### `src/remote-compaction.ts`
 
-The Codex-style compaction layer.
+Responses compaction protocol implementation:
 
-Responsibilities:
-- convert Pi messages to OpenAI Responses-style input items
-- call `POST /v1/responses` with a trailing `compaction_trigger`
-- parse the Responses SSE stream and validate the returned `compaction` item
-- retain recent user messages using Codex's 20K-token budget shape
-- build portable text summaries
-- rebuild replayable remote state from persisted compaction entries
-
-This file is the core of the actual compaction-boundary behavior.
-
-### `src/openai-ws-stream.ts`
-
-The custom stream implementation.
-
-Responsibilities:
-- decide between WS path and HTTP fallback
-- reuse a live WebSocket session when safe
-- send incremental post-turn deltas for direct OpenAI continuation when request shape is unchanged
-- replay remote compaction history when available
-- translate OpenAI WS events into Pi assistant stream events/messages
-- compute usage/cost information for the WS path
-
-### `src/openai-ws-connection.ts`
-
-A thin OpenAI Responses WebSocket client.
-
-Responsibilities:
-- connect/authenticate
-- emit parsed events
-- remember latest completed `response.id`
-- reconnect defensively
+- convert Pi messages and tool data to Responses items;
+- normalize explicit history for prompt replay;
+- build endpoint URLs, headers, and request bodies;
+- send and parse the HTTP/SSE compaction request;
+- validate the opaque artifact;
+- retain recent user items under the compaction replay budget;
+- normalize usage and cost;
+- reconstruct v1 and v2 persisted artifacts;
+- generate or fall back to a portable text summary.
 
 ### `src/openai.ts`
 
-Shared provider-specific helpers.
+Small API and payload helpers:
 
-Responsibilities:
-- identify direct OpenAI vs Azure OpenAI vs OpenAI Codex models
-- build stable model keys
-- patch Responses payloads
-- extract assistant `responseId`
-
-### `src/config.ts`
-
-Loads and normalizes configuration from:
-
-- `~/.pi/agent/openai-server-compaction.json`
-- `.pi/openai-server-compaction.json`
-- environment variables
+- exact `openai-responses` gating;
+- stable model keys;
+- Responses payload shape checks;
+- reasoning/text extraction;
+- replacement-history payload patching;
+- model compatibility checks for completed messages.
 
 ### `src/state.ts`
 
-Stores ephemeral per-session runtime state only.
+In-memory remote-history and request-shape caches only.
 
-It does **not** persist remote compaction artifacts itself. Those live in Pi session entries.
+### `src/config.ts`
 
-### `src/custom-stream.ts`
+Loads two user-facing settings:
 
-Small dispatch layer that enables the custom WS-backed stream only for direct OpenAI Responses models.
+- `enabled`;
+- `notify`.
 
-### `src/stream-message-shared.ts`
+Pi owns compaction thresholds. A provider or transport extension owns transport and continuation policy.
 
-Shared message constructors used by the stream path so generated assistant messages match what Pi expects.
+## Safety rules
 
-## Safety model
+- Never replay a remote artifact under a different model key.
+- Never extend remote history with an assistant completion from a different provider/model.
+- Validate persisted artifacts before reconstructing them.
+- Require exactly one opaque compaction item from a completed remote response.
+- Preserve the portable local summary even when remote compaction succeeds.
+- Leave an ordinary payload untouched until a matching remote artifact exists.
+- Do not register or override providers.
+- Do not own WebSocket or `previous_response_id` state.
+- Fall back to local compaction when the remote RPC fails.
 
-The extension intentionally avoids reusing provider-native continuity blindly.
+## Testing boundary
 
-Important safety rules:
+Project-owned automated tests cover only this extension's core contract:
 
-- remote replacement history is only reused for compatible OpenAI/OpenAI Codex Responses models
-- in-memory remote history is only extended while the active model still matches the compaction model
-- reconstructed remote history only replays post-compaction turns whose assistant completions match the compaction model, avoiding cross-model pollution after resume/tree reload
-- live `previous_response_id` state is cleared on key session/model lifecycle boundaries
-- HTTP fallback remains available if the WS path is unavailable or unsafe
+- exact API gating;
+- endpoint, header, and request-body construction;
+- event parsing and artifact validation;
+- persisted-state reconstruction;
+- payload history injection;
+- lifecycle-safe history extension;
+- absence of provider registration.
 
-## Why both local summary and remote compaction exist
-
-A common question is: why not use only the OpenAI-native opaque artifact?
-
-Because Pi still needs local, explicit state for:
-
-- session tree and branch semantics
-- readable/exportable session history
-- reload/resume behavior that still makes sense outside one provider
-- switching away from OpenAI-compatible models
-
-So the package is intentionally hybrid:
-
-- **Pi summary for portability and Pi semantics**
-- **OpenAI opaque history for better continuity on compatible later turns**
-
-## Testing strategy
-
-### Runtime smoke
-
-- `npm run smoke`
-
-Verifies imports/loadability.
-
-### Live end-to-end test
-
-- `npm run test:live`
-
-Implemented in:
-- `tests/live/openai-compaction-rpc-live.ts`
-
-This is a black-box integration test that drives real `pi --mode rpc` sessions and validates:
-
-- same-session continuity after compaction
-- model switch away and back
-- fork after compaction
-- resume/reload after compaction
-
-### Controlled native-vs-text benchmark
-
-The reproducible benchmark, retained evidence, and standalone report live under:
-- `benchmarks/native-vs-text/`
+Cross-extension transport matrices and provider-specific experiments remain external, temporary validation rather than repository fixtures.
 
 ## Suggested reading order
 
-If you are new to the repo, read in this order:
-
 1. `README.md`
 2. `ARCHITECTURE.md`
-3. `src/index.ts`
-4. `src/remote-compaction.ts`
-5. `src/openai-ws-stream.ts`
-6. `tests/live/openai-compaction-rpc-live.ts`
+3. `TODO.md`
+4. `src/index.ts`
+5. `src/remote-compaction.ts`
+6. `src/openai.ts`
+7. `src/state.ts`
+8. `scripts/smoke.mjs`
+9. `tests/live/openai-compaction-rpc-live.ts`
