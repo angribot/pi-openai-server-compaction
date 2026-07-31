@@ -24,7 +24,7 @@ Cross-extension composition remains an external, ephemeral validation. A defect 
 6. Verify persisted artifacts reconstruct safe replacement history after lifecycle changes.
 7. Verify later compatible ordinary requests receive replacement history through `before_provider_request`.
 8. Verify incompatible APIs and models are left untouched.
-9. Verify remote failure preserves Pi's local compaction fallback.
+9. Verify remote failure returns control to Pi's default compaction fallback without starting a second summary request.
 
 ## Offline automated checks
 
@@ -49,6 +49,8 @@ Required smoke coverage:
 - usage and cost normalization round-trip through persisted details;
 - v1 and v2 persisted details reconstruct safely;
 - remote replacement history is injected into the final ordinary payload;
+- successful remote compaction stores the fixed native replay checkpoint marker;
+- successful remote compaction performs only one remote request;
 - conflicting `messages` and `previous_response_id` fields are removed during replay;
 - the extension does not call `registerProvider`.
 
@@ -75,10 +77,9 @@ Inspect the session JSONL and confirm:
 ### 3. Same-session continuation
 
 - Store a fact before compaction.
-- Ask the portable summary to omit that fact where the harness permits custom instructions.
 - Compact remotely.
 - Ask for the fact afterward.
-- Confirm the model can recover it from the opaque artifact.
+- Confirm the compatible model can recover it from the opaque artifact.
 
 ### 4. Repeated compaction
 
@@ -111,8 +112,8 @@ Use an eligible model whose endpoint does not implement compaction v2, or inject
 
 Confirm:
 
-- a successful local summary is still returned when available;
-- otherwise Pi's default compaction path remains available;
+- the extension returns control to Pi's default compaction path;
+- no second extension-owned summary request is started;
 - no invalid remote artifact is persisted.
 
 ## Credentialed live regression

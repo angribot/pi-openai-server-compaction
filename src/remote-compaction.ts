@@ -10,16 +10,9 @@ import { randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
-import type { SessionBeforeCompactEvent, ToolInfo } from "@earendil-works/pi-coding-agent";
-import type { AgentMessage, ThinkingLevel } from "@earendil-works/pi-agent-core";
-import {
-  compact,
-  convertToLlm,
-  serializeConversation,
-  type CompactionResult,
-} from "@earendil-works/pi-coding-agent";
+import type { ToolInfo } from "@earendil-works/pi-coding-agent";
+import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import { calculateCost, type Model, type Usage } from "@earendil-works/pi-ai";
-import { complete } from "@earendil-works/pi-ai/compat";
 import {
   hostnameFromBaseUrl,
   isRecord,
@@ -27,7 +20,6 @@ import {
   modelKey,
 } from "./openai.ts";
 
-type CompactionPreparation = SessionBeforeCompactEvent["preparation"];
 type AssistantPhase = "commentary" | "final_answer";
 type ToolResultOutputItem =
   | { type: "input_text"; text: string }
@@ -78,6 +70,9 @@ export type RemoteCompactionUsageSnapshot = Usage;
 
 const IMAGE_CONTENT_OMITTED_PLACEHOLDER = "image content omitted because you do not support image input";
 const REMOTE_COMPACTION_V2_FEATURE = "remote_compaction_v2";
+export const REMOTE_COMPACTION_CHECKPOINT_SUMMARY =
+  "[Remote Responses compaction checkpoint]\n\n" +
+  "Detailed context before this checkpoint is retained in the native replay artifact and is available only to compatible Responses models.";
 const RETAINED_MESSAGE_TOKEN_BUDGET = 20_000;
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
@@ -316,13 +311,6 @@ function isCompactionItem(value: unknown): value is ResponseItem {
     value.type === "compaction" &&
     typeof value.encrypted_content === "string" &&
     value.encrypted_content.length > 0;
-}
-
-function buildPortableSummaryPrompt(conversation: string, customInstructions?: string): string {
-  const instructionSuffix = customInstructions
-    ? `\n\nAdditional summarization instructions:\n${customInstructions}`
-    : "";
-  return `Summarize this conversation for future continuation in pi. Preserve goals, decisions, important facts, file paths, open questions, and next steps. Be concise but include information needed to continue work.${instructionSuffix}\n\n<conversation>\n${conversation}\n</conversation>`;
 }
 
 export function messageToResponseItems(message: AgentMessage): ResponseItem[] {
@@ -645,76 +633,6 @@ export function buildToolsPayload(
 ): Record<string, unknown>[] {
   const active = new Set(activeToolNames);
   return allTools.filter((tool) => active.has(tool.name)).map(toolInfoToResponseTool);
-}
-
-export async function generatePortableSummary(params: {
-  messages: AgentMessage[];
-  model: Model<any>;
-  apiKey?: string;
-  headers?: Record<string, string>;
-  customInstructions?: string;
-  signal?: AbortSignal;
-  firstKeptEntryId: string;
-  tokensBefore: number;
-}): Promise<CompactionResult> {
-  const conversation = serializeConversation(convertToLlm(params.messages));
-  const response = await complete(
-    params.model,
-    {
-      messages: [
-        {
-          role: "user",
-          content: [{ type: "text", text: buildPortableSummaryPrompt(conversation, params.customInstructions) }],
-          timestamp: Date.now(),
-        },
-      ],
-    },
-    {
-      apiKey: params.apiKey,
-      headers: params.headers,
-      maxTokens: 4096,
-      signal: params.signal,
-    },
-  );
-
-  const summary = response.content
-    .filter((item): item is { type: "text"; text: string } => item.type === "text")
-    .map((item) => item.text)
-    .join("\n")
-    .trim();
-
-  return {
-    summary: summary || buildCompactionSummaryText(params.model),
-    firstKeptEntryId: params.firstKeptEntryId,
-    tokensBefore: params.tokensBefore,
-  };
-}
-
-export async function generateBestEffortLocalSummary(params: {
-  preparation: CompactionPreparation;
-  messages: AgentMessage[];
-  model: Model<any>;
-  apiKey?: string;
-  headers?: Record<string, string>;
-  customInstructions?: string;
-  signal?: AbortSignal;
-  thinkingLevel?: ThinkingLevel;
-  firstKeptEntryId: string;
-  tokensBefore: number;
-}): Promise<CompactionResult> {
-  try {
-    return await generatePortableSummary(params);
-  } catch {
-    return await compact(
-      params.preparation,
-      params.model,
-      params.apiKey,
-      params.headers,
-      params.customInstructions,
-      params.signal,
-      params.thinkingLevel,
-    );
-  }
 }
 
 function extractCacheWriteTokens(value: unknown): number {
@@ -1042,9 +960,4 @@ export function reconstructRemoteCompactionStateFromBranch(params: {
     replacementHistory: latestDetails.replacementHistory,
     explicitHistory: [...latestDetails.replacementHistory, ...trailingMessages],
   };
-}
-
-export function buildCompactionSummaryText(model: Model<any>): string {
-  const host = hostnameFromBaseUrl(model.baseUrl) ?? "api.openai.com";
-  return `OpenAI remote compaction applied for ${model.provider}/${model.id} via ${host}. Pi keeps this textual summary for portability, while compatible future OpenAI turns can use provider-native replacement history stored in compaction details.`;
 }

@@ -105,6 +105,7 @@ const {
   processCompactedHistory,
   reconstructRemoteCompactionStateFromBranch,
   remoteCompactionV2EndpointUrl,
+  REMOTE_COMPACTION_CHECKPOINT_SUMMARY,
 } = await import(pathToFileURL(join(repoRoot, "src", "remote-compaction.ts")).href);
 const {
   modelKey,
@@ -482,6 +483,7 @@ assert.equal(typeof sessionBeforeCompact, "function");
 const requestBodies = [];
 const originalFetch = globalThis.fetch;
 try {
+  let respondWithFailure = false;
   globalThis.fetch = async (input, init) => {
     const body = typeof init?.body === "string"
       ? init.body
@@ -489,9 +491,24 @@ try {
         ? await input.clone().text()
         : "";
     requestBodies.push(body);
-    return new Response(JSON.stringify({ error: { message: "controlled failure" } }), {
-      status: 400,
-      headers: { "content-type": "application/json" },
+    if (respondWithFailure) {
+      return new Response(JSON.stringify({ error: { message: "controlled failure" } }), {
+        status: 400,
+        headers: { "content-type": "application/json" },
+      });
+    }
+    return new Response([
+      `data: ${JSON.stringify({
+        type: "response.output_item.done",
+        item: { type: "compaction", encrypted_content: "SUCCESS_ENCRYPTED" },
+      })}\n\n`,
+      `data: ${JSON.stringify({
+        type: "response.completed",
+        response: { usage: { input_tokens: 10, output_tokens: 2, total_tokens: 12 } },
+      })}\n\n`,
+    ].join(""), {
+      status: 200,
+      headers: { "content-type": "text/event-stream" },
     });
   };
 
@@ -500,45 +517,89 @@ try {
     content: [{ type: "text", text: "retain this context" }],
     timestamp: Date.now(),
   };
-  const fallbackResult = await sessionBeforeCompact(
-    {
-      preparation: {
-        firstKeptEntryId: "keep-after-fallback",
-        messagesToSummarize: [message],
-        turnPrefixMessages: [],
-        isSplitTurn: false,
-        tokensBefore: 100,
-        fileOps: { read: new Set(), written: new Set(), edited: new Set() },
-        settings: { enabled: true, reserveTokens: 1000, keepRecentTokens: 100 },
-      },
-      branchEntries: [{ type: "message", id: "message-1", message }],
-      reason: "manual",
-      willRetry: false,
-      signal: new AbortController().signal,
+  const compactEvent = {
+    preparation: {
+      firstKeptEntryId: "keep-after-fallback",
+      messagesToSummarize: [message],
+      turnPrefixMessages: [],
+      isSplitTurn: false,
+      tokensBefore: 100,
+      fileOps: { read: new Set(), written: new Set(), edited: new Set() },
+      settings: { enabled: true, reserveTokens: 1000, keepRecentTokens: 100 },
     },
-    {
-      ...requestContext,
-      model: {
-        ...proxyResponsesModel,
-        name: "Header-authenticated proxy",
-        reasoning: false,
-        input: ["text"],
-        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-        contextWindow: 100_000,
-        maxTokens: 4096,
+    branchEntries: [{ type: "message", id: "message-1", message }],
+    reason: "manual",
+    customInstructions: "compact guidance",
+    willRetry: false,
+    signal: new AbortController().signal,
+  };
+  const compactContext = {
+    ...requestContext,
+    model: {
+      ...proxyResponsesModel,
+      name: "Header-authenticated proxy",
+      reasoning: false,
+      input: ["text"],
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+      contextWindow: 100_000,
+      maxTokens: 4096,
+    },
+    modelRegistry: {
+      async getApiKeyAndHeaders() {
+        return { ok: true, headers: { Authorization: "Custom credential" } };
       },
-      modelRegistry: {
-        async getApiKeyAndHeaders() {
-          return { ok: true, headers: { Authorization: "Custom credential" } };
+    },
+    getSystemPrompt() {
+      return "system prompt";
+    },
+  };
+
+  const successResult = await sessionBeforeCompact(compactEvent, compactContext);
+  assert.equal(requestBodies.length, 1);
+  assert.ok(requestBodies[0].includes("compaction_trigger"));
+  assert.ok(requestBodies[0].includes("compact guidance"));
+  assert.equal(successResult?.compaction?.summary, REMOTE_COMPACTION_CHECKPOINT_SUMMARY);
+  assert.equal(successResult?.compaction?.details?.remoteCompaction?.version, 2);
+
+  respondWithFailure = true;
+  requestBodies.length = 0;
+  const fallbackResult = await sessionBeforeCompact(compactEvent, compactContext);
+  assert.equal(requestBodies.length, 1);
+  assert.equal(fallbackResult, undefined);
+
+  const abortController = new AbortController();
+  abortController.abort();
+  const abortedResult = await sessionBeforeCompact(
+    { ...compactEvent, signal: abortController.signal },
+    compactContext,
+  );
+  assert.deepEqual(abortedResult, { cancel: true });
+  assert.equal(requestBodies.length, 1);
+
+  for (const authOutcome of ["failure", "error"]) {
+    const authAbortController = new AbortController();
+    let settleAuth;
+    const pendingAuth = new Promise((resolve, reject) => {
+      settleAuth = authOutcome === "failure"
+        ? () => resolve({ ok: false, error: "controlled auth failure" })
+        : () => reject(new Error("controlled auth error"));
+    });
+    const resultPromise = sessionBeforeCompact(
+      { ...compactEvent, signal: authAbortController.signal },
+      {
+        ...compactContext,
+        modelRegistry: {
+          getApiKeyAndHeaders() {
+            return pendingAuth;
+          },
         },
       },
-      getSystemPrompt() {
-        return "system prompt";
-      },
-    },
-  );
-  assert.ok(requestBodies.some((body) => body.includes("compaction_trigger")));
-  assert.equal(fallbackResult?.compaction?.details?.remoteCompaction, undefined);
+    );
+    authAbortController.abort();
+    settleAuth();
+    assert.deepEqual(await resultPromise, { cancel: true });
+    assert.equal(requestBodies.length, 1);
+  }
 } finally {
   globalThis.fetch = originalFetch;
 }

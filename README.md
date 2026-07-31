@@ -2,7 +2,7 @@
 
 A provider-agnostic Pi extension that adds Codex-style remote compaction to models using the plain `openai-responses` API.
 
-On a Pi compaction event, the extension sends the conversation to the model's normal Responses endpoint over HTTP/SSE with a trailing `compaction_trigger`. It persists the returned opaque `compaction` item alongside a portable Pi text summary, then injects the reconstructed replacement history into later compatible requests. Those later ordinary requests remain transport-neutral.
+On a Pi compaction event, the extension sends the conversation to the model's normal Responses endpoint over HTTP/SSE with a trailing `compaction_trigger`. It persists the returned opaque `compaction` item with a native replay checkpoint marker, then injects the reconstructed replacement history into later compatible requests. Those later ordinary requests remain transport-neutral.
 
 > **Status:** experimental but live-tested. Install project-local first and keep rollback easy.
 
@@ -17,7 +17,7 @@ Remote compaction is enabled by API type, not provider name:
 | `azure-openai-responses` | No |
 | Other APIs | No |
 
-Any provider can participate when its model uses `openai-responses` and its Responses endpoint supports the compaction protocol. Unsupported endpoints fall back to Pi's normal local compaction behavior.
+Any provider can participate when its model uses `openai-responses` and its Responses endpoint supports the compaction protocol. Unsupported endpoints fall back to Pi's normal local compaction behavior. A remote failure is handled sequentially: the extension returns control to Pi instead of starting a second summary request.
 
 ## Independent transport composition
 
@@ -37,26 +37,25 @@ The missing raw transport seam and its constraints are tracked in [`TODO.md`](TO
 
 On compaction, the extension:
 
-1. Generates a portable Pi text summary, with Pi's built-in compactor as fallback.
-2. Calls the model's normal Responses endpoint with:
+1. Calls the model's normal Responses endpoint with:
    - the current explicit history;
    - a trailing `{ "type": "compaction_trigger" }`;
-   - the current system prompt, tools, reasoning configuration, and text configuration.
-3. Validates the returned opaque `compaction` item.
-4. Retains recent user messages using a 20K approximate-token budget and stores them with the artifact in `CompactionEntry.details.remoteCompaction`.
-5. Reconstructs that history after resume, tree navigation, forks, and later compactions.
-6. Replaces the `input` of later model-compatible `openai-responses` requests with the reconstructed history.
+   - the current system prompt, optional custom compaction guidance, tools, reasoning configuration, and text configuration.
+2. Validates the returned opaque `compaction` item.
+3. Stores a fixed `[Remote Responses compaction checkpoint]` marker in `CompactionEntry.summary` and retains recent user messages using a 20K approximate-token budget in `CompactionEntry.details.remoteCompaction`.
+4. Reconstructs that history after resume, tree navigation, forks, and later compactions.
+5. Replaces the `input` of later model-compatible `openai-responses` requests with the reconstructed history.
 
 The extension intentionally does not add `store`, `context_management`, or `previous_response_id` to ordinary requests. Those are separate persistence, automatic-context-management, and continuation concerns.
 
-## Why keep both representations
+## Native checkpoint semantics
 
 The package maintains:
 
-- **OpenAI-native history** — retained user items plus the opaque compaction item, for compatible future Responses requests.
-- **Portable Pi summary** — readable local text for session export, model switching, tree operations, and providers that cannot consume the opaque artifact.
+- **Native replay history** — retained user items plus the opaque compaction item, for compatible future Responses requests.
+- **Checkpoint marker** — a fixed two-line `CompactionEntry.summary` explaining that detailed context is retained in the native artifact and requires a compatible Responses model.
 
-Pi's local session JSONL remains authoritative.
+The marker is intentionally not a second model-generated summary. This keeps successful compaction to one remote request and follows Codex's native compaction behavior. Switching to an incompatible model may therefore lose access to detailed pre-compaction context. Pi's local session JSONL remains authoritative for the persisted artifact.
 
 ## Install
 
@@ -97,7 +96,7 @@ Remote compaction is always enabled for supported models, and activation notific
 - The remote compaction request uses `store: false`.
 - Returned opaque artifacts are stored in Pi's local session JSONL.
 - Ordinary provider requests are not changed until a compatible remote artifact needs replay.
-- Switching to an incompatible model uses Pi's portable text-summary path.
+- Switching to an incompatible model does not replay the opaque artifact and may only expose the checkpoint marker and post-compaction context.
 
 ## Testing
 
@@ -137,7 +136,7 @@ See:
 
 1. Run Pi with `--no-extensions` to bypass all extensions.
 2. Inspect session JSONL for `compaction.details.remoteCompaction`.
-3. If the endpoint rejects remote compaction, Pi should retain the local summary path.
+3. If the endpoint rejects remote compaction, the extension returns control to Pi's default compaction path.
 
 ## Repository layout
 

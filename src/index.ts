@@ -18,11 +18,10 @@ import {
   thinkingLevelToResponsesReasoning,
 } from "./openai.ts";
 import {
-  buildCompactionSummaryText,
   buildRemoteCompactionDetails,
   buildToolsPayload,
   callRemoteCompactionEndpoint,
-  generateBestEffortLocalSummary,
+  REMOTE_COMPACTION_CHECKPOINT_SUMMARY,
   messageToResponseItems,
   messagesToResponseItems,
   normalizeResponseItemsForPrompt,
@@ -152,18 +151,32 @@ export default function openaiServerCompactionExtension(pi: ExtensionAPI) {
   });
 
   pi.on("session_before_compact", async (event, ctx) => {
+    if (event.signal.aborted) return { cancel: true };
+
     const model = ctx.model;
     if (!model || !supportsRemoteCompactionModel(model)) return undefined;
 
-    const auth = await ctx.modelRegistry.getApiKeyAndHeaders(model);
+    let auth;
+    try {
+      auth = await ctx.modelRegistry.getApiKeyAndHeaders(model);
+    } catch (error) {
+      if (event.signal.aborted) return { cancel: true };
+      if (ctx.hasUI) {
+        const message = error instanceof Error ? error.message : String(error);
+        ctx.ui.notify(`OpenAI remote compaction failed; falling back to default compaction. ${message}`, "warning");
+      }
+      return undefined;
+    }
+
+    if (event.signal.aborted) return { cancel: true };
     if (!auth.ok) return undefined;
 
     const tools = buildToolsPayload(pi.getAllTools(), pi.getActiveTools());
     const sessionId = getSessionId(ctx);
     const branchEntries = event.branchEntries as BranchEntry[];
+    const fullBranchMessages = getBranchMessages(branchEntries);
     const remoteState = getMatchingRemoteState(sessionId, model);
     const observedRequestShape = getResponsesRequestShapeState(sessionId);
-    const fullBranchMessages = getBranchMessages(branchEntries);
     const responseItems = remoteState
       ? remoteState.explicitHistory
       : messagesToResponseItems(fullBranchMessages);
@@ -174,69 +187,49 @@ export default function openaiServerCompactionExtension(pi: ExtensionAPI) {
       : undefined;
     const reasoning = observedRequestShape?.reasoning ?? fallbackReasoning;
     const text = observedRequestShape?.text;
+    const customInstructions = event.customInstructions?.trim();
+    const instructions = customInstructions
+      ? `${ctx.getSystemPrompt()}\n\nAdditional user guidance for this compaction request:\n${customInstructions}`
+      : ctx.getSystemPrompt();
 
-    const [localResult, remoteResult] = await Promise.allSettled([
-      generateBestEffortLocalSummary({
-        preparation: event.preparation,
-        messages: fullBranchMessages,
-        model,
-        apiKey: auth.apiKey,
-        headers: auth.headers,
-        customInstructions: event.customInstructions,
-        signal: event.signal,
-        thinkingLevel,
-        firstKeptEntryId: event.preparation.firstKeptEntryId,
-        tokensBefore: event.preparation.tokensBefore,
-      }),
-      callRemoteCompactionEndpoint({
+    let remoteResult;
+    try {
+      remoteResult = await callRemoteCompactionEndpoint({
         model,
         apiKey: auth.apiKey,
         headers: auth.headers,
         sessionId,
         input: promptResponseItems,
-        instructions: ctx.getSystemPrompt(),
+        instructions,
         tools,
         parallelToolCalls: true,
         reasoning,
         text,
         signal: event.signal,
-      }),
-    ]);
-
-    if (remoteResult.status !== "fulfilled") {
-      if (localResult.status === "fulfilled") {
-        return { compaction: localResult.value };
-      }
-      if (!event.signal.aborted && ctx.hasUI) {
-        const message = remoteResult.reason instanceof Error ? remoteResult.reason.message : String(remoteResult.reason);
+      });
+    } catch (error) {
+      if (event.signal.aborted) return { cancel: true };
+      if (ctx.hasUI) {
+        const message = error instanceof Error ? error.message : String(error);
         ctx.ui.notify(`OpenAI remote compaction failed; falling back to default compaction. ${message}`, "warning");
       }
       return undefined;
     }
 
+    if (event.signal.aborted) return { cancel: true };
+
     const remoteDetails = buildRemoteCompactionDetails(
       model,
-      remoteResult.value.output,
-      remoteResult.value.usage,
+      remoteResult.output,
+      remoteResult.usage,
     );
-    const localSummary =
-      localResult.status === "fulfilled"
-        ? localResult.value
-        : {
-            summary: buildCompactionSummaryText(model),
-            firstKeptEntryId: event.preparation.firstKeptEntryId,
-            tokensBefore: event.preparation.tokensBefore,
-          };
 
     return {
       compaction: {
-        summary: localSummary.summary,
-        firstKeptEntryId: localSummary.firstKeptEntryId,
-        tokensBefore: localSummary.tokensBefore,
-        details: {
-          ...(localSummary.details !== undefined ? { localSummaryDetails: localSummary.details } : {}),
-          remoteCompaction: remoteDetails,
-        },
+        summary: REMOTE_COMPACTION_CHECKPOINT_SUMMARY,
+        firstKeptEntryId: event.preparation.firstKeptEntryId,
+        tokensBefore: event.preparation.tokensBefore,
+        details: { remoteCompaction: remoteDetails },
       },
     };
   });
