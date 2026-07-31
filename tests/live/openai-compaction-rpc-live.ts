@@ -169,7 +169,6 @@ class PiRpcClient {
 
   constructor(sessionDir: string, sessionFile?: string, cwd?: string) {
     const env = { ...process.env };
-    env.PI_OPENAI_SERVER_COMPACTION_NOTIFY ??= "0";
 
     const args = [
       "--mode",

@@ -6,11 +6,11 @@
  */
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
-import { isRecord, loadConfig } from "./config.ts";
 import {
   applyRemoteHistoryPayloadPatch,
   extractResponsesReasoningConfig,
   extractResponsesTextConfig,
+  isRecord,
   looksLikeResponsesPayload,
   messageMatchesModel,
   modelKey,
@@ -124,25 +124,7 @@ function extendRemoteHistoryIfCompatible(params: {
   });
 }
 
-function maybeNotifyRemoteHistory(params: {
-  notifiedModels: Set<string>;
-  hasUI: boolean;
-  notify: boolean;
-  ui: { notify(message: string, level: "info" | "warning"): void };
-  model: TargetModel;
-}): void {
-  if (!params.notify || !params.hasUI) return;
-
-  const key = `${String(params.model.provider)}/${String(params.model.id)}`;
-  if (params.notifiedModels.has(key)) return;
-
-  params.notifiedModels.add(key);
-  params.ui.notify(`OpenAI remote compaction history active for ${key}`, "info");
-}
-
 export default function openaiServerCompactionExtension(pi: ExtensionAPI) {
-  const notifiedModels = new Set<string>();
-
   pi.on("session_start", (_event, ctx) => {
     clearResponsesRequestShapeState(getSessionId(ctx));
     syncRemoteState(ctx);
@@ -170,9 +152,8 @@ export default function openaiServerCompactionExtension(pi: ExtensionAPI) {
   });
 
   pi.on("session_before_compact", async (event, ctx) => {
-    const cfg = loadConfig(ctx.cwd);
     const model = ctx.model;
-    if (!cfg.enabled || !model || !supportsRemoteCompactionModel(model)) return undefined;
+    if (!model || !supportsRemoteCompactionModel(model)) return undefined;
 
     const auth = await ctx.modelRegistry.getApiKeyAndHeaders(model);
     if (!auth.ok) return undefined;
@@ -269,9 +250,6 @@ export default function openaiServerCompactionExtension(pi: ExtensionAPI) {
   });
 
   pi.on("before_provider_request", (event, ctx) => {
-    const cfg = loadConfig(ctx.cwd);
-    if (!cfg.enabled) return undefined;
-
     const model = ctx.model;
     if (
       !model ||
@@ -295,13 +273,6 @@ export default function openaiServerCompactionExtension(pi: ExtensionAPI) {
     const payload = applyRemoteHistoryPayloadPatch({
       payload: event.payload,
       explicitHistory: normalizeResponseItemsForPrompt(remoteState.explicitHistory, model) as unknown[],
-    });
-    maybeNotifyRemoteHistory({
-      notifiedModels,
-      hasUI: ctx.hasUI,
-      notify: cfg.notify,
-      ui: ctx.ui,
-      model,
     });
     return payload;
   });

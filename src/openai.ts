@@ -4,9 +4,13 @@
  * Remote compaction is provider-agnostic and applies only to the plain
  * `openai-responses` API. Transport selection belongs to a separate extension.
  */
-import type { JsonRecord } from "./config.ts";
 import type { ResponsesReasoningConfig, ResponsesTextConfig } from "./remote-compaction.ts";
-import { isRecord } from "./config.ts";
+
+export type JsonRecord = Record<string, unknown>;
+
+export function isRecord(value: unknown): value is JsonRecord {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
 
 export type ModelLike = {
   api?: unknown;

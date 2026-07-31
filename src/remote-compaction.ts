@@ -20,9 +20,9 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { calculateCost, type Model, type Usage } from "@earendil-works/pi-ai";
 import { complete } from "@earendil-works/pi-ai/compat";
-import { isRecord } from "./config.ts";
 import {
   hostnameFromBaseUrl,
+  isRecord,
   supportsRemoteCompactionModel,
   modelKey,
 } from "./openai.ts";
