@@ -9,7 +9,7 @@ This changelog intentionally starts at **0.1.0**.
 - stop registering or overriding providers; replay remote replacement history through `before_provider_request`
 - remove the extension-owned WebSocket client, provider stream override, socket lifecycle, and live `previous_response_id` continuation state
 - remove ordinary-request mutation of `store`, `context_management`, and `previous_response_id`
-- reduce configuration to `enabled` and `notify`; Pi continues to own compaction thresholds
+- remove extension configuration and always enable remote compaction without activation notifications; Pi continues to own compaction thresholds
 - remove direct `ws` and `@types/ws` dependencies
 - make reduced-plaintext live replay provider-agnostic
 - limit committed tests to the remote-compaction project's core contract and keep cross-extension transport validation external

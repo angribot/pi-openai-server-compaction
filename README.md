@@ -87,28 +87,9 @@ pi -e ./src/index.ts --model provider/model
 - Working authentication for the selected provider
 - A Responses endpoint that accepts `compaction_trigger` and returns a `compaction` item
 
-## Configuration
+## Behavior
 
-Configuration is read from:
-
-- `~/.pi/agent/openai-server-compaction.json`
-- `.pi/openai-server-compaction.json`, which takes precedence
-
-```json
-{
-  "enabled": true,
-  "notify": false
-}
-```
-
-Environment overrides:
-
-| Variable | Effect |
-|---|---|
-| `PI_OPENAI_SERVER_COMPACTION_ENABLED` | Enable or disable the extension |
-| `PI_OPENAI_SERVER_COMPACTION_NOTIFY` | Notify when remote history is injected |
-
-Pi itself decides when compaction occurs. This extension does not maintain a separate compaction threshold.
+Remote compaction is always enabled for supported models, and activation notifications are disabled. Pi itself decides when compaction occurs; this extension does not maintain a separate compaction threshold.
 
 ## Data handling
 
@@ -154,10 +135,9 @@ See:
 
 ## Troubleshooting
 
-1. Disable with `PI_OPENAI_SERVER_COMPACTION_ENABLED=0`.
-2. Run Pi with `--no-extensions` to bypass all extensions.
-3. Inspect session JSONL for `compaction.details.remoteCompaction`.
-4. If the endpoint rejects remote compaction, Pi should retain the local summary path.
+1. Run Pi with `--no-extensions` to bypass all extensions.
+2. Inspect session JSONL for `compaction.details.remoteCompaction`.
+3. If the endpoint rejects remote compaction, Pi should retain the local summary path.
 
 ## Repository layout
 
@@ -167,7 +147,6 @@ See:
 | `src/remote-compaction.ts` | Responses compaction v2 and replacement-history handling |
 | `src/openai.ts` | `openai-responses` gating and payload helpers |
 | `src/state.ts` | Ephemeral reconstructed history and request-shape state |
-| `src/config.ts` | Configuration loading |
 | `tests/live/openai-compaction-rpc-live.ts` | Credentialed Pi RPC regression |
 | `scripts/smoke.mjs` | Offline core contract checks |
 | `ARCHITECTURE.md` | Control flow and module responsibilities |

@@ -15,6 +15,8 @@ It must remain:
 
 The current Pi API does not provide a provider-aware raw transport seam for the compaction RPC itself. That request therefore remains HTTP/SSE; the known gap is tracked in [`TODO.md`](TODO.md).
 
+The extension has no runtime configuration: remote compaction is always enabled for eligible models, and activation notifications are disabled.
+
 ## Eligibility
 
 Remote compaction is enabled only when:
@@ -42,7 +44,7 @@ The extension does not add `store`, `context_management`, or `previous_response_
 ### Compaction turn
 
 1. Pi emits `session_before_compact`.
-2. `src/index.ts` verifies that the extension is enabled and the active model uses `openai-responses`.
+2. `src/index.ts` verifies that the active model uses `openai-responses`.
 3. It resolves authentication through Pi's model registry.
 4. It chooses the explicit Responses history:
    - reconstructed remote history when the session was compacted before;
@@ -176,13 +178,6 @@ Small API and payload helpers:
 ### `src/state.ts`
 
 In-memory remote-history and request-shape caches only.
-
-### `src/config.ts`
-
-Loads two user-facing settings:
-
-- `enabled`;
-- `notify`.
 
 Pi owns compaction thresholds. A provider or transport extension owns transport and continuation policy.
 
