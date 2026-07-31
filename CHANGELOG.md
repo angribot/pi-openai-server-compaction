@@ -4,6 +4,7 @@ This changelog intentionally starts at **0.1.0**.
 
 ## Unreleased
 
+## 0.3.0 - 2026-07-31
 - enable remote compaction by exact `model.api === "openai-responses"` instead of provider name or endpoint classification
 - support custom providers and relays through their configured Responses base URL
 - stop registering or overriding providers; replay remote replacement history through `before_provider_request`
