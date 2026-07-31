@@ -24,7 +24,7 @@ Cross-extension composition remains an external, ephemeral validation. A defect 
 6. Verify persisted artifacts reconstruct safe replacement history after lifecycle changes.
 7. Verify later compatible ordinary requests receive replacement history through `before_provider_request`.
 8. Verify incompatible APIs and models are left untouched.
-9. Verify remote failure returns control to Pi's default compaction fallback without starting a second summary request.
+9. Verify transient remote failures retry the same request at most twice and final failure cancels compaction without invoking Pi's text compactor.
 
 ## Offline automated checks
 
@@ -50,7 +50,11 @@ Required smoke coverage:
 - v1 and v2 persisted details reconstruct safely;
 - remote replacement history is injected into the final ordinary payload;
 - successful remote compaction stores the fixed native replay checkpoint marker;
-- successful remote compaction performs only one remote request;
+- successful remote compaction performs one request when no retryable failure occurs;
+- Codex-classified transient HTTP failures and incomplete streams retry the same payload at most twice;
+- fatal HTTP or artifact-validation failures do not retry;
+- abort during retry backoff prevents the next attempt;
+- final remote and authentication failures explicitly cancel compaction without local fallback;
 - conflicting `messages` and `previous_response_id` fields are removed during replay;
 - the extension does not call `registerProvider`.
 
@@ -106,15 +110,17 @@ After a successful remote compaction, separately verify:
 
 The session must remain usable, and matching remote state must reconstruct only where the active branch and model allow it.
 
-### 7. Remote failure fallback
+### 7. Remote failure cancellation
 
 Use an eligible model whose endpoint does not implement compaction v2, or inject a controlled remote failure outside committed tests.
 
 Confirm:
 
-- the extension returns control to Pi's default compaction path;
-- no second extension-owned summary request is started;
-- no invalid remote artifact is persisted.
+- retryable failures make at most three total attempts;
+- the final extension result cancels compaction rather than invoking Pi's text compactor;
+- no separate summary request is started;
+- no invalid or partial remote artifact is persisted;
+- overflow recovery does not retry the aborted turn when remote compaction fails.
 
 ## Credentialed live regression
 

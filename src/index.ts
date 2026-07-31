@@ -156,45 +156,33 @@ export default function openaiServerCompactionExtension(pi: ExtensionAPI) {
     const model = ctx.model;
     if (!model || !supportsRemoteCompactionModel(model)) return undefined;
 
-    let auth;
     try {
-      auth = await ctx.modelRegistry.getApiKeyAndHeaders(model);
-    } catch (error) {
+      const auth = await ctx.modelRegistry.getApiKeyAndHeaders(model);
       if (event.signal.aborted) return { cancel: true };
-      if (ctx.hasUI) {
-        const message = error instanceof Error ? error.message : String(error);
-        ctx.ui.notify(`OpenAI remote compaction failed; falling back to default compaction. ${message}`, "warning");
-      }
-      return undefined;
-    }
+      if (!auth.ok) throw new Error(auth.error);
 
-    if (event.signal.aborted) return { cancel: true };
-    if (!auth.ok) return undefined;
+      const tools = buildToolsPayload(pi.getAllTools(), pi.getActiveTools());
+      const sessionId = getSessionId(ctx);
+      const branchEntries = event.branchEntries as BranchEntry[];
+      const fullBranchMessages = getBranchMessages(branchEntries);
+      const remoteState = getMatchingRemoteState(sessionId, model);
+      const observedRequestShape = getResponsesRequestShapeState(sessionId);
+      const responseItems = remoteState
+        ? remoteState.explicitHistory
+        : messagesToResponseItems(fullBranchMessages);
+      const promptResponseItems = normalizeResponseItemsForPrompt(responseItems, model);
+      const thinkingLevel = pi.getThinkingLevel();
+      const fallbackReasoning = model.reasoning
+        ? thinkingLevelToResponsesReasoning(thinkingLevel ?? getBranchThinkingLevel(branchEntries))
+        : undefined;
+      const reasoning = observedRequestShape?.reasoning ?? fallbackReasoning;
+      const text = observedRequestShape?.text;
+      const customInstructions = event.customInstructions?.trim();
+      const instructions = customInstructions
+        ? `${ctx.getSystemPrompt()}\n\nAdditional user guidance for this compaction request:\n${customInstructions}`
+        : ctx.getSystemPrompt();
 
-    const tools = buildToolsPayload(pi.getAllTools(), pi.getActiveTools());
-    const sessionId = getSessionId(ctx);
-    const branchEntries = event.branchEntries as BranchEntry[];
-    const fullBranchMessages = getBranchMessages(branchEntries);
-    const remoteState = getMatchingRemoteState(sessionId, model);
-    const observedRequestShape = getResponsesRequestShapeState(sessionId);
-    const responseItems = remoteState
-      ? remoteState.explicitHistory
-      : messagesToResponseItems(fullBranchMessages);
-    const promptResponseItems = normalizeResponseItemsForPrompt(responseItems, model);
-    const thinkingLevel = pi.getThinkingLevel();
-    const fallbackReasoning = model.reasoning
-      ? thinkingLevelToResponsesReasoning(thinkingLevel ?? getBranchThinkingLevel(branchEntries))
-      : undefined;
-    const reasoning = observedRequestShape?.reasoning ?? fallbackReasoning;
-    const text = observedRequestShape?.text;
-    const customInstructions = event.customInstructions?.trim();
-    const instructions = customInstructions
-      ? `${ctx.getSystemPrompt()}\n\nAdditional user guidance for this compaction request:\n${customInstructions}`
-      : ctx.getSystemPrompt();
-
-    let remoteResult;
-    try {
-      remoteResult = await callRemoteCompactionEndpoint({
+      const remoteResult = await callRemoteCompactionEndpoint({
         model,
         apiKey: auth.apiKey,
         headers: auth.headers,
@@ -206,32 +194,37 @@ export default function openaiServerCompactionExtension(pi: ExtensionAPI) {
         reasoning,
         text,
         signal: event.signal,
+        onRetry: ({ attempt, maxRetries, delayMs, error }) => {
+          if (!ctx.hasUI) return;
+          ctx.ui.notify(
+            `OpenAI remote compaction retry ${attempt}/${maxRetries} in ${Math.round(delayMs)}ms. ${error.message}`,
+            "warning",
+          );
+        },
       });
+      if (event.signal.aborted) return { cancel: true };
+
+      const remoteDetails = buildRemoteCompactionDetails(
+        model,
+        remoteResult.output,
+        remoteResult.usage,
+      );
+      return {
+        compaction: {
+          summary: REMOTE_COMPACTION_CHECKPOINT_SUMMARY,
+          firstKeptEntryId: event.preparation.firstKeptEntryId,
+          tokensBefore: event.preparation.tokensBefore,
+          details: { remoteCompaction: remoteDetails },
+        },
+      };
     } catch (error) {
       if (event.signal.aborted) return { cancel: true };
       if (ctx.hasUI) {
         const message = error instanceof Error ? error.message : String(error);
-        ctx.ui.notify(`OpenAI remote compaction failed; falling back to default compaction. ${message}`, "warning");
+        ctx.ui.notify(`OpenAI remote compaction failed; local fallback was skipped. ${message}`, "error");
       }
-      return undefined;
+      return { cancel: true };
     }
-
-    if (event.signal.aborted) return { cancel: true };
-
-    const remoteDetails = buildRemoteCompactionDetails(
-      model,
-      remoteResult.output,
-      remoteResult.usage,
-    );
-
-    return {
-      compaction: {
-        summary: REMOTE_COMPACTION_CHECKPOINT_SUMMARY,
-        firstKeptEntryId: event.preparation.firstKeptEntryId,
-        tokensBefore: event.preparation.tokensBefore,
-        details: { remoteCompaction: remoteDetails },
-      },
-    };
   });
 
   pi.on("message_end", (event, ctx) => {

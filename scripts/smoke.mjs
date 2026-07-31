@@ -303,6 +303,28 @@ assert.throws(
   ]),
   /expected exactly one compaction item, got 2/,
 );
+assert.throws(
+  () => parseRemoteCompactionV2Events([{
+    type: "response.incomplete",
+    response: { incomplete_details: { reason: "max_output_tokens" } },
+  }]),
+  /incomplete response: max_output_tokens/,
+);
+assert.throws(
+  () => parseRemoteCompactionV2Events([{
+    type: "response.failed",
+    response: { error: { code: "context_length_exceeded", message: "too large" } },
+  }]),
+  /too large/,
+);
+assert.throws(
+  () => parseRemoteCompactionV2Events([{
+    type: "error",
+    code: "insufficient_quota",
+    message: "quota exhausted",
+  }]),
+  /quota exhausted/,
+);
 const v2History = buildRemoteCompactionV2History(
   [
     { type: "message", role: "user", content: [{ type: "input_text", text: "retain user" }] },
@@ -494,7 +516,40 @@ assert.equal(typeof sessionBeforeCompact, "function");
 const requestBodies = [];
 const originalFetch = globalThis.fetch;
 try {
-  let respondWithFailure = false;
+  let responsePlan = [];
+  const sseResponse = (encryptedContent, completed = true) => new Response([
+    `data: ${JSON.stringify({
+      type: "response.output_item.done",
+      item: { type: "compaction", encrypted_content: encryptedContent },
+    })}\n\n`,
+    ...(completed
+      ? [`data: ${JSON.stringify({
+          type: "response.completed",
+          response: { usage: { input_tokens: 10, output_tokens: 2, total_tokens: 12 } },
+        })}\n\n`]
+      : []),
+  ].join(""), {
+    status: 200,
+    headers: { "content-type": "text/event-stream" },
+  });
+  const httpError = (status, message, code) => new Response(
+    JSON.stringify({ error: { message, ...(code ? { code } : {}) } }),
+    { status, headers: { "content-type": "application/json" } },
+  );
+
+  const streamingResponse = (chunks, keepOpen = false) => new Response(new ReadableStream({
+    start(controller) {
+      const encoder = new TextEncoder();
+      for (const chunk of chunks) controller.enqueue(encoder.encode(chunk));
+      if (!keepOpen) controller.close();
+    },
+  }), { status: 200, headers: { "content-type": "text/event-stream" } });
+  const pendingResponse = (status = 200) => new Response(new ReadableStream({
+    pull() {
+      return new Promise(() => {});
+    },
+  }), { status, headers: { "content-type": "text/event-stream" } });
+
   globalThis.fetch = async (input, init) => {
     const body = typeof init?.body === "string"
       ? init.body
@@ -502,25 +557,10 @@ try {
         ? await input.clone().text()
         : "";
     requestBodies.push(body);
-    if (respondWithFailure) {
-      return new Response(JSON.stringify({ error: { message: "controlled failure" } }), {
-        status: 400,
-        headers: { "content-type": "application/json" },
-      });
-    }
-    return new Response([
-      `data: ${JSON.stringify({
-        type: "response.output_item.done",
-        item: { type: "compaction", encrypted_content: "SUCCESS_ENCRYPTED" },
-      })}\n\n`,
-      `data: ${JSON.stringify({
-        type: "response.completed",
-        response: { usage: { input_tokens: 10, output_tokens: 2, total_tokens: 12 } },
-      })}\n\n`,
-    ].join(""), {
-      status: 200,
-      headers: { "content-type": "text/event-stream" },
-    });
+    const next = responsePlan.shift();
+    if (next instanceof Error) throw next;
+    assert.ok(next instanceof Response, "missing planned compaction response");
+    return next;
   };
 
   const message = {
@@ -530,7 +570,7 @@ try {
   };
   const compactEvent = {
     preparation: {
-      firstKeptEntryId: "keep-after-fallback",
+      firstKeptEntryId: "keep-after-remote-compaction",
       messagesToSummarize: [message],
       turnPrefixMessages: [],
       isSplitTurn: false,
@@ -544,8 +584,15 @@ try {
     willRetry: false,
     signal: new AbortController().signal,
   };
+  const notifications = [];
   const compactContext = {
     ...requestContext,
+    hasUI: true,
+    ui: {
+      notify(message, type) {
+        notifications.push({ message, type });
+      },
+    },
     model: {
       ...proxyResponsesModel,
       name: "Header-authenticated proxy",
@@ -565,6 +612,7 @@ try {
     },
   };
 
+  responsePlan = [sseResponse("SUCCESS_ENCRYPTED")];
   const successResult = await sessionBeforeCompact(compactEvent, compactContext);
   assert.equal(requestBodies.length, 1);
   assert.ok(requestBodies[0].includes("compaction_trigger"));
@@ -572,44 +620,167 @@ try {
   assert.equal(successResult?.compaction?.summary, REMOTE_COMPACTION_CHECKPOINT_SUMMARY);
   assert.equal(successResult?.compaction?.details?.remoteCompaction?.version, 2);
 
-  respondWithFailure = true;
   requestBodies.length = 0;
-  const fallbackResult = await sessionBeforeCompact(compactEvent, compactContext);
-  assert.equal(requestBodies.length, 1);
-  assert.equal(fallbackResult, undefined);
+  responsePlan = [streamingResponse([
+    `data: ${JSON.stringify({
+      type: "response.output_item.done",
+      item: { type: "compaction", encrypted_content: "CRLF_SPLIT" },
+    })}\r`,
+    "\n\r",
+    "\n",
+    `data: ${JSON.stringify({ type: "response.completed", response: {} })}\r\r`,
+  ], true)];
+  const streamedResult = await sessionBeforeCompact(compactEvent, compactContext);
+  assert.equal(
+    streamedResult?.compaction?.details?.remoteCompaction?.replacementHistory?.at(-1)?.encrypted_content,
+    "CRLF_SPLIT",
+  );
+  assert.equal(requestBodies.length, 1, "terminal SSE event must finish without waiting for stream close");
 
-  const abortController = new AbortController();
-  abortController.abort();
-  const abortedResult = await sessionBeforeCompact(
-    { ...compactEvent, signal: abortController.signal },
+  requestBodies.length = 0;
+  notifications.length = 0;
+  responsePlan = [
+    httpError(500, "first compact open failed"),
+    sseResponse("DISCARDED_PARTIAL", false),
+    sseResponse("RETRIED_ENCRYPTED"),
+  ];
+  const retriedResult = await sessionBeforeCompact(compactEvent, compactContext);
+  assert.equal(requestBodies.length, 3);
+  assert.equal(new Set(requestBodies).size, 1, "compaction retries must resend the same payload");
+  assert.equal(
+    retriedResult?.compaction?.details?.remoteCompaction?.replacementHistory?.at(-1)?.encrypted_content,
+    "RETRIED_ENCRYPTED",
+  );
+  assert.equal(notifications.filter(({ type }) => type === "warning").length, 2);
+
+  for (const failureResponse of [
+    httpError(400, "invalid compaction request"),
+    httpError(429, "rate limit reached"),
+    httpError(503, "quota exhausted", "insufficient_quota"),
+    streamingResponse([
+      `data: ${JSON.stringify({
+        type: "error",
+        code: "context_length_exceeded",
+        message: "top-level context failure",
+      })}\n\n`,
+    ]),
+    new Response([
+      `data: ${JSON.stringify({
+        type: "response.output_item.done",
+        item: { type: "compaction" },
+      })}\n\n`,
+      `data: ${JSON.stringify({ type: "response.completed", response: {} })}\n\n`,
+    ].join(""), { status: 200, headers: { "content-type": "text/event-stream" } }),
+  ]) {
+    requestBodies.length = 0;
+    notifications.length = 0;
+    responsePlan = [failureResponse];
+    assert.deepEqual(await sessionBeforeCompact(compactEvent, compactContext), { cancel: true });
+    assert.equal(requestBodies.length, 1, "fatal compaction errors must not retry");
+    assert.match(notifications.at(-1)?.message ?? "", /local fallback was skipped/);
+  }
+
+  requestBodies.length = 0;
+  responsePlan = [httpError(401, "expired credential"), sseResponse("RETRIED_AFTER_STATUS")];
+  const statusRetriedResult = await sessionBeforeCompact(compactEvent, compactContext);
+  assert.equal(requestBodies.length, 2, "Codex-classified unexpected statuses should retry");
+  assert.equal(
+    statusRetriedResult?.compaction?.details?.remoteCompaction?.replacementHistory?.at(-1)?.encrypted_content,
+    "RETRIED_AFTER_STATUS",
+  );
+
+  requestBodies.length = 0;
+  responsePlan = [
+    httpError(500, "failure one"),
+    httpError(500, "failure two"),
+    httpError(500, "failure three"),
+  ];
+  assert.deepEqual(await sessionBeforeCompact(compactEvent, compactContext), { cancel: true });
+  assert.equal(requestBodies.length, 3, "v2 compaction must stop after two retries");
+
+  requestBodies.length = 0;
+  const retryAbortController = new AbortController();
+  responsePlan = [httpError(500, "abort during backoff")];
+  const abortingContext = {
+    ...compactContext,
+    ui: {
+      notify(message, type) {
+        notifications.push({ message, type });
+        if (type === "warning") retryAbortController.abort();
+      },
+    },
+  };
+  assert.deepEqual(
+    await sessionBeforeCompact(
+      { ...compactEvent, signal: retryAbortController.signal },
+      abortingContext,
+    ),
+    { cancel: true },
+  );
+  assert.equal(requestBodies.length, 1, "abort during backoff must prevent another attempt");
+
+  requestBodies.length = 0;
+  notifications.length = 0;
+  const streamAbortController = new AbortController();
+  responsePlan = [pendingResponse()];
+  const streamAbortPromise = sessionBeforeCompact(
+    { ...compactEvent, signal: streamAbortController.signal },
     compactContext,
   );
-  assert.deepEqual(abortedResult, { cancel: true });
+  setTimeout(() => streamAbortController.abort(), 0);
+  assert.deepEqual(await streamAbortPromise, { cancel: true });
+  assert.equal(requestBodies.length, 1);
+  assert.equal(notifications.filter(({ type }) => type === "warning").length, 0);
+
+  requestBodies.length = 0;
+  notifications.length = 0;
+  const errorBodyAbortController = new AbortController();
+  responsePlan = [pendingResponse(503)];
+  const errorBodyAbortPromise = sessionBeforeCompact(
+    { ...compactEvent, signal: errorBodyAbortController.signal },
+    compactContext,
+  );
+  setTimeout(() => errorBodyAbortController.abort(), 0);
+  assert.deepEqual(await errorBodyAbortPromise, { cancel: true });
+  assert.equal(requestBodies.length, 1);
+  assert.equal(notifications.filter(({ type }) => type === "warning").length, 0);
+
+  const alreadyAborted = new AbortController();
+  alreadyAborted.abort();
+  assert.deepEqual(
+    await sessionBeforeCompact(
+      { ...compactEvent, signal: alreadyAborted.signal },
+      compactContext,
+    ),
+    { cancel: true },
+  );
   assert.equal(requestBodies.length, 1);
 
+  requestBodies.length = 0;
+  const originalGetAllTools = fakePi.getAllTools;
+  fakePi.getAllTools = () => {
+    throw new Error("controlled request preparation failure");
+  };
+  try {
+    assert.deepEqual(await sessionBeforeCompact(compactEvent, compactContext), { cancel: true });
+    assert.equal(requestBodies.length, 0, "request preparation failure must not reach fetch");
+  } finally {
+    fakePi.getAllTools = originalGetAllTools;
+  }
+
   for (const authOutcome of ["failure", "error"]) {
-    const authAbortController = new AbortController();
-    let settleAuth;
-    const pendingAuth = new Promise((resolve, reject) => {
-      settleAuth = authOutcome === "failure"
-        ? () => resolve({ ok: false, error: "controlled auth failure" })
-        : () => reject(new Error("controlled auth error"));
-    });
-    const resultPromise = sessionBeforeCompact(
-      { ...compactEvent, signal: authAbortController.signal },
-      {
-        ...compactContext,
-        modelRegistry: {
-          getApiKeyAndHeaders() {
-            return pendingAuth;
-          },
+    requestBodies.length = 0;
+    const authContext = {
+      ...compactContext,
+      modelRegistry: {
+        async getApiKeyAndHeaders() {
+          if (authOutcome === "failure") return { ok: false, error: "controlled auth failure" };
+          throw new Error("controlled auth error");
         },
       },
-    );
-    authAbortController.abort();
-    settleAuth();
-    assert.deepEqual(await resultPromise, { cancel: true });
-    assert.equal(requestBodies.length, 1);
+    };
+    assert.deepEqual(await sessionBeforeCompact(compactEvent, authContext), { cancel: true });
+    assert.equal(requestBodies.length, 0);
   }
 } finally {
   globalThis.fetch = originalFetch;
