@@ -3,6 +3,8 @@
 This changelog intentionally starts at **0.1.0**.
 
 ## Unreleased
+
+## 0.5.0 - 2026-08-01
 - align retained user-message replay with Codex's current 64K approximate-token budget
 - retry transient Responses compaction v2 failures twice with abortable Codex-style backoff and incremental SSE validation
 - cancel failed remote compaction instead of falling back to Pi's text compactor, preserving native replay semantics
