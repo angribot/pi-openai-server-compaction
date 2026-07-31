@@ -2,7 +2,7 @@
 
 This changelog intentionally starts at **0.1.0**.
 
-## Unreleased
+## 0.2.0 - 2026-07-31
 - target Pi 0.83.0 and the `@earendil-works/*` package namespace while leaving Pi peer dependencies unpinned
 - align compaction fallback, Responses payload normalization, Codex identity headers, and WebSocket behavior with Pi 0.83.0
 - replace the legacy `/responses/compact` call with Codex's current Responses compaction v2 protocol
