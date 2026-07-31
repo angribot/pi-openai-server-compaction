@@ -3,6 +3,8 @@
 This changelog intentionally starts at **0.1.0**.
 
 ## Unreleased
+
+## 0.4.0 - 2026-07-31
 - run only the remote Responses compaction request on the successful path instead of concurrently generating a second local summary
 - persist a fixed native replay checkpoint marker: `[Remote Responses compaction checkpoint]` plus its compatibility note
 - return control to Pi's default compaction on remote failure and preserve explicit cancellation on abort, including while credentials are resolving
