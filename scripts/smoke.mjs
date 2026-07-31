@@ -313,6 +313,17 @@ const v2History = buildRemoteCompactionV2History(
 assert.deepEqual(v2History.map((item) => item.type), ["message", "compaction"]);
 assert.equal(v2History[0].role, "user");
 
+const retainedBudgetHistory = buildRemoteCompactionV2History(
+  [
+    { type: "message", role: "user", content: [{ type: "input_text", text: "o".repeat(160_000) }] },
+    { type: "message", role: "user", content: [{ type: "input_text", text: "n".repeat(160_000) }] },
+  ],
+  parsedV2Events.compactionItem,
+);
+assert.deepEqual(retainedBudgetHistory.map((item) => item.type), ["message", "message", "compaction"]);
+assert.equal(retainedBudgetHistory[0].content[0].text.length, 96_000);
+assert.equal(retainedBudgetHistory[1].content[0].text.length, 160_000);
+
 const normalizedPromptItems = normalizeResponseItemsForPrompt(
   [
     { type: "ghost_snapshot", data: "hidden" },

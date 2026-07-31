@@ -1,5 +1,7 @@
 # Pi default compaction vs. extension-native compaction
 
+> Historical result: this run exercised the extension's former 20K retained-message budget, not its current Codex-aligned 64K budget.
+
 ## Executive result
 
 On the corrected held-out run, the extension's native Responses compaction

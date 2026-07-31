@@ -17,6 +17,10 @@ only after compaction.
 
 ## Retained reference run
 
+This run exercised the extension's former 20K retained-message budget. It is
+kept as historical evidence after the product default moved to Codex's current
+64K budget.
+
 The corrected 2026-07-23 held-out run used Pi's default medium thinking level,
 densities 180 and 200, and fresh seeds 301–304:
 

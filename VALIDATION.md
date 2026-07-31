@@ -98,7 +98,7 @@ Earlier direct probes and live harness runs established that replaying the opaqu
 
 ## Controlled product-defaults benchmark
 
-A retained GPT-5.6 Sol benchmark compared Pi 0.80.9's actual default compaction policy, this extension's Responses compaction/replay policy, and a full-context control. It increased task difficulty by replacing filler with exact state at a fixed roughly 50K-token history, without imposing an output cap from one arm on another.
+A retained GPT-5.6 Sol benchmark compared Pi 0.80.9's actual default compaction policy, this extension's former 20K Responses compaction/replay policy, and a full-context control. It increased task difficulty by replacing filler with exact state at a fixed roughly 50K-token history, without imposing an output cap from one arm on another. The run is historical evidence and does not validate the current 64K retained-message budget.
 
 On held-out seeds 301–304:
 

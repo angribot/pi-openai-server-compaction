@@ -42,7 +42,7 @@ On compaction, the extension:
    - a trailing `{ "type": "compaction_trigger" }`;
    - the current system prompt, optional custom compaction guidance, tools, reasoning configuration, and text configuration.
 2. Validates the returned opaque `compaction` item.
-3. Stores a fixed `[Remote Responses compaction checkpoint]` marker in `CompactionEntry.summary` and retains recent user messages using a 20K approximate-token budget in `CompactionEntry.details.remoteCompaction`.
+3. Stores a fixed `[Remote Responses compaction checkpoint]` marker in `CompactionEntry.summary` and retains recent user messages using Codex's current 64K approximate-token budget in `CompactionEntry.details.remoteCompaction`.
 4. Reconstructs that history after resume, tree navigation, forks, and later compactions.
 5. Replaces the `input` of later model-compatible `openai-responses` requests with the reconstructed history.
 
@@ -124,7 +124,7 @@ Cross-project transport matrices are intentionally not stored in this repository
 
 ## Benchmarks
 
-The retained product-defaults benchmark found higher aggregate exact recall for the native compaction/replay policy than Pi's default textual compactor, with higher output cost, a larger downstream context, and substantial allocation variability. It does not establish better accuracy at an equal token budget.
+The retained product-defaults benchmark exercised the extension's former 20K replay budget and found higher aggregate exact recall than Pi's default textual compactor, with higher output cost, a larger downstream context, and substantial allocation variability. It is retained as historical evidence after the extension's move to Codex's current 64K budget and does not establish better accuracy at an equal token budget.
 
 See:
 

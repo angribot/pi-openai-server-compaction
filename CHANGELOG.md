@@ -3,6 +3,7 @@
 This changelog intentionally starts at **0.1.0**.
 
 ## Unreleased
+- align retained user-message replay with Codex's current 64K approximate-token budget
 
 ## 0.4.0 - 2026-07-31
 - run only the remote Responses compaction request on the successful path instead of concurrently generating a second local summary
