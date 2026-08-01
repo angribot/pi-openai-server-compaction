@@ -8,11 +8,11 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const localNodeModules = join(repoRoot, "node_modules");
 
-function packagePathSegments(packageName) {
+function packagePathSegments(packageName: string): string[] {
   return packageName.split("/");
 }
 
-function npmGlobalRoot() {
+function npmGlobalRoot(): string | undefined {
   try {
     return execFileSync("npm", ["root", "-g"], {
       cwd: repoRoot,
@@ -24,8 +24,8 @@ function npmGlobalRoot() {
   }
 }
 
-function candidateRoots() {
-  const roots = new Set();
+function candidateRoots(): string[] {
+  const roots = new Set<string>();
   roots.add(localNodeModules);
 
   const globalRoot = npmGlobalRoot();
@@ -48,7 +48,7 @@ function candidateRoots() {
   return [...roots];
 }
 
-function resolveInstalledPackageDir(packageName) {
+function resolveInstalledPackageDir(packageName: string): string | undefined {
   const segments = packagePathSegments(packageName);
   for (const root of candidateRoots()) {
     const dir = join(root, ...segments);
@@ -60,7 +60,7 @@ function resolveInstalledPackageDir(packageName) {
   return undefined;
 }
 
-function ensureLocalPeerLink(packageName) {
+function ensureLocalPeerLink(packageName: string): void {
   const localDir = join(localNodeModules, ...packagePathSegments(packageName));
   if (existsSync(join(localDir, "package.json"))) {
     return;
@@ -332,7 +332,7 @@ const v2History = buildRemoteCompactionV2History(
   ],
   parsedV2Events.compactionItem,
 );
-assert.deepEqual(v2History.map((item) => item.type), ["message", "compaction"]);
+assert.deepEqual(v2History.map((item: { type: string }) => item.type), ["message", "compaction"]);
 assert.equal(v2History[0].role, "user");
 
 const retainedBudgetHistory = buildRemoteCompactionV2History(
@@ -342,7 +342,10 @@ const retainedBudgetHistory = buildRemoteCompactionV2History(
   ],
   parsedV2Events.compactionItem,
 );
-assert.deepEqual(retainedBudgetHistory.map((item) => item.type), ["message", "message", "compaction"]);
+assert.deepEqual(
+  retainedBudgetHistory.map((item: { type: string }) => item.type),
+  ["message", "message", "compaction"],
+);
 assert.equal(retainedBudgetHistory[0].content[0].text.length, 96_000);
 assert.equal(retainedBudgetHistory[1].content[0].text.length, 160_000);
 
@@ -380,7 +383,10 @@ const compactedHistory = processCompactedHistory([
   { type: "function_call", name: "read", call_id: "call-2", arguments: "{}" },
   { type: "compaction", encrypted_content: "keep" },
 ]);
-assert.deepEqual(compactedHistory.map((item) => item.type), ["message", "message", "compaction"]);
+assert.deepEqual(
+  compactedHistory.map((item: { type: string }) => item.type),
+  ["message", "message", "compaction"],
+);
 assert.equal(compactedHistory[0].role, "user");
 assert.equal(compactedHistory[1].role, "assistant");
 
@@ -439,12 +445,14 @@ assert.ok(detailsRoundTrip, "expected remote compaction details round trip");
 assert.equal(detailsRoundTrip.usage?.cacheWrite, 40);
 assert.equal(detailsRoundTrip.usage?.cost.total, 10);
 
-const handlers = new Map();
+type Hook = (...args: any[]) => any;
+
+const handlers = new Map<string, Hook>();
 const fakePi = {
   registerProvider() {
     assert.fail("remote compaction must not register or override providers");
   },
-  on(name, handler) {
+  on(name: string, handler: Hook) {
     handlers.set(name, handler);
   },
   getAllTools() {
@@ -459,7 +467,7 @@ const fakePi = {
 };
 extensionFactory(fakePi);
 
-const beforeProviderRequest = handlers.get("before_provider_request");
+const beforeProviderRequest = handlers.get("before_provider_request")!;
 assert.equal(typeof beforeProviderRequest, "function");
 const sessionId = "provider-agnostic-session";
 const injectedHistory = [
@@ -511,13 +519,13 @@ const untouchedCodexPayload = beforeProviderRequest(
 );
 assert.equal(untouchedCodexPayload, undefined);
 
-const sessionBeforeCompact = handlers.get("session_before_compact");
+const sessionBeforeCompact = handlers.get("session_before_compact")!;
 assert.equal(typeof sessionBeforeCompact, "function");
-const requestBodies = [];
+const requestBodies: string[] = [];
 const originalFetch = globalThis.fetch;
 try {
-  let responsePlan = [];
-  const sseResponse = (encryptedContent, completed = true) => new Response([
+  let responsePlan: Array<Response | Error> = [];
+  const sseResponse = (encryptedContent: string, completed = true) => new Response([
     `data: ${JSON.stringify({
       type: "response.output_item.done",
       item: { type: "compaction", encrypted_content: encryptedContent },
@@ -532,12 +540,12 @@ try {
     status: 200,
     headers: { "content-type": "text/event-stream" },
   });
-  const httpError = (status, message, code) => new Response(
+  const httpError = (status: number, message: string, code?: string) => new Response(
     JSON.stringify({ error: { message, ...(code ? { code } : {}) } }),
     { status, headers: { "content-type": "application/json" } },
   );
 
-  const streamingResponse = (chunks, keepOpen = false) => new Response(new ReadableStream({
+  const streamingResponse = (chunks: string[], keepOpen = false) => new Response(new ReadableStream({
     start(controller) {
       const encoder = new TextEncoder();
       for (const chunk of chunks) controller.enqueue(encoder.encode(chunk));
@@ -584,12 +592,12 @@ try {
     willRetry: false,
     signal: new AbortController().signal,
   };
-  const notifications = [];
+  const notifications: Array<{ message: string; type?: string }> = [];
   const compactContext = {
     ...requestContext,
     hasUI: true,
     ui: {
-      notify(message, type) {
+      notify(message: string, type?: string) {
         notifications.push({ message, type });
       },
     },
@@ -704,7 +712,7 @@ try {
   const abortingContext = {
     ...compactContext,
     ui: {
-      notify(message, type) {
+      notify(message: string, type?: string) {
         notifications.push({ message, type });
         if (type === "warning") retryAbortController.abort();
       },

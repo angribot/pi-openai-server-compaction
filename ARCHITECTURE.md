@@ -206,5 +206,5 @@ Cross-extension transport matrices and provider-specific experiments remain exte
 5. `src/remote-compaction.ts`
 6. `src/openai.ts`
 7. `src/state.ts`
-8. `scripts/smoke.mjs`
+8. `tests/smoke.ts`
 9. `tests/live/openai-compaction-rpc-live.ts`

@@ -146,8 +146,8 @@ See:
 | `src/remote-compaction.ts` | Responses compaction v2 and replacement-history handling |
 | `src/openai.ts` | `openai-responses` gating and payload helpers |
 | `src/state.ts` | Ephemeral reconstructed history and request-shape state |
+| `tests/smoke.ts` | Offline core contract checks |
 | `tests/live/openai-compaction-rpc-live.ts` | Credentialed Pi RPC regression |
-| `scripts/smoke.mjs` | Offline core contract checks |
 | `ARCHITECTURE.md` | Control flow and module responsibilities |
 | `TODO.md` | Known raw transport capability gap and acceptance criteria |
 
