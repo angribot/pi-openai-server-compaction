@@ -34,7 +34,7 @@ Run:
 npm test
 ```
 
-This runs TypeScript checking and `scripts/smoke.mjs`.
+This runs TypeScript checking and `tests/smoke.ts`.
 
 Required smoke coverage:
 

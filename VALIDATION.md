@@ -22,7 +22,7 @@ The project-owned offline suite is:
 npm test
 ```
 
-It consists of TypeScript checking and `scripts/smoke.mjs`. The suite was rerun after the compaction-only refactor and documentation update; both typecheck and smoke passed.
+It consists of TypeScript checking and `tests/smoke.ts`. The suite was rerun after the compaction-only refactor and documentation update; both typecheck and smoke passed.
 
 The smoke contract covers:
 

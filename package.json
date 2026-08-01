@@ -57,7 +57,7 @@
     }
   },
   "scripts": {
-    "smoke": "node --experimental-strip-types ./scripts/smoke.mjs",
+    "smoke": "node --experimental-strip-types ./tests/smoke.ts",
     "typecheck": "tsc --noEmit",
     "test": "npm run typecheck && npm run smoke",
     "test:live": "node --experimental-strip-types ./tests/live/openai-compaction-rpc-live.ts"
