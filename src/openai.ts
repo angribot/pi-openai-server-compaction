@@ -85,6 +85,12 @@ export function extractResponsesTextConfig(payload: unknown): ResponsesTextConfi
   return isRecord(payload) && isRecord(payload.text) ? payload.text : undefined;
 }
 
+export function extractResponsesServiceTier(payload: unknown): string | undefined {
+  return isRecord(payload) && typeof payload.service_tier === "string"
+    ? payload.service_tier
+    : undefined;
+}
+
 export function messageMatchesModel(message: unknown, model: ModelLike): boolean {
   if (!isRecord(message)) return false;
   return message.provider === model.provider && message.model === model.id;

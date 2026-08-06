@@ -9,6 +9,7 @@ import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import {
   applyRemoteHistoryPayloadPatch,
   extractResponsesReasoningConfig,
+  extractResponsesServiceTier,
   extractResponsesTextConfig,
   isRecord,
   looksLikeResponsesPayload,
@@ -103,6 +104,14 @@ function getMatchingRemoteState(
   return remoteState && remoteState.modelKey === modelKey(model) ? remoteState : undefined;
 }
 
+function getMatchingResponsesRequestShape(
+  sessionId: string,
+  model: TargetModel,
+): ReturnType<typeof getResponsesRequestShapeState> {
+  const requestShape = getResponsesRequestShapeState(sessionId);
+  return requestShape?.modelKey === modelKey(model) ? requestShape : undefined;
+}
+
 function extendRemoteHistoryIfCompatible(params: {
   sessionId: string;
   model: TargetModel | undefined;
@@ -166,7 +175,7 @@ export default function openaiServerCompactionExtension(pi: ExtensionAPI) {
       const branchEntries = event.branchEntries as BranchEntry[];
       const fullBranchMessages = getBranchMessages(branchEntries);
       const remoteState = getMatchingRemoteState(sessionId, model);
-      const observedRequestShape = getResponsesRequestShapeState(sessionId);
+      const observedRequestShape = getMatchingResponsesRequestShape(sessionId, model);
       const responseItems = remoteState
         ? remoteState.explicitHistory
         : messagesToResponseItems(fullBranchMessages);
@@ -177,6 +186,7 @@ export default function openaiServerCompactionExtension(pi: ExtensionAPI) {
         : undefined;
       const reasoning = observedRequestShape?.reasoning ?? fallbackReasoning;
       const text = observedRequestShape?.text;
+      const serviceTier = observedRequestShape?.serviceTier;
       const customInstructions = event.customInstructions?.trim();
       const instructions = customInstructions
         ? `${ctx.getSystemPrompt()}\n\nAdditional user guidance for this compaction request:\n${customInstructions}`
@@ -194,6 +204,7 @@ export default function openaiServerCompactionExtension(pi: ExtensionAPI) {
         parallelToolCalls: true,
         reasoning,
         text,
+        serviceTier,
         signal: event.signal,
         onRetry: ({ attempt, maxRetries, delayMs, error }) => {
           if (!ctx.hasUI) return;
@@ -249,9 +260,11 @@ export default function openaiServerCompactionExtension(pi: ExtensionAPI) {
 
     const sessionId = getSessionId(ctx);
     setResponsesRequestShapeState(sessionId, {
+      modelKey: modelKey(model),
       updatedAt: Date.now(),
       reasoning: extractResponsesReasoningConfig(event.payload),
       text: extractResponsesTextConfig(event.payload),
+      serviceTier: extractResponsesServiceTier(event.payload),
     });
 
     const remoteState = getMatchingRemoteState(sessionId, model);

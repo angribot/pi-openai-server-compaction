@@ -11,9 +11,11 @@ import type {
 } from "./remote-compaction.ts";
 
 export type ResponsesRequestShapeState = {
+  modelKey: string;
   updatedAt: number;
   reasoning?: ResponsesReasoningConfig;
   text?: ResponsesTextConfig;
+  serviceTier?: string;
 };
 
 const remoteCompactionBySessionId = new Map<string, RemoteCompactionSessionState>();

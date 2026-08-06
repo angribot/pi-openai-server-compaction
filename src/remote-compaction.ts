@@ -787,6 +787,7 @@ export function buildRemoteCompactionRequestBody(params: {
   parallelToolCalls: boolean;
   reasoning?: ResponsesReasoningConfig;
   text?: ResponsesTextConfig;
+  serviceTier?: string;
   sessionId?: string;
 }): Record<string, unknown> {
   return {
@@ -802,6 +803,7 @@ export function buildRemoteCompactionRequestBody(params: {
     ...(params.sessionId ? { prompt_cache_key: params.sessionId } : {}),
     ...(params.reasoning ? { reasoning: params.reasoning } : {}),
     ...(params.text ? { text: params.text } : {}),
+    ...(params.serviceTier !== undefined ? { service_tier: params.serviceTier } : {}),
   };
 }
 
@@ -822,6 +824,7 @@ type RemoteCompactionRequestParams = {
   parallelToolCalls: boolean;
   reasoning?: ResponsesReasoningConfig;
   text?: ResponsesTextConfig;
+  serviceTier?: string;
   signal?: AbortSignal;
   onRetry?: (retry: RemoteCompactionRetry) => void;
 };
@@ -1155,6 +1158,7 @@ async function callRemoteCompactionAttempt(
         parallelToolCalls: params.parallelToolCalls,
         reasoning: params.reasoning,
         text: params.text,
+        serviceTier: params.serviceTier,
         sessionId: params.sessionId,
       })),
       signal: params.signal,

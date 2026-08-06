@@ -223,6 +223,7 @@ assert.deepEqual(requestBody.include, ["reasoning.encrypted_content"]);
 assert.deepEqual(requestBody.input.at(-1), { type: "compaction_trigger" });
 assert.deepEqual(requestBody.reasoning, { effort: "high", summary: "auto" });
 assert.deepEqual(requestBody.text, { verbosity: "medium" });
+assert.equal("service_tier" in requestBody, false);
 assert.equal(
   remoteCompactionV2EndpointUrl({
     provider: "openai",
@@ -534,10 +535,24 @@ const requestContext = {
 const patchedPayload = beforeProviderRequest(
   {
     payload: {
-      model: proxyResponsesModel.id,
+      model: "sampling-override-model",
       input: [{ type: "message", role: "user", content: "stale full history" }],
+      instructions: "sampling override instructions",
+      tools: [{ type: "function", name: "sampling_override" }],
+      parallel_tool_calls: false,
+      tool_choice: "none",
+      stream: false,
+      store: true,
+      include: [],
+      prompt_cache_key: "sampling-override-cache-key",
       messages: ["legacy"],
       previous_response_id: "resp_stale",
+      context_management: [{ type: "compaction", compact_threshold: 1 }],
+      temperature: 1.7,
+      top_p: 0.1,
+      unknown_provider_field: "must-not-forward",
+      samplingParams: { service_tier: "flex", store: true },
+      service_tier: "priority",
     },
   },
   requestContext,
@@ -677,12 +692,55 @@ try {
   assert.equal(requestHeaders[0].get("authorization"), "Custom credential");
   assert.ok(requestBodies[0].includes("compaction_trigger"));
   assert.ok(requestBodies[0].includes("compact guidance"));
+  const successfulRequestBody = JSON.parse(requestBodies[0]);
+  assert.equal(successfulRequestBody.model, compactContext.model.id);
+  assert.deepEqual(successfulRequestBody.input.at(-1), { type: "compaction_trigger" });
+  assert.equal(
+    successfulRequestBody.instructions,
+    "system prompt\n\nAdditional user guidance for this compaction request:\ncompact guidance",
+  );
+  assert.deepEqual(successfulRequestBody.tools, []);
+  assert.equal(successfulRequestBody.service_tier, "priority");
+  assert.equal(successfulRequestBody.stream, true);
+  assert.equal(successfulRequestBody.store, false);
+  assert.equal(successfulRequestBody.tool_choice, "auto");
+  assert.equal(successfulRequestBody.parallel_tool_calls, true);
+  assert.deepEqual(successfulRequestBody.include, ["reasoning.encrypted_content"]);
+  assert.equal(successfulRequestBody.prompt_cache_key, sessionId);
+  for (const field of [
+    "messages",
+    "previous_response_id",
+    "context_management",
+    "temperature",
+    "top_p",
+    "unknown_provider_field",
+    "samplingParams",
+  ]) {
+    assert.equal(
+      field in successfulRequestBody,
+      false,
+      `${field} must not be copied into remote compaction requests`,
+    );
+  }
   assert.equal(successResult?.compaction?.summary, REMOTE_COMPACTION_CHECKPOINT_SUMMARY);
   assert.equal(successResult?.compaction?.details?.remoteCompaction?.version, 2);
   assert.equal(
     successResult?.compaction?.details?.remoteCompaction?.modelKey,
     modelKey(compactContext.model),
     "credential-resolved endpoints must not change persisted model identity",
+  );
+
+  requestBodies.length = 0;
+  responsePlan = [sseResponse("MODEL_SWITCH_ENCRYPTED")];
+  const switchedModelResult = await sessionBeforeCompact(compactEvent, {
+    ...compactContext,
+    model: { ...compactContext.model, id: "gpt-5.4-nano-other" },
+  });
+  assert.equal(switchedModelResult?.compaction?.details?.remoteCompaction?.version, 2);
+  assert.equal(
+    "service_tier" in JSON.parse(requestBodies[0]),
+    false,
+    "observed request controls must not cross model keys",
   );
 
   requestBodies.length = 0;
@@ -737,11 +795,26 @@ try {
   const retriedResult = await sessionBeforeCompact(compactEvent, compactContext);
   assert.equal(requestBodies.length, 3);
   assert.equal(new Set(requestBodies).size, 1, "compaction retries must resend the same payload");
+  assert.equal(JSON.parse(requestBodies[0]).service_tier, "priority");
   assert.equal(
     retriedResult?.compaction?.details?.remoteCompaction?.replacementHistory?.at(-1)?.encrypted_content,
     "RETRIED_ENCRYPTED",
   );
   assert.equal(notifications.filter(({ type }) => type === "warning").length, 2);
+
+  beforeProviderRequest(
+    { payload: { model: proxyResponsesModel.id, input: [] } },
+    requestContext,
+  );
+  requestBodies.length = 0;
+  responsePlan = [sseResponse("DEFAULT_TIER_ENCRYPTED")];
+  const defaultTierResult = await sessionBeforeCompact(compactEvent, compactContext);
+  assert.equal(defaultTierResult?.compaction?.details?.remoteCompaction?.version, 2);
+  assert.equal(
+    "service_tier" in JSON.parse(requestBodies[0]),
+    false,
+    "remote compaction must omit service_tier when the latest ordinary request omitted it",
+  );
 
   for (const failureResponse of [
     httpError(400, "invalid compaction request"),

@@ -4,6 +4,7 @@ This changelog intentionally starts at **0.1.0**.
 
 ## Unreleased
 - support Pi 0.84 request auth for remote compaction, including null header deletion and credential-resolved Responses endpoints
+- forward the observed `service_tier` for the same model key while keeping arbitrary sampling parameters out of remote compaction requests
 
 ## 0.5.0 - 2026-08-01
 - align retained user-message replay with Codex's current 64K approximate-token budget
