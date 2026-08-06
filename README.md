@@ -1,8 +1,8 @@
 # pi-openai-server-compaction
 
-A provider-agnostic Pi extension that adds Codex-style remote compaction to models using the plain `openai-responses` API.
+A provider-agnostic Pi extension that adds remote compaction to models using the plain `openai-responses` API.
 
-On a Pi compaction event, the extension sends the conversation to the model's normal Responses endpoint over HTTP/SSE with a trailing `compaction_trigger`. It persists the returned opaque `compaction` item with a native replay checkpoint marker, then injects the reconstructed replacement history into later compatible requests. Those later ordinary requests remain transport-neutral.
+On a Pi compaction event, the extension sends the conversation to the model's Responses endpoint over HTTP/SSE with a trailing `compaction_trigger`. It persists the returned compaction item in replacement history with a checkpoint marker, then injects that history into later compatible requests. Those later ordinary requests remain transport-neutral.
 
 > **Status:** experimental but live-tested. Install project-local first and keep rollback easy.
 
@@ -17,7 +17,9 @@ Remote compaction is enabled by API type, not provider name:
 | `azure-openai-responses` | No |
 | Other APIs | No |
 
-Any provider can participate when its model uses `openai-responses` and its Responses endpoint supports the compaction protocol. The extension retries transient remote failures twice, then cancels compaction instead of falling back to Pi's text compactor. This preserves native replay semantics and prevents an opaque checkpoint from being irreversibly replaced by a summary that cannot read it.
+Any provider can participate when its model uses `openai-responses` and its Responses endpoint supports the compaction protocol. The extension retries transient remote failures twice, then cancels compaction instead of falling back to Pi's text compactor. This preserves native replay semantics and prevents a compaction item from being irreversibly replaced by a text summary that cannot interpret it.
+
+See [ADR 0001](docs/adr/0001-select-models-by-api-contract.md) and [ADR 0002](docs/adr/0002-prefer-native-replay-continuity.md) for the eligibility and continuity decisions.
 
 ## Independent transport composition
 
@@ -31,7 +33,7 @@ Current behavior is therefore:
 2. later ordinary request: replacement history injected by this extension;
 3. ordinary request transport: selected independently by the provider or a transport extension.
 
-The missing raw transport seam and its constraints are tracked in [`TODO.md`](TODO.md).
+The missing raw transport API and its constraints are tracked in [issue #8](https://github.com/angribot/pi-openai-server-compaction/issues/8). The ownership boundary is recorded in [ADR 0003](docs/adr/0003-keep-provider-transport-independent.md).
 
 ## What it does
 
@@ -41,21 +43,21 @@ On compaction, the extension:
    - the current explicit history;
    - a trailing `{ "type": "compaction_trigger" }`;
    - the current system prompt, optional custom compaction guidance, tools, reasoning configuration, and text configuration.
-2. Validates the returned opaque `compaction` item.
+2. Requires a completed response containing exactly one valid compaction item.
 3. Stores a fixed `[Remote Responses compaction checkpoint]` marker in `CompactionEntry.summary` and retains recent user messages using Codex's current 64K approximate-token budget in `CompactionEntry.details.remoteCompaction`.
-4. Reconstructs that history after resume, tree navigation, forks, and later compactions.
+4. Reconstructs replacement history after resume, tree navigation, forks, and later compactions.
 5. Replaces the `input` of later model-compatible `openai-responses` requests with the reconstructed history.
 
 The extension intentionally does not add `store`, `context_management`, or `previous_response_id` to ordinary requests. Those are separate persistence, automatic-context-management, and continuation concerns.
 
-## Native checkpoint semantics
+## Native replay semantics
 
 The package maintains:
 
-- **Native replay history** — retained user items plus the opaque compaction item, for compatible future Responses requests.
-- **Checkpoint marker** — a fixed two-line `CompactionEntry.summary` explaining that detailed context is retained in the native artifact and requires a compatible Responses model.
+- **Replacement history** — retained user items plus the compaction item, for compatible future Responses requests.
+- **Checkpoint marker** — a fixed two-line `CompactionEntry.summary` explaining that detailed context is retained in replacement history and requires a compatible model.
 
-The marker is intentionally not a second model-generated summary. A successful logical compaction may retry the same remote request after a transient transport or stream failure, but it never starts a separate summary request. Switching to an incompatible model may therefore lose access to detailed pre-compaction context. Pi's local session JSONL remains authoritative for the persisted artifact.
+The marker is intentionally not a second model-generated summary. A successful logical compaction may retry the same remote request after a transient transport or stream failure, but it never starts a separate summary request. Switching to an incompatible model may therefore lose access to detailed pre-compaction context. Pi's local session JSONL remains authoritative for persisted replacement history.
 
 ## Install
 
@@ -88,15 +90,16 @@ pi -e ./src/index.ts --model provider/model
 
 ## Behavior
 
-Remote compaction is always enabled for supported models, and activation notifications are disabled. Pi itself decides when compaction occurs; this extension does not maintain a separate compaction threshold.
+Remote compaction is always enabled for eligible models, and activation notifications are disabled. Pi itself decides when compaction occurs; this extension does not maintain a separate compaction threshold.
 
 ## Data handling
 
 - Compaction requests send conversation context to the configured Responses endpoint.
 - The remote compaction request uses `store: false`.
-- Returned opaque artifacts are stored in Pi's local session JSONL.
-- Ordinary provider requests are not changed until a compatible remote artifact needs replay.
-- Switching to an incompatible model does not replay the opaque artifact and may only expose the checkpoint marker and post-compaction context.
+- Returned compaction items are stored as replacement history in Pi's local session JSONL.
+- Persisted details are validated before reconstruction; legacy version 1 details remain readable, while new compactions write version 2.
+- Ordinary requests are not changed until matching replacement history needs replay.
+- Switching to an incompatible model does not replay replacement history and may expose only the checkpoint marker and post-compaction context.
 
 ## Testing
 
@@ -106,7 +109,7 @@ Offline core checks:
 npm test
 ```
 
-The smoke suite covers only project-owned requirements: provider-agnostic `openai-responses` gating, request-body construction, artifact validation/reconstruction, payload history injection, and the absence of provider registration.
+The smoke suite covers only project-owned requirements: provider-agnostic `openai-responses` gating, request-body construction, compaction-item validation, replacement-history reconstruction and injection, and the absence of provider registration.
 
 Credentialed live regression:
 
@@ -120,7 +123,9 @@ Override the model:
 PI_OPENAI_SERVER_COMPACTION_TEST_MODEL=provider/model npm run test:live
 ```
 
-Cross-project transport matrices are intentionally not stored in this repository. Composition with a WebSocket extension is validated externally; any discovered defect is reduced to a regression at the owning project's interface.
+The live harness covers same-process native replay, reduced-plaintext recovery, fork safety, resume/reload continuity, model switching away and back, and resume after a model-switch round trip. Release validation should additionally exercise repeated compaction, tree navigation, and a controlled final remote failure, confirming that no partial replacement history is persisted and no local fallback or aborted-turn retry occurs.
+
+Cross-project transport matrices, machine-specific provider settings, and temporary live probes are intentionally not stored in this repository. Composition with a WebSocket extension is validated externally; any discovered defect is reduced to a regression at the owning project's interface.
 
 ## Benchmarks
 
@@ -142,14 +147,15 @@ See:
 
 | Path | Purpose |
 |---|---|
-| `src/index.ts` | Pi hooks, history injection, lifecycle orchestration |
+| `src/index.ts` | Pi hooks, replacement-history injection, lifecycle orchestration |
 | `src/remote-compaction.ts` | Responses compaction v2 and replacement-history handling |
 | `src/openai.ts` | `openai-responses` gating and payload helpers |
-| `src/state.ts` | Ephemeral reconstructed history and request-shape state |
+| `src/state.ts` | Ephemeral replacement-history and request-shape state |
 | `tests/smoke.ts` | Offline core contract checks |
 | `tests/live/openai-compaction-rpc-live.ts` | Credentialed Pi RPC regression |
-| `ARCHITECTURE.md` | Control flow and module responsibilities |
-| `TODO.md` | Known raw transport capability gap and acceptance criteria |
+| `CONTEXT.md` | Canonical domain language |
+| `docs/adr/` | Durable architecture decisions |
+| `CHANGELOG.md` | Release history and pending user-visible changes |
 
 ## License
 
