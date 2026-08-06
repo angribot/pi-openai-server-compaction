@@ -215,23 +215,22 @@ function applyProviderHeaders(
   const deletedHeaderNames = new Set<string>();
   for (const [name, value] of Object.entries(providerHeaders ?? {})) {
     const normalizedName = name.toLowerCase();
-    deleteHeaderCaseInsensitively(headers, name);
     if (value === null) {
+      deleteHeaderCaseInsensitively(headers, name);
       deletedHeaderNames.add(normalizedName);
-    } else {
-      deletedHeaderNames.delete(normalizedName);
-      headers[name] = value;
+      continue;
     }
+    setHeaderCaseInsensitively(headers, name, value);
+    deletedHeaderNames.delete(normalizedName);
   }
   return deletedHeaderNames;
 }
 
-function withRemoteCompactionV2Feature(
+function addRemoteCompactionV2Feature(
   headers: Record<string, string>,
   deletedHeaderNames: ReadonlySet<string>,
-): Record<string, string> {
-  const result = { ...headers };
-  if (deletedHeaderNames.has("x-codex-beta-features")) return result;
+): void {
+  if (deletedHeaderNames.has("x-codex-beta-features")) return;
 
   const configuredFeatures = Object.entries(headers)
     .find(([name]) => name.toLowerCase() === "x-codex-beta-features")?.[1]
@@ -239,8 +238,7 @@ function withRemoteCompactionV2Feature(
     .map((feature) => feature.trim())
     .filter(Boolean) ?? [];
   const features = [...new Set([...configuredFeatures, REMOTE_COMPACTION_V2_FEATURE])];
-  setHeaderCaseInsensitively(result, "x-codex-beta-features", features.join(","));
-  return result;
+  setHeaderCaseInsensitively(headers, "x-codex-beta-features", features.join(","));
 }
 
 export function buildRemoteCompactionHeaders(params: {
@@ -264,7 +262,8 @@ export function buildRemoteCompactionHeaders(params: {
   if (!deletedHeaderNames.has("content-type")) {
     setHeaderCaseInsensitively(headers, "content-type", "application/json");
   }
-  return withRemoteCompactionV2Feature(headers, deletedHeaderNames);
+  addRemoteCompactionV2Feature(headers, deletedHeaderNames);
+  return headers;
 }
 
 function isAssistantPhase(value: unknown): value is AssistantPhase {
