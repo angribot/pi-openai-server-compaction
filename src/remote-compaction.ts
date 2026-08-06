@@ -12,7 +12,12 @@ import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import type { ToolInfo } from "@earendil-works/pi-coding-agent";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
-import { calculateCost, type Model, type Usage } from "@earendil-works/pi-ai";
+import {
+  calculateCost,
+  type Model,
+  type ProviderHeaders,
+  type Usage,
+} from "@earendil-works/pi-ai";
 import {
   hostnameFromBaseUrl,
   isRecord,
@@ -131,17 +136,21 @@ function assertRemoteCompactionModel(model: unknown): void {
   }
 }
 
-function resolveResponsesEndpoint(model: Model<any>): string {
-  const baseUrl = normalizeBaseUrl(
+function resolveResponsesEndpoint(model: Model<any>, resolvedBaseUrl?: string): string {
+  const modelBaseUrl = normalizeBaseUrl(
     typeof model.baseUrl === "string" ? model.baseUrl : undefined,
     "https://api.openai.com/v1",
   );
+  const baseUrl = normalizeBaseUrl(resolvedBaseUrl, modelBaseUrl);
   return baseUrl.endsWith("/responses") ? baseUrl : `${baseUrl}/responses`;
 }
 
-export function remoteCompactionV2EndpointUrl(model: Model<any>): string {
+export function remoteCompactionV2EndpointUrl(
+  model: Model<any>,
+  resolvedBaseUrl?: string,
+): string {
   assertRemoteCompactionModel(model);
-  return resolveResponsesEndpoint(model);
+  return resolveResponsesEndpoint(model, resolvedBaseUrl);
 }
 
 function resolveCodexHome(): string {
@@ -183,44 +192,78 @@ export function buildCodexIdentityHeaders(sessionId?: string): Record<string, st
   };
 }
 
-function withRemoteCompactionV2Feature(headers: Record<string, string>): Record<string, string> {
+function deleteHeaderCaseInsensitively(headers: Record<string, string>, name: string): void {
+  const expected = name.toLowerCase();
+  for (const existingName of Object.keys(headers)) {
+    if (existingName.toLowerCase() === expected) delete headers[existingName];
+  }
+}
+
+function setHeaderCaseInsensitively(
+  headers: Record<string, string>,
+  name: string,
+  value: string,
+): void {
+  deleteHeaderCaseInsensitively(headers, name);
+  headers[name] = value;
+}
+
+function applyProviderHeaders(
+  headers: Record<string, string>,
+  providerHeaders: ProviderHeaders | undefined,
+): Set<string> {
+  const deletedHeaderNames = new Set<string>();
+  for (const [name, value] of Object.entries(providerHeaders ?? {})) {
+    const normalizedName = name.toLowerCase();
+    if (value === null) {
+      deleteHeaderCaseInsensitively(headers, name);
+      deletedHeaderNames.add(normalizedName);
+      continue;
+    }
+    setHeaderCaseInsensitively(headers, name, value);
+    deletedHeaderNames.delete(normalizedName);
+  }
+  return deletedHeaderNames;
+}
+
+function addRemoteCompactionV2Feature(
+  headers: Record<string, string>,
+  deletedHeaderNames: ReadonlySet<string>,
+): void {
+  if (deletedHeaderNames.has("x-codex-beta-features")) return;
+
   const configuredFeatures = Object.entries(headers)
     .find(([name]) => name.toLowerCase() === "x-codex-beta-features")?.[1]
     ?.split(",")
     .map((feature) => feature.trim())
     .filter(Boolean) ?? [];
-  const headersWithoutFeature = Object.fromEntries(
-    Object.entries(headers).filter(([name]) => name.toLowerCase() !== "x-codex-beta-features"),
-  );
   const features = [...new Set([...configuredFeatures, REMOTE_COMPACTION_V2_FEATURE])];
-  return {
-    ...headersWithoutFeature,
-    "x-codex-beta-features": features.join(","),
-  };
-}
-
-function hasHeader(headers: Record<string, string> | undefined, name: string): boolean {
-  const expected = name.toLowerCase();
-  return Object.keys(headers ?? {}).some((headerName) => headerName.toLowerCase() === expected);
+  setHeaderCaseInsensitively(headers, "x-codex-beta-features", features.join(","));
 }
 
 export function buildRemoteCompactionHeaders(params: {
   model: Model<any>;
   apiKey?: string;
-  headers?: Record<string, string>;
+  headers?: ProviderHeaders;
   sessionId?: string;
 }): Record<string, string> {
   assertRemoteCompactionModel(params.model);
-  const codexIdentityHeaders = buildCodexIdentityHeaders(params.sessionId);
-  return withRemoteCompactionV2Feature({
-    ...(params.apiKey && !hasHeader(params.headers, "authorization")
-      ? { authorization: `Bearer ${params.apiKey}` }
-      : {}),
-    ...codexIdentityHeaders,
-    ...(params.headers ?? {}),
-    accept: "text/event-stream",
-    "content-type": "application/json",
-  });
+  const headers: Record<string, string> = {};
+  if (params.apiKey) {
+    setHeaderCaseInsensitively(headers, "authorization", `Bearer ${params.apiKey}`);
+  }
+  for (const [name, value] of Object.entries(buildCodexIdentityHeaders(params.sessionId))) {
+    setHeaderCaseInsensitively(headers, name, value);
+  }
+  const deletedHeaderNames = applyProviderHeaders(headers, params.headers);
+  if (!deletedHeaderNames.has("accept")) {
+    setHeaderCaseInsensitively(headers, "accept", "text/event-stream");
+  }
+  if (!deletedHeaderNames.has("content-type")) {
+    setHeaderCaseInsensitively(headers, "content-type", "application/json");
+  }
+  addRemoteCompactionV2Feature(headers, deletedHeaderNames);
+  return headers;
 }
 
 function isAssistantPhase(value: unknown): value is AssistantPhase {
@@ -770,7 +813,8 @@ type RemoteCompactionV2Events = {
 type RemoteCompactionRequestParams = {
   model: Model<any>;
   apiKey?: string;
-  headers?: Record<string, string>;
+  headers?: ProviderHeaders;
+  baseUrl?: string;
   sessionId?: string;
   input: ResponseItem[];
   instructions?: string;
@@ -1095,7 +1139,7 @@ async function callRemoteCompactionAttempt(
   throwIfAborted(params.signal);
   let response: Response;
   try {
-    response = await fetch(remoteCompactionV2EndpointUrl(params.model), {
+    response = await fetch(remoteCompactionV2EndpointUrl(params.model, params.baseUrl), {
       method: "POST",
       headers: buildRemoteCompactionHeaders({
         model: params.model,

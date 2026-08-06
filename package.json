@@ -63,9 +63,9 @@
     "test:live": "node --experimental-strip-types ./tests/live/openai-compaction-rpc-live.ts"
   },
   "devDependencies": {
-    "@earendil-works/pi-agent-core": "0.83.0",
-    "@earendil-works/pi-ai": "0.83.0",
-    "@earendil-works/pi-coding-agent": "0.83.0",
+    "@earendil-works/pi-agent-core": "0.84.0",
+    "@earendil-works/pi-ai": "0.84.0",
+    "@earendil-works/pi-coding-agent": "0.84.0",
     "@types/node": "^24.10.0",
     "typescript": "^5.9.3"
   }

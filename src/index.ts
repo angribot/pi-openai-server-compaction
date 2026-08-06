@@ -186,6 +186,7 @@ export default function openaiServerCompactionExtension(pi: ExtensionAPI) {
         model,
         apiKey: auth.apiKey,
         headers: auth.headers,
+        baseUrl: auth.baseUrl,
         sessionId,
         input: promptResponseItems,
         instructions,

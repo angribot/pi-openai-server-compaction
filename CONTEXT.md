@@ -33,7 +33,7 @@ Fixed human-readable text marking where detailed earlier context moved into repl
 _Avoid_: Checkpoint summary, native replay checkpoint, portable summary
 
 **Model key**:
-The provider, API type, and model ID considered together as the identity that determines native replay compatibility.
+The provider, API type, and model ID considered together as the identity that determines native replay compatibility. Request-specific credentials and resolved endpoints are not part of this identity.
 _Avoid_: Model ID, provider name
 
 **Ordinary request**:
