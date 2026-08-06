@@ -3,6 +3,8 @@
 This changelog intentionally starts at **0.1.0**.
 
 ## Unreleased
+
+## 0.6.0 - 2026-08-06
 - support Pi 0.84 request auth for remote compaction, including null header deletion and credential-resolved Responses endpoints
 - forward the observed `service_tier` for the same model key while keeping arbitrary sampling parameters out of remote compaction requests
 
