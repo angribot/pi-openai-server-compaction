@@ -243,6 +243,14 @@ assert.equal(
   "https://proxy.example.com/v1/responses",
 );
 assert.equal(
+  remoteCompactionV2EndpointUrl(proxyResponsesModel, "https://tenant.example.com/openai/v1/"),
+  "https://tenant.example.com/openai/v1/responses",
+);
+assert.equal(
+  remoteCompactionV2EndpointUrl(proxyResponsesModel, undefined),
+  "https://proxy.example.com/v1/responses",
+);
+assert.equal(
   remoteCompactionV2EndpointUrl({
     ...proxyResponsesModel,
     baseUrl: "https://proxy.example.com/gateway",
@@ -423,6 +431,38 @@ const configuredAuthorizationHeaders = buildRemoteCompactionHeaders({
 assert.equal(configuredAuthorizationHeaders.Authorization, "Custom credential");
 assert.equal("authorization" in configuredAuthorizationHeaders, false);
 
+const deletedAuthorizationHeaders = buildRemoteCompactionHeaders({
+  model: proxyResponsesModel,
+  apiKey: "must-not-be-used",
+  headers: { Authorization: null },
+});
+assert.equal(
+  Object.keys(deletedAuthorizationHeaders).some((name) => name.toLowerCase() === "authorization"),
+  false,
+  "a null ProviderHeaders value must delete API-key fallback authorization case-insensitively",
+);
+assert.equal(
+  Object.values(deletedAuthorizationHeaders).includes("null"),
+  false,
+  "a null ProviderHeaders value must never be serialized as a header string",
+);
+
+const deletedTransportHeaders = buildRemoteCompactionHeaders({
+  model: proxyResponsesModel,
+  headers: {
+    ACCEPT: null,
+    "Content-Type": null,
+    "X-CoDeX-BeTa-FeAtUrEs": null,
+  },
+});
+for (const deletedName of ["accept", "content-type", "x-codex-beta-features"]) {
+  assert.equal(
+    Object.keys(deletedTransportHeaders).some((name) => name.toLowerCase() === deletedName),
+    false,
+    `null ProviderHeaders values must delete ${deletedName} case-insensitively`,
+  );
+}
+
 const detailsRoundTrip = extractRemoteCompactionDetails({
   remoteCompaction: buildRemoteCompactionDetails(
     {
@@ -522,6 +562,8 @@ assert.equal(untouchedCodexPayload, undefined);
 const sessionBeforeCompact = handlers.get("session_before_compact")!;
 assert.equal(typeof sessionBeforeCompact, "function");
 const requestBodies: string[] = [];
+const requestUrls: string[] = [];
+const requestHeaders: Headers[] = [];
 const originalFetch = globalThis.fetch;
 try {
   let responsePlan: Array<Response | Error> = [];
@@ -565,6 +607,10 @@ try {
         ? await input.clone().text()
         : "";
     requestBodies.push(body);
+    requestUrls.push(input instanceof Request ? input.url : String(input));
+    requestHeaders.push(new Headers(
+      init?.headers ?? (input instanceof Request ? input.headers : undefined),
+    ));
     const next = responsePlan.shift();
     if (next instanceof Error) throw next;
     assert.ok(next instanceof Response, "missing planned compaction response");
@@ -612,7 +658,11 @@ try {
     },
     modelRegistry: {
       async getApiKeyAndHeaders() {
-        return { ok: true, headers: { Authorization: "Custom credential" } };
+        return {
+          ok: true,
+          baseUrl: "https://tenant.example.com/openai/v1",
+          headers: { Authorization: "Custom credential" },
+        };
       },
     },
     getSystemPrompt() {
@@ -623,10 +673,42 @@ try {
   responsePlan = [sseResponse("SUCCESS_ENCRYPTED")];
   const successResult = await sessionBeforeCompact(compactEvent, compactContext);
   assert.equal(requestBodies.length, 1);
+  assert.equal(requestUrls[0], "https://tenant.example.com/openai/v1/responses");
+  assert.equal(requestHeaders[0].get("authorization"), "Custom credential");
   assert.ok(requestBodies[0].includes("compaction_trigger"));
   assert.ok(requestBodies[0].includes("compact guidance"));
   assert.equal(successResult?.compaction?.summary, REMOTE_COMPACTION_CHECKPOINT_SUMMARY);
   assert.equal(successResult?.compaction?.details?.remoteCompaction?.version, 2);
+  assert.equal(
+    successResult?.compaction?.details?.remoteCompaction?.modelKey,
+    modelKey(compactContext.model),
+    "credential-resolved endpoints must not change persisted model identity",
+  );
+
+  requestBodies.length = 0;
+  requestUrls.length = 0;
+  requestHeaders.length = 0;
+  responsePlan = [sseResponse("NULL_AUTH_ENCRYPTED")];
+  const deletedAuthResult = await sessionBeforeCompact(compactEvent, {
+    ...compactContext,
+    modelRegistry: {
+      async getApiKeyAndHeaders() {
+        return {
+          ok: true,
+          apiKey: "must-not-be-used",
+          headers: { Authorization: null },
+        };
+      },
+    },
+  });
+  assert.equal(deletedAuthResult?.compaction?.details?.remoteCompaction?.version, 2);
+  assert.equal(requestUrls[0], "https://proxy.example.com/v1/responses");
+  assert.equal(
+    requestHeaders[0].has("authorization"),
+    false,
+    "null ProviderHeaders values must delete matching headers before fetch",
+  );
+  assert.equal([...requestHeaders[0].values()].includes("null"), false);
 
   requestBodies.length = 0;
   responsePlan = [streamingResponse([
