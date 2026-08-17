@@ -4,8 +4,17 @@
  * Owns remote compaction and Responses payload history replay. It deliberately
  * does not register providers or choose HTTP versus WebSocket transport.
  */
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
+import type { OpenAIResponsesCompat } from "@earendil-works/pi-ai";
+import {
+  convertResponsesMessages,
+  convertResponsesTools,
+} from "@earendil-works/pi-ai/api/openai-responses-shared";
+import {
+  buildSessionContext,
+  convertToLlm,
+  type ExtensionAPI,
+} from "@earendil-works/pi-coding-agent";
 import {
   applyRemoteHistoryPayloadPatch,
   extractResponsesReasoningConfig,
@@ -20,13 +29,12 @@ import {
 } from "./openai.ts";
 import {
   buildRemoteCompactionDetails,
-  buildToolsPayload,
   callRemoteCompactionEndpoint,
   REMOTE_COMPACTION_CHECKPOINT_SUMMARY,
   messageToResponseItems,
-  messagesToResponseItems,
   normalizeResponseItemsForPrompt,
   reconstructRemoteCompactionStateFromBranch,
+  type ResponseItem,
 } from "./remote-compaction.ts";
 import {
   clearAllRuntimeState,
@@ -39,6 +47,8 @@ import {
 } from "./state.ts";
 
 type TargetModel = Parameters<typeof modelKey>[0];
+
+const OPENAI_TOOL_CALL_PROVIDERS = new Set(["openai", "openai-codex", "opencode"]);
 
 type BranchEntry = {
   type: string;
@@ -57,12 +67,6 @@ type SessionContextLike = {
 
 function getSessionId(ctx: SessionContextLike): string {
   return ctx.sessionManager.getSessionId();
-}
-
-function getBranchMessages(branchEntries: BranchEntry[]): AgentMessage[] {
-  return branchEntries.flatMap((entry) =>
-    entry.type === "message" && entry.message ? [entry.message as AgentMessage] : [],
-  );
 }
 
 function getBranchThinkingLevel(branchEntries: BranchEntry[]): string | undefined {
@@ -170,15 +174,28 @@ export default function openaiServerCompactionExtension(pi: ExtensionAPI) {
       if (event.signal.aborted) return { cancel: true };
       if (!auth.ok) throw new Error(auth.error);
 
-      const tools = buildToolsPayload(pi.getAllTools(), pi.getActiveTools());
+      const allTools = pi.getAllTools();
+      const activeToolNames = new Set(pi.getActiveTools());
+      const activeTools = allTools.filter((tool) => activeToolNames.has(tool.name));
+      const responsesCompat = model.compat as OpenAIResponsesCompat | undefined;
+      const toolOptions = {
+        supportsStrictMode: responsesCompat?.supportsStrictMode ?? false,
+        supportsOpenAIGrammarTools: responsesCompat?.supportsOpenAIGrammarTools ?? false,
+      };
+      const tools = convertResponsesTools(activeTools, toolOptions) as unknown as Record<string, unknown>[];
       const sessionId = getSessionId(ctx);
       const branchEntries = event.branchEntries as BranchEntry[];
-      const fullBranchMessages = getBranchMessages(branchEntries);
+      const effectiveMessages = convertToLlm(buildSessionContext(event.branchEntries).messages);
       const remoteState = getMatchingRemoteState(sessionId, model);
       const observedRequestShape = getMatchingResponsesRequestShape(sessionId, model);
       const responseItems = remoteState
         ? remoteState.explicitHistory
-        : messagesToResponseItems(fullBranchMessages);
+        : convertResponsesMessages(
+            model,
+            { messages: effectiveMessages, tools: activeTools },
+            OPENAI_TOOL_CALL_PROVIDERS,
+            { includeSystemPrompt: false, toolOptions },
+          ) as unknown as ResponseItem[];
       const promptResponseItems = normalizeResponseItemsForPrompt(responseItems, model);
       const thinkingLevel = pi.getThinkingLevel();
       const fallbackReasoning = model.reasoning

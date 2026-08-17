@@ -10,7 +10,6 @@ import { randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
-import type { ToolInfo } from "@earendil-works/pi-coding-agent";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import {
   calculateCost,
@@ -445,10 +444,6 @@ export function messageToResponseItems(message: AgentMessage): ResponseItem[] {
   return items;
 }
 
-export function messagesToResponseItems(messages: AgentMessage[]): ResponseItem[] {
-  return messages.flatMap((message) => messageToResponseItems(message));
-}
-
 function cloneResponseItem(item: ResponseItem): ResponseItem {
   return JSON.parse(JSON.stringify(item)) as ResponseItem;
 }
@@ -681,23 +676,6 @@ export function buildRemoteCompactionV2History(
     ...truncateRetainedMessages(retainedUserMessages, RETAINED_MESSAGE_TOKEN_BUDGET),
     cloneResponseItem(compactionItem),
   ];
-}
-
-function toolInfoToResponseTool(tool: ToolInfo): Record<string, unknown> {
-  return {
-    type: "function",
-    name: tool.name,
-    description: tool.description,
-    parameters: tool.parameters,
-  };
-}
-
-export function buildToolsPayload(
-  allTools: ToolInfo[],
-  activeToolNames: string[],
-): Record<string, unknown>[] {
-  const active = new Set(activeToolNames);
-  return allTools.filter((tool) => active.has(tool.name)).map(toolInfoToResponseTool);
 }
 
 function extractCacheWriteTokens(value: unknown): number {

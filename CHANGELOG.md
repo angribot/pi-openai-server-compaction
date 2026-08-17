@@ -3,6 +3,7 @@
 This changelog intentionally starts at **0.1.0**.
 
 ## Unreleased
+- build remote compaction input from Pi's effective context and Responses converters, preserving prior summaries, contextual messages, shell output, assistant item metadata, and tool compatibility behavior
 
 ## 0.6.0 - 2026-08-06
 - support Pi 0.84 request auth for remote compaction, including null header deletion and credential-resolved Responses endpoints
