@@ -56,6 +56,8 @@ On ordinary requests, the extension preserves Pi's effective provider parameters
 
 Arbitrary sampling parameters are not merged into remote compaction. Values for `temperature`, `top_p`, unknown provider fields, and protocol-owned fields are not copied. The extension constructs the compaction model, input, tools, trigger, streaming mode, `store: false`, and encrypted-reasoning inclusion itself. If no matching `service_tier` was observed, the field is omitted and the endpoint default applies.
 
+Before sending, the extension estimates the complete remote-compaction request against the selected model's context window using Pi's coarse character-based accounting. Requests already within budget are left unchanged. For an oversized request, old function and tool outputs are reduced first; if more space is needed, the oldest remaining history is discarded as complete call/output pairs and a boundary text message may be retained with content from both its beginning and end around an explicit truncation marker.
+
 ## Native replay semantics
 
 The package maintains:

@@ -48,7 +48,7 @@ export type ResponseItem =
   | {
       type: "message";
       role: string;
-      content: ResponseContentItem[];
+      content: ResponseContentItem[] | string;
       end_turn?: boolean;
       phase?: AssistantPhase;
     }
@@ -77,6 +77,13 @@ export type RemoteCompactionTextConfig = {
 export type RemoteCompactionUsageSnapshot = Usage;
 
 const IMAGE_CONTENT_OMITTED_PLACEHOLDER = "image content omitted because you do not support image input";
+const APPROXIMATE_CHARS_PER_TOKEN = 4;
+const APPROXIMATE_IMAGE_CHARS = 4_800;
+const REMOTE_COMPACTION_MESSAGE_TRUNCATION_MARKER =
+  "\n\n[... content truncated to fit the remote compaction context ...]\n\n";
+// Keep this aligned with Codex's model-visible marker for rewritten outputs.
+export const CONTEXT_WINDOW_TRUNCATED_OUTPUT_MESSAGE =
+  "Output exceeded the available model context and was truncated";
 const OPENAI_TOOL_CALL_PROVIDERS = new Set(["openai", "openai-codex", "opencode"]);
 const REMOTE_COMPACTION_V2_FEATURE = "remote_compaction_v2";
 export const REMOTE_COMPACTION_CHECKPOINT_SUMMARY =
@@ -754,7 +761,9 @@ export function processCompactedHistory(items: ResponseItem[]): ResponseItem[] {
 }
 
 function responseMessageText(item: ResponseItem): string {
-  if (item.type !== "message" || !Array.isArray(item.content)) return "";
+  if (item.type !== "message") return "";
+  if (typeof item.content === "string") return item.content;
+  if (!Array.isArray(item.content)) return "";
   return item.content
     .filter((content): content is Extract<ResponseContentItem, { type: "input_text" | "output_text" }> =>
       content.type === "input_text" || content.type === "output_text",
@@ -768,13 +777,19 @@ function approximateMessageTokens(item: ResponseItem): number {
 }
 
 function truncateMessageToTokenBudget(item: ResponseItem, maxTokens: number): ResponseItem | undefined {
-  if (item.type !== "message" || !Array.isArray(item.content)) return cloneResponseItem(item);
+  if (item.type !== "message") return cloneResponseItem(item);
+  if (typeof item.content === "string") {
+    const text = sanitizeSurrogates(item.content.slice(0, Math.max(0, maxTokens * 4)));
+    return text ? { ...cloneResponseItem(item), content: text } : undefined;
+  }
+  if (!Array.isArray(item.content)) return cloneResponseItem(item);
   let remainingCharacters = Math.max(0, maxTokens * 4);
   const content = item.content.flatMap((part) => {
     if (part.type === "input_image") return [part];
     if (remainingCharacters === 0) return [];
-    const text = part.text.slice(0, remainingCharacters);
-    remainingCharacters -= text.length;
+    const rawText = part.text.slice(0, remainingCharacters);
+    remainingCharacters -= rawText.length;
+    const text = sanitizeSurrogates(rawText);
     return text ? [{ ...part, text }] : [];
   });
   return content.length > 0 ? { ...cloneResponseItem(item), content } : undefined;
@@ -946,7 +961,7 @@ function parseRemoteCompactionUsageSnapshot(value: unknown): RemoteCompactionUsa
   };
 }
 
-export function buildRemoteCompactionRequestBody(params: {
+type RemoteCompactionRequestBodyParams = {
   model: Model<any>;
   input: ResponseItem[];
   instructions?: string;
@@ -956,7 +971,11 @@ export function buildRemoteCompactionRequestBody(params: {
   text?: RemoteCompactionTextConfig;
   serviceTier?: string;
   sessionId?: string;
-}): Record<string, unknown> {
+};
+
+export function buildRemoteCompactionRequestBody(
+  params: RemoteCompactionRequestBodyParams,
+): Record<string, unknown> {
   return {
     model: params.model.id,
     input: [...params.input, { type: "compaction_trigger" }],
@@ -974,25 +993,350 @@ export function buildRemoteCompactionRequestBody(params: {
   };
 }
 
+function approximateOpaqueItemCharacters(encodedLength: number): number {
+  return Math.max(0, Math.floor((encodedLength * 3) / 4) - 650);
+}
+
+function tokenEstimateReplacer(
+  this: Record<string, unknown>,
+  key: string,
+  value: unknown,
+): unknown {
+  if (
+    key === "encrypted_content" &&
+    typeof value === "string" &&
+    (this.type === "reasoning" || this.type === "compaction" || this.type === "compaction_summary")
+  ) {
+    return "e".repeat(approximateOpaqueItemCharacters(value.length));
+  }
+  if (
+    key === "image_url" &&
+    typeof value === "string" &&
+    /^data:image\/[^;,]+(?:;[^,]*)?;base64,/i.test(value)
+  ) {
+    return "i".repeat(APPROXIMATE_IMAGE_CHARS);
+  }
+  return value;
+}
+
+function approximateSerializedCharacters(value: unknown): number {
+  return (JSON.stringify(value, tokenEstimateReplacer) ?? "").length;
+}
+
+function approximateTokensFromCharacters(characters: number): number {
+  return Math.max(1, Math.ceil(characters / APPROXIMATE_CHARS_PER_TOKEN));
+}
+
+function approximateSerializedTokens(value: unknown): number {
+  return approximateTokensFromCharacters(approximateSerializedCharacters(value));
+}
+
+export function estimateRemoteCompactionRequestTokens(
+  params: RemoteCompactionRequestBodyParams,
+): number {
+  return approximateSerializedTokens(buildRemoteCompactionRequestBody(params));
+}
+
+function rewrittenOutputForContextWindow(item: ResponseItem): ResponseItem | undefined {
+  if (item.type === "function_call_output" || item.type === "custom_tool_call_output") {
+    if (responseItemOutput(item) === CONTEXT_WINDOW_TRUNCATED_OUTPUT_MESSAGE) return undefined;
+    return {
+      ...cloneResponseItem(item),
+      output: CONTEXT_WINDOW_TRUNCATED_OUTPUT_MESSAGE,
+    };
+  }
+  if (item.type === "tool_search_output" && Array.isArray(item.tools) && item.tools.length > 0) {
+    return { ...cloneResponseItem(item), tools: [] };
+  }
+  return undefined;
+}
+
+function messageText(item: ResponseItem): string | undefined {
+  if (item.type !== "message") return undefined;
+  if (typeof item.content === "string") return item.content || undefined;
+  if (!Array.isArray(item.content)) return undefined;
+  const text = item.content
+    .filter(
+      (part): part is Extract<ResponseContentItem, { type: "input_text" | "output_text" }> =>
+        part.type === "input_text" || part.type === "output_text",
+    )
+    .map((part) => part.text)
+    .join("");
+  return text || undefined;
+}
+
+function codePointLength(text: string): number {
+  return Array.from(text).length;
+}
+
+function takeCodePointPrefix(text: string, count: number): string {
+  return sanitizeSurrogates(Array.from(text).slice(0, count).join(""));
+}
+
+function takeCodePointSuffix(text: string, count: number): string {
+  if (count === 0) return "";
+  return sanitizeSurrogates(Array.from(text).slice(-count).join(""));
+}
+
+function truncateTextHeadAndTail(text: string, retainedCharacters: number): string {
+  const availableCharacters = Math.max(2, Math.min(retainedCharacters, codePointLength(text) - 1));
+  const headCharacters = Math.ceil(availableCharacters / 2);
+  const tailCharacters = Math.floor(availableCharacters / 2);
+  return (
+    takeCodePointPrefix(text, headCharacters) +
+    REMOTE_COMPACTION_MESSAGE_TRUNCATION_MARKER +
+    takeCodePointSuffix(text, tailCharacters)
+  );
+}
+
+function allocateTextPartCharacters(
+  content: ResponseContentItem[],
+  characterBudget: number,
+  fromEnd: boolean,
+): number[] {
+  const allocations = Array<number>(content.length).fill(0);
+  let remaining = characterBudget;
+  const indexes = content.map((_, index) => index);
+  if (fromEnd) indexes.reverse();
+
+  for (const index of indexes) {
+    const part = content[index];
+    if (part.type !== "input_text" && part.type !== "output_text") continue;
+    const retained = Math.min(remaining, codePointLength(part.text));
+    allocations[index] = retained;
+    remaining -= retained;
+    if (remaining === 0) break;
+  }
+  return allocations;
+}
+
+function truncateMessageText(
+  item: ResponseItem,
+  retainedCharacters: number,
+): ResponseItem | undefined {
+  const text = messageText(item);
+  if (!text || item.type !== "message") return undefined;
+  if (typeof item.content === "string") {
+    return {
+      ...cloneResponseItem(item),
+      content: truncateTextHeadAndTail(item.content, retainedCharacters),
+    };
+  }
+  if (!Array.isArray(item.content)) return undefined;
+
+  const totalCharacters = codePointLength(text);
+  const availableCharacters = Math.max(2, Math.min(retainedCharacters, totalCharacters - 1));
+  const headCharacters = Math.ceil(availableCharacters / 2);
+  const tailCharacters = Math.floor(availableCharacters / 2);
+  const headAllocations = allocateTextPartCharacters(item.content, headCharacters, false);
+  const tailAllocations = allocateTextPartCharacters(item.content, tailCharacters, true);
+  let markerPartIndex = -1;
+  for (let index = headAllocations.length - 1; index >= 0; index--) {
+    if (headAllocations[index] > 0) {
+      markerPartIndex = index;
+      break;
+    }
+  }
+  if (markerPartIndex < 0) return undefined;
+
+  const content = item.content.flatMap((part, index) => {
+    if (part.type !== "input_text" && part.type !== "output_text") return [part];
+    const prefix = takeCodePointPrefix(part.text, headAllocations[index]);
+    const suffix = takeCodePointSuffix(part.text, tailAllocations[index]);
+    const marker = index === markerPartIndex ? REMOTE_COMPACTION_MESSAGE_TRUNCATION_MARKER : "";
+    const retainedText = prefix + marker + suffix;
+    return retainedText ? [{ ...part, text: retainedText }] : [];
+  });
+  return { ...cloneResponseItem(item), content };
+}
+
+function isProtectedCompactionItem(item: ResponseItem): boolean {
+  return item.type === "compaction" || item.type === "compaction_summary";
+}
+
+function responseItemPairKey(item: ResponseItem): string | undefined {
+  const callId = responseItemCallId(item);
+  if (!callId) return undefined;
+  const outputType = outputTypeForCallType(item.type);
+  if (outputType) return `${outputType}:${callId}`;
+  if (
+    item.type === "function_call_output" ||
+    item.type === "tool_search_output" ||
+    item.type === "custom_tool_call_output"
+  ) {
+    return `${item.type}:${callId}`;
+  }
+  return undefined;
+}
+
+function removableHistoryGroups(items: ResponseItem[]): number[][] {
+  const pairIndexes = new Map<string, number[]>();
+  items.forEach((item, index) => {
+    if (isProtectedCompactionItem(item)) return;
+    const pairKey = responseItemPairKey(item);
+    if (!pairKey) return;
+    const indexes = pairIndexes.get(pairKey) ?? [];
+    indexes.push(index);
+    pairIndexes.set(pairKey, indexes);
+  });
+
+  const groups: number[][] = [];
+  const emittedPairKeys = new Set<string>();
+  items.forEach((item, index) => {
+    if (isProtectedCompactionItem(item)) return;
+    const pairKey = responseItemPairKey(item);
+    if (!pairKey) {
+      groups.push([index]);
+      return;
+    }
+    if (emittedPairKeys.has(pairKey)) return;
+    emittedPairKeys.add(pairKey);
+    groups.push(pairIndexes.get(pairKey) ?? [index]);
+  });
+  return groups;
+}
+
+function removeHistoryGroups(
+  items: ResponseItem[],
+  groups: number[][],
+  groupCount: number,
+): ResponseItem[] {
+  const removedIndexes = new Set(groups.slice(0, groupCount).flat());
+  return items.filter((_, index) => !removedIndexes.has(index));
+}
+
+function minimumHistoryGroupsToRemove(
+  params: RemoteCompactionRequestBodyParams,
+  input: ResponseItem[],
+  groups: number[][],
+  contextWindow: number,
+): number | undefined {
+  let lowerBound = 1;
+  let upperBound = groups.length;
+  let best: number | undefined;
+  while (lowerBound <= upperBound) {
+    const groupCount = Math.floor((lowerBound + upperBound) / 2);
+    const candidateInput = removeHistoryGroups(input, groups, groupCount);
+    if (
+      estimateRemoteCompactionRequestTokens({ ...params, input: candidateInput }) <= contextWindow
+    ) {
+      best = groupCount;
+      upperBound = groupCount - 1;
+    } else {
+      lowerBound = groupCount + 1;
+    }
+  }
+  return best;
+}
+
+function largestMessageTruncationThatFits(
+  params: RemoteCompactionRequestBodyParams,
+  input: ResponseItem[],
+  messageIndex: number,
+  contextWindow: number,
+): ResponseItem | undefined {
+  const text = messageText(input[messageIndex]);
+  if (!text || codePointLength(text) < 3) return undefined;
+
+  let lowerBound = 2;
+  let upperBound = codePointLength(text) - 1;
+  let best: ResponseItem | undefined;
+  while (lowerBound <= upperBound) {
+    const retainedCharacters = Math.floor((lowerBound + upperBound) / 2);
+    const truncated = truncateMessageText(input[messageIndex], retainedCharacters);
+    if (!truncated) return undefined;
+    const candidateInput = [...input];
+    candidateInput[messageIndex] = truncated;
+    if (
+      estimateRemoteCompactionRequestTokens({ ...params, input: candidateInput }) <= contextWindow
+    ) {
+      best = truncated;
+      lowerBound = retainedCharacters + 1;
+    } else {
+      upperBound = retainedCharacters - 1;
+    }
+  }
+  return best;
+}
+
+export function budgetRemoteCompactionInput(
+  params: RemoteCompactionRequestBodyParams,
+): ResponseItem[] {
+  const contextWindow = params.model.contextWindow;
+  if (!Number.isFinite(contextWindow) || contextWindow <= 0) return params.input;
+
+  let estimatedCharacters = approximateSerializedCharacters(
+    buildRemoteCompactionRequestBody(params),
+  );
+  let estimatedTokens = approximateTokensFromCharacters(estimatedCharacters);
+  if (estimatedTokens <= contextWindow) return params.input;
+
+  let input = params.input.map(cloneResponseItem);
+  for (let index = 0; index < input.length && estimatedTokens > contextWindow; index++) {
+    const rewritten = rewrittenOutputForContextWindow(input[index]);
+    if (!rewritten) continue;
+    const currentCharacters = approximateSerializedCharacters(input[index]);
+    const rewrittenCharacters = approximateSerializedCharacters(rewritten);
+    if (rewrittenCharacters >= currentCharacters) continue;
+    input[index] = rewritten;
+    estimatedCharacters -= currentCharacters - rewrittenCharacters;
+    estimatedTokens = approximateTokensFromCharacters(estimatedCharacters);
+  }
+
+  if (estimatedTokens <= contextWindow) return input;
+
+  const groups = removableHistoryGroups(input);
+  const groupsToRemove = minimumHistoryGroupsToRemove(params, input, groups, contextWindow);
+  if (groupsToRemove !== undefined) {
+    const boundaryGroup = groups[groupsToRemove - 1];
+    if (boundaryGroup.length === 1 && input[boundaryGroup[0]].type === "message") {
+      const inputBeforeBoundary = removeHistoryGroups(input, groups, groupsToRemove - 1);
+      const removedBeforeBoundary = groups
+        .slice(0, groupsToRemove - 1)
+        .flat()
+        .filter((index) => index < boundaryGroup[0]).length;
+      const boundaryIndex = boundaryGroup[0] - removedBeforeBoundary;
+      const truncated = largestMessageTruncationThatFits(
+        params,
+        inputBeforeBoundary,
+        boundaryIndex,
+        contextWindow,
+      );
+      if (truncated) {
+        inputBeforeBoundary[boundaryIndex] = truncated;
+        const normalized = normalizeResponseItemsForPrompt(inputBeforeBoundary, params.model);
+        if (
+          estimateRemoteCompactionRequestTokens({ ...params, input: normalized }) <= contextWindow
+        ) {
+          return normalized;
+        }
+      }
+    }
+
+    const normalized = normalizeResponseItemsForPrompt(
+      removeHistoryGroups(input, groups, groupsToRemove),
+      params.model,
+    );
+    if (estimateRemoteCompactionRequestTokens({ ...params, input: normalized }) <= contextWindow) {
+      return normalized;
+    }
+  }
+
+  throw new Error(
+    `OpenAI remote compaction request cannot fit the ${contextWindow}-token model context window.`,
+  );
+}
+
 type RemoteCompactionV2Events = {
   compactionItem: ResponseItem;
   usage?: unknown;
   serviceTier?: string;
 };
 
-type RemoteCompactionRequestParams = {
-  model: Model<any>;
+type RemoteCompactionRequestParams = RemoteCompactionRequestBodyParams & {
   apiKey?: string;
   headers?: ProviderHeaders;
   baseUrl?: string;
-  sessionId?: string;
-  input: ResponseItem[];
-  instructions?: string;
-  tools: Record<string, unknown>[];
-  parallelToolCalls: boolean;
-  reasoning?: ResponsesReasoningConfig;
-  text?: RemoteCompactionTextConfig;
-  serviceTier?: string;
   signal?: AbortSignal;
   onRetry?: (retry: RemoteCompactionRetry) => void;
 };
@@ -1368,24 +1712,29 @@ async function callRemoteCompactionAttempt(
 export async function callRemoteCompactionEndpoint(
   params: RemoteCompactionRequestParams,
 ): Promise<RemoteCompactionResult> {
+  throwIfAborted(params.signal);
+  const budgetedInput = budgetRemoteCompactionInput(params);
+  const requestParams = budgetedInput === params.input
+    ? params
+    : { ...params, input: budgetedInput };
   let retries = 0;
   while (true) {
     try {
-      return await callRemoteCompactionAttempt(params);
+      return await callRemoteCompactionAttempt(requestParams);
     } catch (error) {
-      const remoteError = asRemoteCompactionError(error, params.signal);
+      const remoteError = asRemoteCompactionError(error, requestParams.signal);
       if (!remoteError.retryable || retries >= MAX_REMOTE_COMPACTION_V2_STREAM_RETRIES) {
         throw remoteError;
       }
       retries += 1;
       const delayMs = remoteError.retryDelayMs ?? retryBackoffMs(retries);
-      params.onRetry?.({
+      requestParams.onRetry?.({
         attempt: retries,
         maxRetries: MAX_REMOTE_COMPACTION_V2_STREAM_RETRIES,
         delayMs,
         error: remoteError,
       });
-      await abortableDelay(delayMs, params.signal);
+      await abortableDelay(delayMs, requestParams.signal);
     }
   }
 }
