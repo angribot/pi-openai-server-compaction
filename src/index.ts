@@ -28,7 +28,6 @@ import {
   buildToolsPayload,
   callRemoteCompactionEndpoint,
   REMOTE_COMPACTION_CHECKPOINT_SUMMARY,
-  messageToResponseItems,
   messagesToResponseItems,
   normalizeResponseItemsForPrompt,
   reconstructRemoteCompactionStateFromBranch,
@@ -181,26 +180,6 @@ function getCompatibleNativeReplayTailMessages(params: {
   return compatibleMessages;
 }
 
-function extendRemoteHistoryIfCompatible(params: {
-  sessionId: string;
-  model: TargetModel | undefined;
-  message: AgentMessage;
-}): void {
-  const remoteState = getMatchingRemoteState(params.sessionId, params.model);
-  if (!remoteState || !params.model) return;
-  if (params.message.role === "assistant" && !messageMatchesModel(params.message, params.model)) {
-    return;
-  }
-
-  const items = messageToResponseItems(params.message);
-  if (items.length === 0) return;
-
-  setRemoteCompactionState(params.sessionId, {
-    ...remoteState,
-    explicitHistory: [...remoteState.explicitHistory, ...items],
-  });
-}
-
 export default function openaiServerCompactionExtension(pi: ExtensionAPI) {
   pi.on("session_start", (_event, ctx) => {
     clearResponsesRequestShapeState(getSessionId(ctx));
@@ -319,14 +298,6 @@ export default function openaiServerCompactionExtension(pi: ExtensionAPI) {
       }
       return { cancel: true };
     }
-  });
-
-  pi.on("message_end", (event, ctx) => {
-    extendRemoteHistoryIfCompatible({
-      sessionId: getSessionId(ctx),
-      model: ctx.model,
-      message: event.message,
-    });
   });
 
   pi.on("before_provider_request", (event, ctx) => {

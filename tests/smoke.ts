@@ -140,6 +140,12 @@ const {
 } = await import(pathToFileURL(join(repoRoot, "src", "state.ts")).href);
 
 const targetModelKey = "openai:openai-responses:gpt-5.4-nano:variant";
+const persistedReplacementHistory = [
+  {
+    type: "compaction",
+    encrypted_content: "ENCRYPTED",
+  },
+];
 const reconstructed = reconstructRemoteCompactionStateFromBranch({
   branchEntries: [
     {
@@ -150,82 +156,25 @@ const reconstructed = reconstructRemoteCompactionStateFromBranch({
           version: 1,
           provider: "openai-responses-compact",
           modelKey: targetModelKey,
-          replacementHistory: [
-            {
-              type: "compaction",
-              encrypted_content: "ENCRYPTED",
-            },
-          ],
+          replacementHistory: persistedReplacementHistory,
         },
       },
     },
     {
       type: "message",
-      id: "user-a1",
+      id: "post-compaction-message",
       message: {
         role: "user",
-        content: [{ type: "text", text: "KEEP_ME_ONE" }],
-      },
-    },
-    {
-      type: "message",
-      id: "assistant-a1",
-      message: {
-        role: "assistant",
-        provider: "openai",
-        api: "openai-responses",
-        model: "gpt-5.4-nano:variant",
-        content: [{ type: "text", text: "KEEP_REPLY_ONE" }],
-      },
-    },
-    {
-      type: "message",
-      id: "user-b1",
-      message: {
-        role: "user",
-        content: [{ type: "text", text: "DROP_ME" }],
-      },
-    },
-    {
-      type: "message",
-      id: "assistant-b1",
-      message: {
-        role: "assistant",
-        provider: "openai",
-        api: "openai-codex-responses",
-        model: "gpt-5.4-nano:variant",
-        content: [{ type: "text", text: "DROP_REPLY" }],
-      },
-    },
-    {
-      type: "message",
-      id: "user-a2",
-      message: {
-        role: "user",
-        content: [{ type: "text", text: "KEEP_ME_TWO" }],
-      },
-    },
-    {
-      type: "message",
-      id: "assistant-a2",
-      message: {
-        role: "assistant",
-        provider: "openai",
-        api: "openai-responses",
-        model: "gpt-5.4-nano:variant",
-        content: [{ type: "text", text: "KEEP_REPLY_TWO" }],
+        content: [{ type: "text", text: "runtime state does not accumulate this message" }],
       },
     },
   ],
 });
-assert.ok(reconstructed, "expected reconstructed remote compaction state");
-const reconstructedJson = JSON.stringify(reconstructed.explicitHistory);
-assert.match(reconstructedJson, /KEEP_ME_ONE/);
-assert.match(reconstructedJson, /KEEP_REPLY_ONE/);
-assert.match(reconstructedJson, /KEEP_ME_TWO/);
-assert.match(reconstructedJson, /KEEP_REPLY_TWO/);
-assert.doesNotMatch(reconstructedJson, /DROP_ME/);
-assert.doesNotMatch(reconstructedJson, /DROP_REPLY/);
+assert.deepEqual(reconstructed, {
+  compactionEntryId: "cmp-1",
+  modelKey: targetModelKey,
+  replacementHistory: persistedReplacementHistory,
+});
 
 const requestBody = buildRemoteCompactionRequestBody({
   model: {
@@ -924,6 +873,11 @@ const fakePi = {
   },
 };
 extensionFactory(fakePi);
+assert.equal(
+  handlers.has("message_end"),
+  false,
+  "completed messages must not accumulate in remote compaction runtime state",
+);
 
 const beforeProviderRequest = handlers.get("before_provider_request")!;
 assert.equal(typeof beforeProviderRequest, "function");
@@ -1062,7 +1016,6 @@ setRemoteCompactionState(sessionId, {
   compactionEntryId: "cmp-provider-agnostic",
   modelKey: modelKey(proxyResponsesModel),
   replacementHistory,
-  explicitHistory: [...replacementHistory, postCompactionUserInputItem],
 });
 const requestContext = {
   cwd: repoRoot,
@@ -1192,7 +1145,6 @@ const lifecycleState = {
   compactionEntryId: "lifecycle-compaction",
   modelKey: modelKey(proxyResponsesModel),
   replacementHistory: lifecycleHistory,
-  explicitHistory: lifecycleHistory,
 };
 const lifecycleCheckpointBranch = [{
   type: "compaction",
@@ -1801,14 +1753,6 @@ try {
     compactionEntryId: "prior-remote-compaction",
     modelKey: modelKey(compactContext.model),
     replacementHistory: priorReplacementHistory,
-    explicitHistory: [
-      ...priorReplacementHistory,
-      {
-        type: "message",
-        role: "assistant",
-        content: [{ type: "output_text", text: "STALE_SERIALIZED_HISTORY" }],
-      },
-    ],
   });
   try {
     const conversionResult = await sessionBeforeCompact(
@@ -1955,7 +1899,6 @@ try {
       convertedInput.find((item) => item.type === "compaction")?.encrypted_content,
       "PRIOR_REMOTE_COMPACTION",
     );
-    assert.doesNotMatch(requestBodies[0], /STALE_SERIALIZED_HISTORY/);
     assert.doesNotMatch(requestBodies[0], /DROP_DIFFERENT_API/);
     assert.deepEqual(
       convertedInput.filter((item) => item.id === "msg_commentary_1" || item.id === "msg_final_1"),
