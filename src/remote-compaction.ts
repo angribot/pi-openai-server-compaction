@@ -110,7 +110,6 @@ export type RemoteCompactionSessionState = {
   compactionEntryId: string;
   modelKey: string;
   replacementHistory: ResponseItem[];
-  explicitHistory: ResponseItem[];
 };
 
 export type RemoteCompactionResult = {
@@ -1809,57 +1808,23 @@ export function extractRemoteCompactionDetails(details: unknown):
   };
 }
 
-function assistantMessageMatchesModelKey(
-  message: Extract<AgentMessage, { role: "assistant" }>,
-  targetModelKey: string,
-): boolean {
-  return modelKey({
-    provider: message.provider,
-    api: message.api,
-    id: message.model,
-  }) === targetModelKey;
-}
-
 export function reconstructRemoteCompactionStateFromBranch(params: {
   branchEntries: Array<{ type: string; id: string; details?: unknown; message?: AgentMessage }>;
 }): RemoteCompactionSessionState | undefined {
-  let latestCompactionIndex = -1;
   let latestCompactionEntryId = "";
   let latestDetails: RemoteCompactionDetails | undefined;
 
-  params.branchEntries.forEach((entry, index) => {
-    if (entry.type !== "compaction") return;
-    latestCompactionIndex = index;
+  for (const entry of params.branchEntries) {
+    if (entry.type !== "compaction") continue;
     latestCompactionEntryId = entry.id;
     latestDetails = extractRemoteCompactionDetails(entry.details);
-  });
-
-  if (!latestDetails || latestCompactionIndex < 0) return undefined;
-
-  const trailingMessages: ResponseItem[] = [];
-  let pendingTurnItems: ResponseItem[] = [];
-
-  for (const entry of params.branchEntries.slice(latestCompactionIndex + 1)) {
-    if (entry.type !== "message" || !entry.message) continue;
-
-    const items = messageToResponseItems(entry.message);
-    if (items.length === 0) continue;
-
-    if (entry.message.role === "assistant") {
-      if (assistantMessageMatchesModelKey(entry.message, latestDetails.modelKey)) {
-        trailingMessages.push(...pendingTurnItems, ...items);
-      }
-      pendingTurnItems = [];
-      continue;
-    }
-
-    pendingTurnItems.push(...items);
   }
+
+  if (!latestDetails) return undefined;
 
   return {
     compactionEntryId: latestCompactionEntryId,
     modelKey: latestDetails.modelKey,
     replacementHistory: latestDetails.replacementHistory,
-    explicitHistory: [...latestDetails.replacementHistory, ...trailingMessages],
   };
 }
