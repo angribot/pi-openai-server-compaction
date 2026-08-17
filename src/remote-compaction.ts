@@ -66,11 +66,13 @@ export type ResponseItem =
   | { type: string; [key: string]: unknown };
 
 export type ResponsesReasoningConfig = {
-  effort?: "none" | "minimal" | "low" | "medium" | "high" | "xhigh";
+  effort?: string;
   summary?: "auto" | "concise" | "detailed" | null;
 };
 
-export type ResponsesTextConfig = Record<string, unknown>;
+export type RemoteCompactionTextConfig = {
+  verbosity: string;
+};
 
 export type RemoteCompactionUsageSnapshot = Usage;
 
@@ -841,7 +843,42 @@ function extractCacheWriteTokens(value: unknown): number {
     : 0;
 }
 
-function extractRemoteCompactionUsage(model: Model<any>, value: unknown): RemoteCompactionUsageSnapshot | undefined {
+// Pi's ordinary OpenAI Responses pricing helper is private to that adapter.
+// Keep this narrow parity copy aligned until pi-ai exposes a public equivalent.
+function getResponsesServiceTierCostMultiplier(
+  model: Model<any>,
+  serviceTier: string | undefined,
+): number {
+  switch (serviceTier) {
+    case "flex":
+      return 0.5;
+    case "priority":
+      return model.id === "gpt-5.5" ? 2.5 : 2;
+    default:
+      return 1;
+  }
+}
+
+function applyResponsesServiceTierPricing(
+  model: Model<any>,
+  usage: RemoteCompactionUsageSnapshot,
+  serviceTier: string | undefined,
+): void {
+  const multiplier = getResponsesServiceTierCostMultiplier(model, serviceTier);
+  if (multiplier === 1) return;
+
+  usage.cost.input *= multiplier;
+  usage.cost.output *= multiplier;
+  usage.cost.cacheRead *= multiplier;
+  usage.cost.cacheWrite *= multiplier;
+  usage.cost.total = usage.cost.input + usage.cost.output + usage.cost.cacheRead + usage.cost.cacheWrite;
+}
+
+function extractRemoteCompactionUsage(
+  model: Model<any>,
+  value: unknown,
+  serviceTier: string | undefined,
+): RemoteCompactionUsageSnapshot | undefined {
   if (!isRecord(value)) return undefined;
 
   const inputTokens = typeof value.input_tokens === "number" && Number.isFinite(value.input_tokens)
@@ -868,6 +905,7 @@ function extractRemoteCompactionUsage(model: Model<any>, value: unknown): Remote
     cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
   };
   calculateCost(model, usage);
+  applyResponsesServiceTierPricing(model, usage, serviceTier);
   return usage;
 }
 
@@ -915,7 +953,7 @@ export function buildRemoteCompactionRequestBody(params: {
   tools: Record<string, unknown>[];
   parallelToolCalls: boolean;
   reasoning?: ResponsesReasoningConfig;
-  text?: ResponsesTextConfig;
+  text?: RemoteCompactionTextConfig;
   serviceTier?: string;
   sessionId?: string;
 }): Record<string, unknown> {
@@ -939,6 +977,7 @@ export function buildRemoteCompactionRequestBody(params: {
 type RemoteCompactionV2Events = {
   compactionItem: ResponseItem;
   usage?: unknown;
+  serviceTier?: string;
 };
 
 type RemoteCompactionRequestParams = {
@@ -952,7 +991,7 @@ type RemoteCompactionRequestParams = {
   tools: Record<string, unknown>[];
   parallelToolCalls: boolean;
   reasoning?: ResponsesReasoningConfig;
-  text?: ResponsesTextConfig;
+  text?: RemoteCompactionTextConfig;
   serviceTier?: string;
   signal?: AbortSignal;
   onRetry?: (retry: RemoteCompactionRetry) => void;
@@ -1023,6 +1062,7 @@ function responseFailedError(event: Record<string, unknown>): RemoteCompactionRe
 export function parseRemoteCompactionV2Events(events: unknown[]): RemoteCompactionV2Events {
   let completed = false;
   let usage: unknown;
+  let serviceTier: string | undefined;
   const compactionItems: ResponseItem[] = [];
 
   for (const event of events) {
@@ -1067,6 +1107,9 @@ export function parseRemoteCompactionV2Events(events: unknown[]): RemoteCompacti
       completed = true;
       const response = isRecord(event.response) ? event.response : undefined;
       usage = response?.usage;
+      serviceTier = typeof response?.service_tier === "string"
+        ? response.service_tier
+        : undefined;
     }
   }
 
@@ -1082,7 +1125,7 @@ export function parseRemoteCompactionV2Events(events: unknown[]): RemoteCompacti
       false,
     );
   }
-  return { compactionItem: compactionItems[0], usage };
+  return { compactionItem: compactionItems[0], usage, serviceTier };
 }
 
 function abortError(): Error {
@@ -1314,7 +1357,11 @@ async function callRemoteCompactionAttempt(
   );
   return {
     output: buildRemoteCompactionV2History(params.input, parsed.compactionItem),
-    usage: extractRemoteCompactionUsage(params.model, parsed.usage),
+    usage: extractRemoteCompactionUsage(
+      params.model,
+      parsed.usage,
+      parsed.serviceTier ?? params.serviceTier,
+    ),
   };
 }
 

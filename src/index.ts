@@ -13,9 +13,9 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import {
   applyRemoteHistoryPayloadPatch,
+  extractRemoteCompactionTextConfig,
   extractResponsesReasoningConfig,
   extractResponsesServiceTier,
-  extractResponsesTextConfig,
   isRecord,
   looksLikeResponsesPayload,
   messageMatchesModel,
@@ -214,7 +214,10 @@ export default function openaiServerCompactionExtension(pi: ExtensionAPI) {
       const promptResponseItems = normalizeResponseItemsForPrompt(responseItems, model);
       const thinkingLevel = pi.getThinkingLevel();
       const fallbackReasoning = model.reasoning
-        ? thinkingLevelToResponsesReasoning(thinkingLevel ?? getBranchThinkingLevel(branchEntries))
+        ? thinkingLevelToResponsesReasoning(
+            model,
+            thinkingLevel ?? getBranchThinkingLevel(branchEntries),
+          )
         : undefined;
       const reasoning = observedRequestShape?.reasoning ?? fallbackReasoning;
       const text = observedRequestShape?.text;
@@ -258,6 +261,7 @@ export default function openaiServerCompactionExtension(pi: ExtensionAPI) {
           summary: REMOTE_COMPACTION_CHECKPOINT_SUMMARY,
           firstKeptEntryId: event.preparation.firstKeptEntryId,
           tokensBefore: event.preparation.tokensBefore,
+          usage: remoteResult.usage,
           details: { remoteCompaction: remoteDetails },
         },
       };
@@ -295,7 +299,7 @@ export default function openaiServerCompactionExtension(pi: ExtensionAPI) {
       modelKey: modelKey(model),
       updatedAt: Date.now(),
       reasoning: extractResponsesReasoningConfig(event.payload),
-      text: extractResponsesTextConfig(event.payload),
+      text: extractRemoteCompactionTextConfig(event.payload),
       serviceTier: extractResponsesServiceTier(event.payload),
     });
 

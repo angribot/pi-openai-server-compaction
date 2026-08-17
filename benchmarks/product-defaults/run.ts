@@ -454,7 +454,7 @@ async function compactNativeExtension(params: {
     instructions: SYSTEM_INSTRUCTIONS,
     tools: params.fixture.tools,
     parallelToolCalls: true,
-    reasoning: thinkingLevelToResponsesReasoning(DEFAULT_THINKING_LEVEL),
+    reasoning: thinkingLevelToResponsesReasoning(params.model, DEFAULT_THINKING_LEVEL),
   });
   const compactionItem = [...result.output].reverse().find((item) => item.type === "compaction");
   const encryptedContent = compactionItem && "encrypted_content" in compactionItem
