@@ -91,6 +91,19 @@ for (const packageName of [
   ensureLocalPeerLink(packageName);
 }
 
+const { discoverAndLoadExtensions } = await import("@earendil-works/pi-coding-agent");
+const loaderResult = await discoverAndLoadExtensions(
+  [join(repoRoot, "index.ts")],
+  repoRoot,
+  join(repoRoot, "tests", ".pi-agent-loader-smoke"),
+);
+assert.deepEqual(
+  loaderResult.errors,
+  [],
+  "extension should load through Pi's production jiti resolver",
+);
+assert.equal(loaderResult.extensions.length, 1);
+
 const { default: extensionFactory } = await import(pathToFileURL(join(repoRoot, "src", "index.ts")).href);
 assert.equal(typeof extensionFactory, "function", "extension entrypoint should export a function");
 
@@ -100,6 +113,7 @@ const {
   buildRemoteCompactionRequestBody,
   buildRemoteCompactionV2History,
   extractRemoteCompactionDetails,
+  messagesToResponseItems,
   normalizeResponseItemsForPrompt,
   parseRemoteCompactionV2Events,
   processCompactedHistory,
@@ -113,6 +127,7 @@ const {
 } = await import(pathToFileURL(join(repoRoot, "src", "openai.ts")).href);
 const {
   clearAllRuntimeState,
+  clearRemoteCompactionState,
   setRemoteCompactionState,
 } = await import(pathToFileURL(join(repoRoot, "src", "state.ts")).href);
 
@@ -168,9 +183,9 @@ const reconstructed = reconstructRemoteCompactionStateFromBranch({
       id: "assistant-b1",
       message: {
         role: "assistant",
-        provider: "anthropic",
-        api: "anthropic-messages",
-        model: "claude-sonnet-4-6",
+        provider: "openai",
+        api: "openai-codex-responses",
+        model: "gpt-5.4-nano",
         content: [{ type: "text", text: "DROP_REPLY" }],
       },
     },
@@ -379,10 +394,65 @@ assert.deepEqual(normalizedPromptItems[0].content, [
 assert.deepEqual(normalizedPromptItems[2], {
   type: "function_call_output",
   call_id: "call-1",
-  output: "aborted",
+  output: "No result provided",
 });
 assert.equal(normalizedPromptItems[3].result, "");
 assert.doesNotMatch(JSON.stringify(normalizedPromptItems), /orphan|ghost_snapshot/);
+
+const foreignToolHistory = messagesToResponseItems(
+  [
+    {
+      role: "assistant",
+      provider: "anthropic",
+      api: "anthropic-messages",
+      model: "claude-sonnet-4-6",
+      content: [
+        {
+          type: "thinking",
+          thinking: "[Reasoning redacted]",
+          thinkingSignature: "REDACTED",
+          redacted: true,
+        },
+        { type: "text", text: "FOREIGN_TEXT\uD800" },
+        {
+          type: "toolCall",
+          id: "call weird|foreign.item",
+          name: "read",
+          arguments: { path: "README.md" },
+        },
+      ],
+      stopReason: "toolUse",
+      timestamp: 1,
+    },
+    {
+      role: "toolResult",
+      toolCallId: "call weird|foreign.item",
+      toolName: "read",
+      content: [{ type: "text", text: "FOREIGN\uD800_TOOL_RESULT" }],
+      isError: false,
+      timestamp: 2,
+    },
+  ],
+  {
+    provider: "openai",
+    api: "openai-responses",
+    id: "gpt-5.4-nano",
+    input: ["text"],
+  },
+);
+const foreignToolCall = foreignToolHistory.find((item: { type?: string }) => (
+  item.type === "function_call"
+));
+const foreignToolResult = foreignToolHistory.find((item: { type?: string }) => (
+  item.type === "function_call_output"
+));
+assert.equal(foreignToolCall?.call_id, "call_weird");
+assert.match(String(foreignToolCall?.id), /^fc_/);
+assert.equal(foreignToolResult?.call_id, foreignToolCall?.call_id);
+assert.equal(foreignToolResult?.output, "FOREIGN_TOOL_RESULT");
+const foreignToolHistoryJson = JSON.stringify(foreignToolHistory);
+assert.doesNotMatch(foreignToolHistoryJson, /Reasoning redacted|\\ud800/i);
+assert.match(foreignToolHistoryJson, /FOREIGN_TEXT/);
 
 const compactedHistory = processCompactedHistory([
   { type: "message", role: "developer", content: [{ type: "input_text", text: "drop developer" }] },
@@ -496,10 +566,10 @@ const fakePi = {
   on(name: string, handler: Hook) {
     handlers.set(name, handler);
   },
-  getAllTools() {
+  getAllTools(): unknown[] {
     return [];
   },
-  getActiveTools() {
+  getActiveTools(): string[] {
     return [];
   },
   getThinkingLevel() {
@@ -573,6 +643,7 @@ const untouchedCodexPayload = beforeProviderRequest(
   },
 );
 assert.equal(untouchedCodexPayload, undefined);
+clearRemoteCompactionState(sessionId);
 
 const sessionBeforeCompact = handlers.get("session_before_compact")!;
 assert.equal(typeof sessionBeforeCompact, "function");
@@ -729,6 +800,343 @@ try {
     modelKey(compactContext.model),
     "credential-resolved endpoints must not change persisted model identity",
   );
+
+  requestBodies.length = 0;
+  responsePlan = [sseResponse("EFFECTIVE_CONTEXT_ENCRYPTED")];
+  const effectiveContextResult = await sessionBeforeCompact(
+    {
+      ...compactEvent,
+      branchEntries: [
+        {
+          type: "message",
+          id: "old-user",
+          parentId: null,
+          timestamp: "2026-08-07T00:00:00.000Z",
+          message: {
+            role: "user",
+            content: [{ type: "text", text: "DROP_OLD_CONTEXT" }],
+            timestamp: 1,
+          },
+        },
+        {
+          type: "message",
+          id: "kept-user",
+          parentId: "old-user",
+          timestamp: "2026-08-07T00:00:01.000Z",
+          message: {
+            role: "user",
+            content: [{ type: "text", text: "KEEP_RETAINED_TAIL" }],
+            timestamp: 2,
+          },
+        },
+        {
+          type: "branch_summary",
+          id: "branch-summary",
+          parentId: "kept-user",
+          timestamp: "2026-08-07T00:00:02.000Z",
+          fromId: "old-user",
+          summary: "KEEP_BRANCH_SUMMARY",
+        },
+        {
+          type: "custom_message",
+          id: "custom-message",
+          parentId: "branch-summary",
+          timestamp: "2026-08-07T00:00:03.000Z",
+          customType: "test-context",
+          content: "KEEP_CUSTOM_CONTEXT",
+          display: false,
+        },
+        {
+          type: "message",
+          id: "bash-execution",
+          parentId: "custom-message",
+          timestamp: "2026-08-07T00:00:04.000Z",
+          message: {
+            role: "bashExecution",
+            command: "printf KEEP_SHELL_COMMAND",
+            output: "KEEP_SHELL_OUTPUT",
+            exitCode: 0,
+            cancelled: false,
+            truncated: false,
+            timestamp: 3,
+          },
+        },
+        {
+          type: "compaction",
+          id: "pi-compaction",
+          parentId: "bash-execution",
+          timestamp: "2026-08-07T00:00:05.000Z",
+          summary: "KEEP_PI_COMPACTION_SUMMARY",
+          firstKeptEntryId: "kept-user",
+          tokensBefore: 1234,
+        },
+        {
+          type: "message",
+          id: "post-compaction-user",
+          parentId: "pi-compaction",
+          timestamp: "2026-08-07T00:00:06.000Z",
+          message: {
+            role: "user",
+            content: [{ type: "text", text: "KEEP_POST_COMPACTION" }],
+            timestamp: 4,
+          },
+        },
+      ],
+    },
+    compactContext,
+  );
+  assert.equal(effectiveContextResult?.compaction?.details?.remoteCompaction?.version, 2);
+  const effectiveContextBody = requestBodies[0];
+  assert.match(effectiveContextBody, /KEEP_PI_COMPACTION_SUMMARY/);
+  assert.match(effectiveContextBody, /KEEP_RETAINED_TAIL/);
+  assert.match(effectiveContextBody, /KEEP_BRANCH_SUMMARY/);
+  assert.match(effectiveContextBody, /KEEP_CUSTOM_CONTEXT/);
+  assert.match(effectiveContextBody, /KEEP_SHELL_COMMAND/);
+  assert.match(effectiveContextBody, /KEEP_SHELL_OUTPUT/);
+  assert.match(effectiveContextBody, /KEEP_POST_COMPACTION/);
+  assert.doesNotMatch(effectiveContextBody, /DROP_OLD_CONTEXT/);
+
+  requestBodies.length = 0;
+  responsePlan = [sseResponse("PI_RESPONSES_CONVERSION_ENCRYPTED")];
+  const originalGetAllToolsForConversion = fakePi.getAllTools;
+  const originalGetActiveToolsForConversion = fakePi.getActiveTools;
+  fakePi.getAllTools = () => [
+    {
+      name: "read",
+      description: "Read a file",
+      parameters: {
+        type: "object",
+        properties: { path: { type: "string" } },
+        required: ["path"],
+      },
+    },
+  ];
+  fakePi.getActiveTools = () => ["read"];
+  const priorReplacementHistory = [
+    {
+      type: "compaction",
+      encrypted_content: "PRIOR_REMOTE_COMPACTION",
+    },
+  ];
+  setRemoteCompactionState(sessionId, {
+    compactionEntryId: "prior-remote-compaction",
+    modelKey: modelKey(compactContext.model),
+    replacementHistory: priorReplacementHistory,
+    explicitHistory: [
+      ...priorReplacementHistory,
+      {
+        type: "message",
+        role: "assistant",
+        content: [{ type: "output_text", text: "STALE_SERIALIZED_HISTORY" }],
+      },
+    ],
+  });
+  try {
+    const conversionResult = await sessionBeforeCompact(
+      {
+        ...compactEvent,
+        branchEntries: [
+          {
+            type: "compaction",
+            id: "prior-remote-compaction",
+            parentId: null,
+            timestamp: "2026-08-07T00:59:59.000Z",
+            summary: REMOTE_COMPACTION_CHECKPOINT_SUMMARY,
+            firstKeptEntryId: "prior-user",
+            tokensBefore: 1000,
+          },
+          {
+            type: "message",
+            id: "different-api-user",
+            parentId: "prior-remote-compaction",
+            timestamp: "2026-08-07T01:00:00.000Z",
+            message: {
+              role: "user",
+              content: [{ type: "text", text: "DROP_DIFFERENT_API_USER" }],
+              timestamp: 5,
+            },
+          },
+          {
+            type: "message",
+            id: "different-api-assistant",
+            parentId: "different-api-user",
+            timestamp: "2026-08-07T01:00:01.000Z",
+            message: {
+              role: "assistant",
+              provider: compactContext.model.provider,
+              api: "openai-codex-responses",
+              model: compactContext.model.id,
+              content: [{ type: "text", text: "DROP_DIFFERENT_API_ASSISTANT" }],
+              stopReason: "stop",
+              timestamp: 6,
+            },
+          },
+          {
+            type: "message",
+            id: "multi-phase-assistant",
+            parentId: "different-api-assistant",
+            timestamp: "2026-08-07T01:00:02.000Z",
+            message: {
+              role: "assistant",
+              provider: compactContext.model.provider,
+              api: compactContext.model.api,
+              model: compactContext.model.id,
+              content: [
+                {
+                  type: "text",
+                  text: "COMMENTARY_BLOCK",
+                  textSignature: JSON.stringify({
+                    v: 1,
+                    id: "msg_commentary_1",
+                    phase: "commentary",
+                  }),
+                },
+                {
+                  type: "thinking",
+                  thinking: "",
+                  thinkingSignature: JSON.stringify({
+                    type: "reasoning",
+                    id: "rs_reasoning_1",
+                    summary: [{ type: "summary_text", text: "REASONING_SUMMARY" }],
+                    encrypted_content: "ENCRYPTED_REASONING",
+                  }),
+                },
+                {
+                  type: "toolCall",
+                  id: "call_read_1|fc_read_1",
+                  name: "read",
+                  namespace: "filesystem",
+                  arguments: { path: "README.md" },
+                },
+                {
+                  type: "text",
+                  text: "FINAL_BLOCK",
+                  textSignature: JSON.stringify({
+                    v: 1,
+                    id: "msg_final_1",
+                    phase: "final_answer",
+                  }),
+                },
+              ],
+              stopReason: "toolUse",
+              timestamp: 5,
+            },
+          },
+          {
+            type: "message",
+            id: "multi-phase-tool-result",
+            parentId: "multi-phase-assistant",
+            timestamp: "2026-08-07T01:00:03.000Z",
+            message: {
+              role: "toolResult",
+              toolCallId: "call_read_1|fc_read_1",
+              toolName: "read",
+              content: [{ type: "text", text: "TOOL_RESULT" }],
+              isError: false,
+              timestamp: 6,
+            },
+          },
+          {
+            type: "message",
+            id: "post-tool-assistant",
+            parentId: "multi-phase-tool-result",
+            timestamp: "2026-08-07T01:00:04.000Z",
+            message: {
+              role: "assistant",
+              provider: compactContext.model.provider,
+              api: compactContext.model.api,
+              model: compactContext.model.id,
+              content: [{
+                type: "text",
+                text: "POST_TOOL_BLOCK",
+                textSignature: JSON.stringify({ v: 1, id: "msg_post_tool_1" }),
+              }],
+              stopReason: "stop",
+              timestamp: 7,
+            },
+          },
+        ],
+      },
+      {
+        ...compactContext,
+        model: {
+          ...compactContext.model,
+          compat: { supportsStrictMode: true },
+        },
+      },
+    );
+    assert.equal(conversionResult?.compaction?.details?.remoteCompaction?.version, 2);
+    const conversionBody = JSON.parse(requestBodies[0]);
+    const convertedInput = conversionBody.input as Array<{
+      encrypted_content?: string;
+      id?: string;
+      type?: string;
+    }>;
+    assert.equal(
+      convertedInput.find((item) => item.type === "compaction")?.encrypted_content,
+      "PRIOR_REMOTE_COMPACTION",
+    );
+    assert.doesNotMatch(requestBodies[0], /STALE_SERIALIZED_HISTORY/);
+    assert.doesNotMatch(requestBodies[0], /DROP_DIFFERENT_API/);
+    assert.deepEqual(
+      convertedInput.filter((item) => item.id === "msg_commentary_1" || item.id === "msg_final_1"),
+      [
+        {
+          type: "message",
+          role: "assistant",
+          content: [{ type: "output_text", text: "COMMENTARY_BLOCK", annotations: [] }],
+          status: "completed",
+          id: "msg_commentary_1",
+          phase: "commentary",
+        },
+        {
+          type: "message",
+          role: "assistant",
+          content: [{ type: "output_text", text: "FINAL_BLOCK", annotations: [] }],
+          status: "completed",
+          id: "msg_final_1",
+          phase: "final_answer",
+        },
+      ],
+    );
+    assert.equal(convertedInput.find((item) => item.type === "reasoning")?.id, "rs_reasoning_1");
+    assert.deepEqual(
+      convertedInput.find((item) => item.type === "function_call"),
+      {
+        type: "function_call",
+        id: "fc_read_1",
+        call_id: "call_read_1",
+        name: "read",
+        namespace: "filesystem",
+        arguments: JSON.stringify({ path: "README.md" }),
+      },
+    );
+    assert.deepEqual(
+      convertedInput.find((item) => item.type === "function_call_output"),
+      {
+        type: "function_call_output",
+        call_id: "call_read_1",
+        output: "TOOL_RESULT",
+      },
+    );
+    assert.deepEqual(conversionBody.tools, [
+      {
+        type: "function",
+        name: "read",
+        description: "Read a file",
+        parameters: {
+          type: "object",
+          properties: { path: { type: "string" } },
+          required: ["path"],
+        },
+        strict: false,
+      },
+    ]);
+  } finally {
+    clearRemoteCompactionState(sessionId);
+    fakePi.getAllTools = originalGetAllToolsForConversion;
+    fakePi.getActiveTools = originalGetActiveToolsForConversion;
+  }
 
   requestBodies.length = 0;
   responsePlan = [sseResponse("MODEL_SWITCH_ENCRYPTED")];

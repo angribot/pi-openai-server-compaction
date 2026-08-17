@@ -4,8 +4,13 @@
  * Owns remote compaction and Responses payload history replay. It deliberately
  * does not register providers or choose HTTP versus WebSocket transport.
  */
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
+import type { OpenAIResponsesCompat } from "@earendil-works/pi-ai";
+import {
+  buildSessionContext,
+  convertToLlm,
+  type ExtensionAPI,
+} from "@earendil-works/pi-coding-agent";
 import {
   applyRemoteHistoryPayloadPatch,
   extractResponsesReasoningConfig,
@@ -59,12 +64,6 @@ function getSessionId(ctx: SessionContextLike): string {
   return ctx.sessionManager.getSessionId();
 }
 
-function getBranchMessages(branchEntries: BranchEntry[]): AgentMessage[] {
-  return branchEntries.flatMap((entry) =>
-    entry.type === "message" && entry.message ? [entry.message as AgentMessage] : [],
-  );
-}
-
 function getBranchThinkingLevel(branchEntries: BranchEntry[]): string | undefined {
   for (let index = branchEntries.length - 1; index >= 0; index--) {
     const entry = branchEntries[index];
@@ -110,6 +109,35 @@ function getMatchingResponsesRequestShape(
 ): ReturnType<typeof getResponsesRequestShapeState> {
   const requestShape = getResponsesRequestShapeState(sessionId);
   return requestShape?.modelKey === modelKey(model) ? requestShape : undefined;
+}
+
+function getCompatibleNativeReplayTailMessages(params: {
+  branchEntries: Parameters<typeof buildSessionContext>[0];
+  compactionEntryId: string;
+  model: TargetModel;
+}): AgentMessage[] {
+  const compactionIndex = params.branchEntries.findIndex(
+    (entry) => entry.id === params.compactionEntryId,
+  );
+  if (compactionIndex < 0) return [];
+
+  const trailingContext = buildSessionContext(params.branchEntries.slice(compactionIndex + 1));
+  const compatibleMessages: AgentMessage[] = [];
+  let pendingMessages: AgentMessage[] = [];
+
+  for (const message of trailingContext.messages) {
+    if (message.role !== "assistant") {
+      pendingMessages.push(message);
+      continue;
+    }
+
+    if (messageMatchesModel(message, params.model)) {
+      compatibleMessages.push(...pendingMessages, message);
+    }
+    pendingMessages = [];
+  }
+
+  return compatibleMessages;
 }
 
 function extendRemoteHistoryIfCompatible(params: {
@@ -170,15 +198,29 @@ export default function openaiServerCompactionExtension(pi: ExtensionAPI) {
       if (event.signal.aborted) return { cancel: true };
       if (!auth.ok) throw new Error(auth.error);
 
-      const tools = buildToolsPayload(pi.getAllTools(), pi.getActiveTools());
+      const allTools = pi.getAllTools();
+      const responsesCompat = model.compat as OpenAIResponsesCompat | undefined;
+      const tools = buildToolsPayload(
+        allTools,
+        pi.getActiveTools(),
+        responsesCompat?.supportsStrictMode ?? false,
+      );
       const sessionId = getSessionId(ctx);
       const branchEntries = event.branchEntries as BranchEntry[];
-      const fullBranchMessages = getBranchMessages(branchEntries);
       const remoteState = getMatchingRemoteState(sessionId, model);
-      const observedRequestShape = getMatchingResponsesRequestShape(sessionId, model);
+      const contextMessages = remoteState
+        ? getCompatibleNativeReplayTailMessages({
+            branchEntries: event.branchEntries,
+            compactionEntryId: remoteState.compactionEntryId,
+            model,
+          })
+        : buildSessionContext(event.branchEntries).messages;
+      const effectiveMessages = convertToLlm(contextMessages);
+      const convertedResponseItems = messagesToResponseItems(effectiveMessages, model);
       const responseItems = remoteState
-        ? remoteState.explicitHistory
-        : messagesToResponseItems(fullBranchMessages);
+        ? [...remoteState.replacementHistory, ...convertedResponseItems]
+        : convertedResponseItems;
+      const observedRequestShape = getMatchingResponsesRequestShape(sessionId, model);
       const promptResponseItems = normalizeResponseItemsForPrompt(responseItems, model);
       const thinkingLevel = pi.getThinkingLevel();
       const fallbackReasoning = model.reasoning

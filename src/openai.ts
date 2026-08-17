@@ -93,5 +93,7 @@ export function extractResponsesServiceTier(payload: unknown): string | undefine
 
 export function messageMatchesModel(message: unknown, model: ModelLike): boolean {
   if (!isRecord(message)) return false;
-  return message.provider === model.provider && message.model === model.id;
+  return message.provider === model.provider &&
+    message.api === model.api &&
+    message.model === model.id;
 }

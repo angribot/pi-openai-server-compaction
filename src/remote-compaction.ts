@@ -10,8 +10,8 @@ import { randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
-import type { ToolInfo } from "@earendil-works/pi-coding-agent";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
+import type { ToolInfo } from "@earendil-works/pi-coding-agent";
 import {
   calculateCost,
   type Model,
@@ -21,6 +21,7 @@ import {
 import {
   hostnameFromBaseUrl,
   isRecord,
+  messageMatchesModel,
   supportsRemoteCompactionModel,
   modelKey,
 } from "./openai.ts";
@@ -41,7 +42,7 @@ type ContentPartLike = {
 export type ResponseContentItem =
   | { type: "input_text"; text: string }
   | { type: "input_image"; image_url: string }
-  | { type: "output_text"; text: string };
+  | { type: "output_text"; text: string; annotations?: unknown[] };
 
 export type ResponseItem =
   | {
@@ -74,6 +75,7 @@ export type ResponsesTextConfig = Record<string, unknown>;
 export type RemoteCompactionUsageSnapshot = Usage;
 
 const IMAGE_CONTENT_OMITTED_PLACEHOLDER = "image content omitted because you do not support image input";
+const OPENAI_TOOL_CALL_PROVIDERS = new Set(["openai", "openai-codex", "opencode"]);
 const REMOTE_COMPACTION_V2_FEATURE = "remote_compaction_v2";
 export const REMOTE_COMPACTION_CHECKPOINT_SUMMARY =
   "[Remote Responses compaction checkpoint]\n\n" +
@@ -270,19 +272,37 @@ function isAssistantPhase(value: unknown): value is AssistantPhase {
   return value === "commentary" || value === "final_answer";
 }
 
-function parseTextSignaturePhase(value: unknown): AssistantPhase | undefined {
+type ParsedTextSignature = {
+  id?: string;
+  phase?: AssistantPhase;
+};
+
+function parseTextSignature(value: unknown): ParsedTextSignature | undefined {
   if (typeof value !== "string" || !value.trim()) return undefined;
+  if (!value.startsWith("{")) return { id: value };
+
   try {
-    const parsed = JSON.parse(value) as { phase?: unknown };
-    return isAssistantPhase(parsed.phase) ? parsed.phase : undefined;
+    const parsed = JSON.parse(value) as { v?: unknown; id?: unknown; phase?: unknown };
+    if (parsed.v !== 1 || typeof parsed.id !== "string") return undefined;
+    return {
+      id: parsed.id,
+      ...(isAssistantPhase(parsed.phase) ? { phase: parsed.phase } : {}),
+    };
   } catch {
     return undefined;
   }
 }
 
+function sanitizeSurrogates(text: string): string {
+  return text.replace(
+    /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g,
+    "",
+  );
+}
+
 function contentToResponseContentItems(content: unknown): ResponseContentItem[] {
   if (typeof content === "string") {
-    return content ? [{ type: "input_text", text: content }] : [];
+    return content ? [{ type: "input_text", text: sanitizeSurrogates(content) }] : [];
   }
   if (!Array.isArray(content)) return [];
 
@@ -292,7 +312,7 @@ function contentToResponseContentItems(content: unknown): ResponseContentItem[] 
       (part.type === "text" || part.type === "input_text" || part.type === "output_text") &&
       typeof part.text === "string"
     ) {
-      items.push({ type: "input_text", text: part.text });
+      items.push({ type: "input_text", text: sanitizeSurrogates(part.text) });
       continue;
     }
     if (part.type === "image" && typeof part.data === "string" && typeof part.mimeType === "string") {
@@ -312,56 +332,48 @@ function contentToResponseContentItems(content: unknown): ResponseContentItem[] 
   return items;
 }
 
-function toolResultContentToOutput(content: unknown): string | ToolResultOutputItem[] {
-  if (typeof content === "string") return content;
-  if (!Array.isArray(content)) return "";
+function toolResultContentToOutput(
+  content: unknown,
+  model?: { input?: readonly unknown[] },
+): string | ToolResultOutputItem[] {
+  if (typeof content === "string") return sanitizeSurrogates(content);
+  if (!Array.isArray(content)) return "(no tool output)";
 
-  const output: ToolResultOutputItem[] = [];
+  const textParts: string[] = [];
+  const images: ContentPartLike[] = [];
   for (const item of content) {
     if (!item || typeof item !== "object") continue;
     const part = item as ContentPartLike;
     if (part.type === "text" && typeof part.text === "string") {
-      output.push({ type: "input_text", text: part.text });
-    } else if (part.type === "image" && typeof part.data === "string" && typeof part.mimeType === "string") {
-      output.push({ type: "input_image", image_url: `data:${part.mimeType};base64,${part.data}` });
+      textParts.push(sanitizeSurrogates(part.text));
+    } else if (
+      part.type === "image" &&
+      typeof part.data === "string" &&
+      typeof part.mimeType === "string"
+    ) {
+      images.push(part);
     }
   }
-  return output;
+  const text = textParts.join("\n");
+
+  if (images.length === 0 || !modelSupportsImageInput(model ?? {})) {
+    return text || (images.length > 0 ? "(see attached image)" : "(no tool output)");
+  }
+
+  return [
+    ...(text ? [{ type: "input_text" as const, text }] : []),
+    ...images.map((image) => ({
+      type: "input_image" as const,
+      image_url: `data:${image.mimeType};base64,${image.data}`,
+    })),
+  ];
 }
 
 function parseThinkingSignature(value: unknown): ResponseItem | undefined {
   if (typeof value !== "string" || !value.trim()) return undefined;
   try {
     const parsed = JSON.parse(value);
-    if (!isRecord(parsed) || parsed.type !== "reasoning") return undefined;
-
-    const summary = Array.isArray(parsed.summary)
-      ? parsed.summary
-          .map((item) =>
-            isRecord(item) && typeof item.text === "string"
-              ? { type: "summary_text" as const, text: item.text }
-              : undefined,
-          )
-          .filter((item): item is { type: "summary_text"; text: string } => Boolean(item))
-      : [];
-    const content = Array.isArray(parsed.content)
-      ? parsed.content
-          .map((item) => {
-            if (!isRecord(item) || typeof item.text !== "string") return undefined;
-            return {
-              type: item.type === "reasoning_text" ? "reasoning_text" : "text",
-              text: item.text,
-            } as const;
-          })
-          .filter((item): item is { type: "reasoning_text" | "text"; text: string } => Boolean(item))
-      : undefined;
-
-    return {
-      type: "reasoning",
-      summary,
-      ...(content && content.length > 0 ? { content } : {}),
-      encrypted_content: typeof parsed.encrypted_content === "string" ? parsed.encrypted_content : null,
-    };
+    return isResponseItem(parsed) && parsed.type === "reasoning" ? cloneResponseItem(parsed) : undefined;
   } catch {
     return undefined;
   }
@@ -378,7 +390,69 @@ function isCompactionItem(value: unknown): value is ResponseItem {
     value.encrypted_content.length > 0;
 }
 
-export function messageToResponseItems(message: AgentMessage): ResponseItem[] {
+function normalizeResponseIdPart(part: string): string {
+  const sanitized = part.replace(/[^a-zA-Z0-9_-]/g, "_");
+  return sanitized.slice(0, 64).replace(/_+$/, "");
+}
+
+function shortHash(value: string): string {
+  let first = 0xdeadbeef;
+  let second = 0x41c6ce57;
+  for (let index = 0; index < value.length; index++) {
+    const character = value.charCodeAt(index);
+    first = Math.imul(first ^ character, 2654435761);
+    second = Math.imul(second ^ character, 1597334677);
+  }
+  first = Math.imul(first ^ (first >>> 16), 2246822507) ^
+    Math.imul(second ^ (second >>> 13), 3266489909);
+  second = Math.imul(second ^ (second >>> 16), 2246822507) ^
+    Math.imul(first ^ (first >>> 13), 3266489909);
+  return (second >>> 0).toString(36) + (first >>> 0).toString(36);
+}
+
+function normalizeToolCallIdForTarget(
+  id: string,
+  source: Extract<AgentMessage, { role: "assistant" }>,
+  model: Model<any>,
+): string {
+  if (!OPENAI_TOOL_CALL_PROVIDERS.has(model.provider)) return normalizeResponseIdPart(id);
+  if (!id.includes("|")) return normalizeResponseIdPart(id);
+
+  const [callId, itemId] = id.split("|");
+  const normalizedCallId = normalizeResponseIdPart(callId);
+  const isForeign = source.provider !== model.provider || source.api !== model.api;
+  let normalizedItemId = isForeign
+    ? `fc_${shortHash(itemId)}`
+    : normalizeResponseIdPart(itemId);
+  if (!normalizedItemId.startsWith("fc_")) {
+    normalizedItemId = normalizeResponseIdPart(`fc_${normalizedItemId}`);
+  }
+  return `${normalizedCallId}|${normalizedItemId}`;
+}
+
+function assistantMessageMatchesTarget(
+  message: Extract<AgentMessage, { role: "assistant" }>,
+  model: Model<any> | undefined,
+): boolean {
+  return !model || messageMatchesModel(message, model);
+}
+
+function fallbackAssistantMessageId(messageIndex: number, textBlockIndex: number): string {
+  return textBlockIndex === 0
+    ? `msg_pi_${messageIndex}`
+    : `msg_pi_${messageIndex}_${textBlockIndex}`;
+}
+
+/**
+ * Pi 0.84's production extension loader does not expose pi-ai's public `api/*`
+ * runtime subpaths. Keep this narrow adapter aligned with Pi's ordinary
+ * OpenAI Responses conversion until the loader exposes the shared converter.
+ */
+export function messageToResponseItems(
+  message: AgentMessage,
+  model?: Model<any>,
+  messageIndex?: number,
+): ResponseItem[] {
   const items: ResponseItem[] = [];
 
   if (message.role === "user") {
@@ -390,47 +464,77 @@ export function messageToResponseItems(message: AgentMessage): ResponseItem[] {
   }
 
   if (message.role === "assistant") {
-    let phase: AssistantPhase | undefined;
-    const textBlocks: string[] = [];
+    if (message.stopReason === "error" || message.stopReason === "aborted") return items;
 
-    const flushText = () => {
-      if (textBlocks.length === 0) return;
-      items.push({
-        type: "message",
-        role: "assistant",
-        content: [{ type: "output_text", text: textBlocks.join("") }],
-        ...(phase ? { phase } : {}),
-      });
-      textBlocks.length = 0;
-    };
+    const sameModel = assistantMessageMatchesTarget(message, model);
+    const sameProviderAndApi = !model || (
+      message.provider === model.provider && message.api === model.api
+    );
+    const differentModel = Boolean(model && sameProviderAndApi && message.model !== model.id);
+    let textBlockIndex = 0;
 
     for (const block of message.content) {
-      if (block.type === "text") {
-        if (!phase) {
-          phase = parseTextSignaturePhase(block.textSignature);
-        }
-        textBlocks.push(block.text);
-        continue;
-      }
       if (block.type === "thinking") {
-        flushText();
-        const reasoning = parseThinkingSignature(block.thinkingSignature);
-        if (reasoning) items.push(reasoning);
+        if (block.redacted && !sameModel) continue;
+        if (sameModel) {
+          const reasoning = parseThinkingSignature(block.thinkingSignature);
+          if (reasoning) items.push(reasoning);
+        } else if (block.thinking.trim()) {
+          const id = messageIndex === undefined
+            ? undefined
+            : fallbackAssistantMessageId(messageIndex, textBlockIndex++);
+          items.push({
+            type: "message",
+            ...(id ? { id } : {}),
+            role: "assistant",
+            content: [{
+              type: "output_text",
+              text: sanitizeSurrogates(block.thinking),
+              annotations: [],
+            }],
+            status: "completed",
+          });
+        }
         continue;
       }
+
+      if (block.type === "text") {
+        const signature = sameModel ? parseTextSignature(block.textSignature) : undefined;
+        const fallbackId = messageIndex === undefined
+          ? undefined
+          : fallbackAssistantMessageId(messageIndex, textBlockIndex);
+        textBlockIndex++;
+        const id = signature?.id && signature.id.length <= 64 ? signature.id : fallbackId;
+        items.push({
+          type: "message",
+          ...(id ? { id } : {}),
+          role: "assistant",
+          content: [{
+            type: "output_text",
+            text: sanitizeSurrogates(block.text),
+            annotations: [],
+          }],
+          status: "completed",
+          ...(signature?.phase ? { phase: signature.phase } : {}),
+        });
+        continue;
+      }
+
       if (block.type !== "toolCall") continue;
 
-      flushText();
-      const callId = typeof block.id === "string" ? block.id.split("|", 1)[0] : block.id;
+      const [callId, itemId] = block.id.split("|");
+      const responseItemId = !differentModel && itemId?.startsWith("fc_") ? itemId : undefined;
+      const namespace = (block as typeof block & { namespace?: unknown }).namespace;
       items.push({
         type: "function_call",
+        ...(responseItemId ? { id: responseItemId } : {}),
         name: block.name,
-        call_id: typeof callId === "string" ? callId : String(callId),
+        call_id: callId,
         arguments: JSON.stringify(block.arguments ?? {}),
+        ...(sameModel && typeof namespace === "string" ? { namespace } : {}),
       });
     }
 
-    flushText();
     return items;
   }
 
@@ -438,15 +542,40 @@ export function messageToResponseItems(message: AgentMessage): ResponseItem[] {
     items.push({
       type: "function_call_output",
       call_id: message.toolCallId.split("|", 1)[0],
-      output: toolResultContentToOutput(message.content),
+      output: toolResultContentToOutput(message.content, model),
     });
   }
 
   return items;
 }
 
-export function messagesToResponseItems(messages: AgentMessage[]): ResponseItem[] {
-  return messages.flatMap((message) => messageToResponseItems(message));
+export function messagesToResponseItems(
+  messages: AgentMessage[],
+  model?: Model<any>,
+): ResponseItem[] {
+  const normalizedToolCallIds = new Map<string, string>();
+  const transformedMessages = messages.map((message): AgentMessage => {
+    if (message.role === "assistant" && model && !assistantMessageMatchesTarget(message, model)) {
+      return {
+        ...message,
+        content: message.content.map((block) => {
+          if (block.type !== "toolCall") return block;
+          const normalizedId = normalizeToolCallIdForTarget(block.id, message, model);
+          normalizedToolCallIds.set(block.id, normalizedId);
+          return normalizedId === block.id ? block : { ...block, id: normalizedId };
+        }),
+      };
+    }
+    if (message.role === "toolResult") {
+      const normalizedId = normalizedToolCallIds.get(message.toolCallId);
+      return normalizedId ? { ...message, toolCallId: normalizedId } : message;
+    }
+    return message;
+  });
+
+  return transformedMessages.flatMap((message, index) => (
+    messageToResponseItems(message, model, index)
+  ));
 }
 
 function cloneResponseItem(item: ResponseItem): ResponseItem {
@@ -467,7 +596,7 @@ function syntheticOutputForCall(item: ResponseItem): ResponseItem | undefined {
   if (!callId) return undefined;
 
   if (item.type === "function_call" || item.type === "local_shell_call") {
-    return { type: "function_call_output", call_id: callId, output: "aborted" };
+    return { type: "function_call_output", call_id: callId, output: "No result provided" };
   }
   if (item.type === "tool_search_call") {
     return {
@@ -683,21 +812,21 @@ export function buildRemoteCompactionV2History(
   ];
 }
 
-function toolInfoToResponseTool(tool: ToolInfo): Record<string, unknown> {
-  return {
-    type: "function",
-    name: tool.name,
-    description: tool.description,
-    parameters: tool.parameters,
-  };
-}
-
 export function buildToolsPayload(
   allTools: ToolInfo[],
   activeToolNames: string[],
+  supportsStrictMode = false,
 ): Record<string, unknown>[] {
   const active = new Set(activeToolNames);
-  return allTools.filter((tool) => active.has(tool.name)).map(toolInfoToResponseTool);
+  return allTools
+    .filter((tool) => active.has(tool.name))
+    .map((tool) => ({
+      type: "function",
+      name: tool.name,
+      description: tool.description,
+      parameters: tool.parameters,
+      ...(supportsStrictMode ? { strict: false } : {}),
+    }));
 }
 
 function extractCacheWriteTokens(value: unknown): number {
@@ -1270,8 +1399,7 @@ function assistantMessageMatchesModelKey(
 ): boolean {
   const target = parseModelKeyParts(targetModelKey);
   if (!target) return false;
-  if (!isRecord(message)) return false;
-  return message.provider === target.provider && message.model === target.id;
+  return messageMatchesModel(message, target);
 }
 
 export function reconstructRemoteCompactionStateFromBranch(params: {
