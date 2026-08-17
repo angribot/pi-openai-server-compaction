@@ -108,10 +108,14 @@ const { default: extensionFactory } = await import(pathToFileURL(join(repoRoot, 
 assert.equal(typeof extensionFactory, "function", "extension entrypoint should export a function");
 
 const {
+  budgetRemoteCompactionInput,
   buildRemoteCompactionHeaders,
   buildRemoteCompactionDetails,
   buildRemoteCompactionRequestBody,
   buildRemoteCompactionV2History,
+  callRemoteCompactionEndpoint,
+  CONTEXT_WINDOW_TRUNCATED_OUTPUT_MESSAGE,
+  estimateRemoteCompactionRequestTokens,
   extractRemoteCompactionDetails,
   messagesToResponseItems,
   normalizeResponseItemsForPrompt,
@@ -377,6 +381,22 @@ assert.deepEqual(
 assert.equal(retainedBudgetHistory[0].content[0].text.length, 96_000);
 assert.equal(retainedBudgetHistory[1].content[0].text.length, 160_000);
 
+const retainedStringBudgetHistory = buildRemoteCompactionV2History(
+  [{ type: "message", role: "user", content: "s".repeat(300_000) }],
+  parsedV2Events.compactionItem,
+);
+assert.equal(retainedStringBudgetHistory[0].content.length, 256_000);
+
+const retainedEmojiStringHistory = buildRemoteCompactionV2History(
+  [{ type: "message", role: "user", content: "😀".repeat(300_000) }],
+  parsedV2Events.compactionItem,
+);
+assert.ok(retainedEmojiStringHistory[0].content.length <= 256_000);
+assert.doesNotMatch(
+  retainedEmojiStringHistory[0].content,
+  /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/,
+);
+
 const normalizedPromptItems = normalizeResponseItemsForPrompt(
   [
     { type: "ghost_snapshot", data: "hidden" },
@@ -402,6 +422,250 @@ assert.deepEqual(normalizedPromptItems[2], {
 });
 assert.equal(normalizedPromptItems[3].result, "");
 assert.doesNotMatch(JSON.stringify(normalizedPromptItems), /orphan|ghost_snapshot/);
+
+const promptNormalizationModel = {
+  provider: "example-provider",
+  api: "openai-responses",
+  id: "gpt-5.4-nano",
+  name: "Budget test model",
+  baseUrl: "https://proxy.example.com/v1",
+  reasoning: false,
+  input: ["text"],
+  cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+  contextWindow: 300,
+  maxTokens: 64,
+};
+const ordinaryBudgetInput = [
+  { type: "message", role: "user", content: [{ type: "input_text", text: "ordinary history" }] },
+  {
+    type: "message",
+    role: "assistant",
+    content: [{ type: "output_text", text: "ordinary reply" }],
+  },
+];
+const ordinaryBudgetParams = {
+  model: promptNormalizationModel,
+  input: ordinaryBudgetInput,
+  instructions: "system",
+  tools: [],
+  parallelToolCalls: true,
+};
+assert.equal(
+  budgetRemoteCompactionInput(ordinaryBudgetParams),
+  ordinaryBudgetInput,
+  "in-budget remote-compaction history must not be rewritten",
+);
+
+const oversizedToolBudgetParams = {
+  ...ordinaryBudgetParams,
+  input: [
+    ordinaryBudgetInput[0],
+    { type: "function_call", name: "read", call_id: "budget-call", arguments: "{}" },
+    {
+      type: "function_call_output",
+      call_id: "budget-call",
+      output: `TOOL_OUTPUT_START${"x".repeat(4_000)}TOOL_OUTPUT_END`,
+    },
+    ordinaryBudgetInput[1],
+  ],
+};
+const budgetedToolInput = budgetRemoteCompactionInput(oversizedToolBudgetParams);
+assert.ok(
+  estimateRemoteCompactionRequestTokens({
+    ...oversizedToolBudgetParams,
+    input: budgetedToolInput,
+  }) <= promptNormalizationModel.contextWindow,
+  "budgeted remote-compaction request must fit the selected model context window",
+);
+assert.deepEqual(
+  budgetedToolInput.find((item: { type?: string }) => item.type === "function_call_output"),
+  {
+    type: "function_call_output",
+    call_id: "budget-call",
+    output: CONTEXT_WINDOW_TRUNCATED_OUTPUT_MESSAGE,
+  },
+  "oversized tool output must be reduced before conversation messages are discarded",
+);
+assert.equal(budgetedToolInput.length, oversizedToolBudgetParams.input.length);
+assert.deepEqual(budgetedToolInput[0], ordinaryBudgetInput[0]);
+assert.deepEqual(budgetedToolInput.at(-1), ordinaryBudgetInput[1]);
+assert.equal(
+  budgetedToolInput.filter((item: { type?: string }) => item.type === "function_call").length,
+  budgetedToolInput.filter((item: { type?: string }) => item.type === "function_call_output")
+    .length,
+  "budgeting must preserve call/output pairs",
+);
+assert.deepEqual(
+  budgetRemoteCompactionInput({ ...oversizedToolBudgetParams, input: budgetedToolInput }),
+  budgetedToolInput,
+  "budgeting must remain stable when repeated",
+);
+
+const droppedPairBudgetInput = budgetRemoteCompactionInput({
+  ...ordinaryBudgetParams,
+  input: [
+    {
+      type: "function_call",
+      name: "read",
+      call_id: "oversized-arguments-call",
+      arguments: JSON.stringify({ path: "a".repeat(4_000) }),
+    },
+    { type: "function_call_output", call_id: "oversized-arguments-call", output: "old result" },
+    { type: "function_call", name: "read", call_id: "recent-call", arguments: "{}" },
+    { type: "function_call_output", call_id: "recent-call", output: "recent result" },
+    ordinaryBudgetInput[1],
+  ],
+});
+assert.deepEqual(
+  droppedPairBudgetInput
+    .filter((item: { type?: string }) => item.type === "function_call")
+    .map((item: { call_id?: string }) => item.call_id),
+  ["recent-call"],
+);
+assert.deepEqual(
+  droppedPairBudgetInput
+    .filter((item: { type?: string }) => item.type === "function_call_output")
+    .map((item: { call_id?: string }) => item.call_id),
+  ["recent-call"],
+  "discarding history must remove calls and outputs as a pair",
+);
+
+const syntheticPromptItems = normalizeResponseItemsForPrompt(
+  [
+    {
+      type: "function_call",
+      id: "fc-stable",
+      name: "read",
+      call_id: "stable-call",
+      arguments: "{}",
+    },
+  ],
+  { input: ["text"] },
+);
+assert.deepEqual(
+  normalizeResponseItemsForPrompt(syntheticPromptItems, { input: ["text"] }),
+  syntheticPromptItems,
+  "synthetic outputs must remain stable across repeated prompt normalization",
+);
+
+const longMessageText = `MESSAGE_BEGIN_${"m".repeat(2_000)}_MESSAGE_END`;
+const longMessageBudgetParams = {
+  ...ordinaryBudgetParams,
+  input: [
+    { type: "message", role: "user", content: [{ type: "input_text", text: longMessageText }] },
+    {
+      type: "message",
+      role: "assistant",
+      content: [{ type: "output_text", text: "recent reply ".repeat(20) }],
+    },
+  ],
+};
+const budgetedMessageInput = budgetRemoteCompactionInput(longMessageBudgetParams);
+const partiallyRetainedMessage = budgetedMessageInput.find(
+  (item: { type?: string; role?: string }) => item.type === "message" && item.role === "user",
+);
+assert.ok(partiallyRetainedMessage, "the boundary message should be retained partially");
+const partiallyRetainedText = partiallyRetainedMessage.content[0].text;
+assert.match(partiallyRetainedText, /^MESSAGE_BEGIN_/);
+assert.match(partiallyRetainedText, /_MESSAGE_END$/);
+assert.match(partiallyRetainedText, /truncated/i);
+assert.ok(
+  estimateRemoteCompactionRequestTokens({
+    ...longMessageBudgetParams,
+    input: budgetedMessageInput,
+  }) <= promptNormalizationModel.contextWindow,
+);
+
+const stringMessageBudgetParams = {
+  ...ordinaryBudgetParams,
+  input: [
+    { type: "message", role: "user", content: `STRING_BEGIN_${"s".repeat(2_000)}_STRING_END` },
+    ordinaryBudgetInput[1],
+  ],
+};
+const budgetedStringMessage = budgetRemoteCompactionInput(stringMessageBudgetParams).find(
+  (item: { type?: string; role?: string }) => item.type === "message" && item.role === "user",
+);
+assert.equal(typeof budgetedStringMessage?.content, "string");
+assert.match(String(budgetedStringMessage?.content), /^STRING_BEGIN_/);
+assert.match(String(budgetedStringMessage?.content), /_STRING_END$/);
+assert.match(String(budgetedStringMessage?.content), /truncated/i);
+
+const unicodeMessageBudgetParams = {
+  ...ordinaryBudgetParams,
+  input: [
+    {
+      type: "message",
+      role: "user",
+      content: [{ type: "input_text", text: `UNICODE_BEGIN_${"😀".repeat(1_000)}_UNICODE_END` }],
+    },
+    ordinaryBudgetInput[1],
+  ],
+};
+const budgetedUnicodeInput = budgetRemoteCompactionInput(unicodeMessageBudgetParams);
+const budgetedUnicodeMessage = budgetedUnicodeInput.find(
+  (item: { type?: string; role?: string }) => item.type === "message" && item.role === "user",
+);
+const budgetedUnicodeText = budgetedUnicodeMessage?.content[0].text ?? "";
+assert.match(budgetedUnicodeText, /^UNICODE_BEGIN_/);
+assert.match(budgetedUnicodeText, /_UNICODE_END$/);
+assert.doesNotMatch(
+  budgetedUnicodeText,
+  /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/,
+  "message truncation must not split Unicode surrogate pairs",
+);
+
+const multimodalBudgetParams = {
+  ...ordinaryBudgetParams,
+  model: {
+    ...promptNormalizationModel,
+    input: ["text", "image"],
+    contextWindow: 1_800,
+  },
+  input: [
+    {
+      type: "message",
+      role: "user",
+      content: [
+        { type: "input_text", text: `IMAGE_TEXT_BEGIN_${"b".repeat(3_000)}` },
+        { type: "input_image", image_url: "data:image/png;base64,AAAA" },
+        { type: "input_text", text: `${"e".repeat(3_000)}_IMAGE_TEXT_END` },
+      ],
+    },
+    ordinaryBudgetInput[1],
+  ],
+};
+const budgetedMultimodalInput = budgetRemoteCompactionInput(multimodalBudgetParams);
+const budgetedMultimodalMessage = budgetedMultimodalInput.find(
+  (item: { type?: string; role?: string }) => item.type === "message" && item.role === "user",
+);
+assert.deepEqual(
+  budgetedMultimodalMessage?.content.map((part: { type?: string }) => part.type),
+  ["input_text", "input_image", "input_text"],
+  "message truncation must preserve multimodal content ordering",
+);
+assert.match(budgetedMultimodalMessage.content[0].text, /^IMAGE_TEXT_BEGIN_/);
+assert.match(budgetedMultimodalMessage.content[0].text, /truncated/i);
+assert.match(budgetedMultimodalMessage.content[2].text, /_IMAGE_TEXT_END$/);
+
+const opaqueReplayInput = [
+  { type: "compaction", encrypted_content: "c".repeat(4_000) },
+  { type: "message", role: "user", content: [{ type: "input_text", text: "continue" }] },
+];
+const opaqueReplayParams = {
+  ...ordinaryBudgetParams,
+  model: { ...promptNormalizationModel, contextWindow: 800 },
+  input: opaqueReplayInput,
+};
+assert.ok(
+  estimateRemoteCompactionRequestTokens(opaqueReplayParams) <=
+    opaqueReplayParams.model.contextWindow,
+);
+assert.equal(
+  budgetRemoteCompactionInput(opaqueReplayParams),
+  opaqueReplayInput,
+  "opaque compaction items should use model-visible rather than encoded size estimates",
+);
 
 const foreignToolHistory = messagesToResponseItems(
   [
@@ -1062,6 +1326,64 @@ try {
     successResult?.compaction?.details?.remoteCompaction?.modelKey,
     modelKey(compactContext.model),
     "credential-resolved endpoints must not change persisted model identity",
+  );
+
+  requestBodies.length = 0;
+  responsePlan = [sseResponse("OVERFLOW_RECOVERED")];
+  const oversizedToolOutput = `OVERFLOW_OUTPUT_START${"z".repeat(8_000)}OVERFLOW_OUTPUT_END`;
+  const overflowModel = { ...compactContext.model, contextWindow: 600 };
+  const overflowResult = await callRemoteCompactionEndpoint({
+    model: overflowModel,
+    apiKey: "sk-test",
+    input: [
+      {
+        type: "message",
+        role: "user",
+        content: [{ type: "input_text", text: "read the oversized result" }],
+      },
+      {
+        type: "function_call",
+        id: "fc_overflow_call",
+        call_id: "overflow-call",
+        name: "read",
+        arguments: JSON.stringify({ path: "large.log" }),
+      },
+      {
+        type: "function_call_output",
+        call_id: "overflow-call",
+        output: oversizedToolOutput,
+      },
+    ],
+    instructions: "system prompt",
+    tools: [],
+    parallelToolCalls: true,
+  });
+  assert.equal(overflowResult.output.at(-1)?.type, "compaction");
+  const overflowRequestBody = JSON.parse(requestBodies[0]);
+  assert.ok(
+    Math.ceil(requestBodies[0].length / 4) <= overflowModel.contextWindow,
+    "the complete overflow-recovery request should fit the selected context window",
+  );
+  assert.deepEqual(
+    overflowRequestBody.input.find(
+      (item: { type?: string }) => item.type === "function_call_output",
+    ),
+    {
+      type: "function_call_output",
+      call_id: "overflow-call",
+      output: CONTEXT_WINDOW_TRUNCATED_OUTPUT_MESSAGE,
+    },
+  );
+  assert.equal(
+    overflowRequestBody.input.filter((item: { type?: string }) => item.type === "function_call")
+      .length,
+    1,
+  );
+  assert.equal(
+    overflowRequestBody.input.filter(
+      (item: { type?: string }) => item.type === "function_call_output",
+    ).length,
+    1,
   );
 
   clearResponsesRequestShapeState(sessionId);

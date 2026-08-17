@@ -3,6 +3,7 @@
 This changelog intentionally starts at **0.1.0**.
 
 ## Unreleased
+- bound remote compaction requests to the selected model's context window by reducing oversized tool outputs first, preserving call/output pairs, and visibly truncating retained message boundaries
 - align remote compaction with the selected model's reasoning map, exclude structured-output schemas, and include service-tier-adjusted usage in Pi's session totals
 - preserve native replay across cancelled session navigation, rebuild it at successful lifecycle boundaries, and reject incomplete persisted replay details without breaking colon-bearing model IDs
 - build remote compaction input from Pi's effective context with Pi-compatible Responses conversion, preserving prior summaries, contextual messages, shell output, assistant item metadata, tool compatibility, and exact native-replay model identity
