@@ -413,7 +413,7 @@ const normalizedPromptItems = normalizeResponseItemsForPrompt(
 );
 assert.equal(normalizedPromptItems[0].type, "message");
 assert.deepEqual(normalizedPromptItems[0].content, [
-  { type: "input_text", text: "image content omitted because you do not support image input" },
+  { type: "input_text", text: "(image omitted: model does not support images)" },
 ]);
 assert.deepEqual(normalizedPromptItems[2], {
   type: "function_call_output",
@@ -928,15 +928,141 @@ extensionFactory(fakePi);
 const beforeProviderRequest = handlers.get("before_provider_request")!;
 assert.equal(typeof beforeProviderRequest, "function");
 const sessionId = "provider-agnostic-session";
-const injectedHistory = [
-  { type: "message", role: "user", content: [{ type: "input_text", text: "retained" }] },
+const replacementHistory = [
+  { type: "message", role: "user", content: [{ type: "input_text", text: "SUMMARIZED_USER" }] },
+  {
+    type: "message",
+    role: "user",
+    content: [
+      { type: "input_text", text: "RETAINED_PRE_COMPACTION" },
+      { type: "input_text", text: "(image omitted: model does not support images)" },
+    ],
+  },
+  {
+    type: "message",
+    role: "user",
+    content: [{ type: "input_text", text: "CURRENT_USER_TURN" }],
+  },
   { type: "compaction", encrypted_content: "OPAQUE" },
 ];
+const replayBranch = [
+  {
+    type: "message",
+    id: "summarized-user",
+    parentId: null,
+    timestamp: "2026-08-18T00:00:00.000Z",
+    message: {
+      role: "user",
+      content: [{ type: "text", text: "SUMMARIZED_USER" }],
+      timestamp: 1,
+    },
+  },
+  {
+    type: "message",
+    id: "retained-user",
+    parentId: "summarized-user",
+    timestamp: "2026-08-18T00:00:01.000Z",
+    message: {
+      role: "user",
+      content: [
+        { type: "text", text: "RETAINED_PRE_COMPACTION" },
+        { type: "image", data: "AAAA", mimeType: "image/png" },
+      ],
+      timestamp: 2,
+    },
+  },
+  {
+    type: "message",
+    id: "retained-assistant",
+    parentId: "retained-user",
+    timestamp: "2026-08-18T00:00:02.000Z",
+    message: {
+      role: "assistant",
+      provider: proxyResponsesModel.provider,
+      api: proxyResponsesModel.api,
+      model: proxyResponsesModel.id,
+      content: [{ type: "text", text: "RETAINED_ASSISTANT" }],
+      stopReason: "stop",
+      timestamp: 3,
+    },
+  },
+  {
+    type: "message",
+    id: "current-user",
+    parentId: "retained-assistant",
+    timestamp: "2026-08-18T00:00:03.000Z",
+    message: {
+      role: "user",
+      content: [{ type: "text", text: "CURRENT_USER_TURN" }],
+      timestamp: 4,
+    },
+  },
+  {
+    type: "compaction",
+    id: "cmp-provider-agnostic",
+    parentId: "current-user",
+    timestamp: "2026-08-18T00:00:04.000Z",
+    summary: REMOTE_COMPACTION_CHECKPOINT_SUMMARY,
+    firstKeptEntryId: "retained-user",
+    tokensBefore: 1_000,
+  },
+  {
+    type: "message",
+    id: "post-compaction-user",
+    parentId: "cmp-provider-agnostic",
+    timestamp: "2026-08-18T00:00:05.000Z",
+    message: {
+      role: "user",
+      content: [{ type: "text", text: "POST_COMPACTION_USER_TURN" }],
+      timestamp: 5,
+    },
+  },
+];
+const checkpointInputItem = {
+  role: "user",
+  content: [{
+    type: "input_text",
+    text:
+      "The conversation history before this point was compacted into the following summary:\n\n" +
+      `<summary>\n${REMOTE_COMPACTION_CHECKPOINT_SUMMARY}\n</summary>`,
+  }],
+};
+const retainedUserInputItem = {
+  role: "user",
+  content: [
+    { type: "input_text", text: "RETAINED_PRE_COMPACTION" },
+    { type: "input_text", text: "(image omitted: model does not support images)" },
+  ],
+};
+const retainedAssistantInputItem = {
+  type: "message",
+  role: "assistant",
+  content: [{ type: "output_text", text: "RETAINED_ASSISTANT", annotations: [] }],
+  status: "completed",
+  id: "msg_pi_2",
+  phase: undefined,
+};
+const currentUserInputItem = {
+  role: "user",
+  content: [{ type: "input_text", text: "CURRENT_USER_TURN" }],
+};
+const postCompactionUserInputItem = {
+  role: "user",
+  content: [{ type: "input_text", text: "POST_COMPACTION_USER_TURN" }],
+};
+const transientDeveloperInputItem = {
+  role: "developer",
+  content: "TRANSIENT_DEVELOPER_CONTEXT",
+};
+const transientCustomInputItem = {
+  type: "custom_context",
+  value: "TRANSIENT_PROVIDER_CONTEXT",
+};
 setRemoteCompactionState(sessionId, {
   compactionEntryId: "cmp-provider-agnostic",
   modelKey: modelKey(proxyResponsesModel),
-  replacementHistory: injectedHistory,
-  explicitHistory: injectedHistory,
+  replacementHistory,
+  explicitHistory: [...replacementHistory, postCompactionUserInputItem],
 });
 const requestContext = {
   cwd: repoRoot,
@@ -947,13 +1073,24 @@ const requestContext = {
     getSessionId() {
       return sessionId;
     },
+    getBranch() {
+      return replayBranch;
+    },
   },
 };
 const patchedPayload = beforeProviderRequest(
   {
     payload: {
       model: "sampling-override-model",
-      input: [{ type: "message", role: "user", content: "stale full history" }],
+      input: [
+        transientDeveloperInputItem,
+        checkpointInputItem,
+        retainedUserInputItem,
+        retainedAssistantInputItem,
+        currentUserInputItem,
+        postCompactionUserInputItem,
+        transientCustomInputItem,
+      ],
       instructions: "sampling override instructions",
       tools: [{ type: "function", name: "sampling_override" }],
       parallel_tool_calls: false,
@@ -974,9 +1111,64 @@ const patchedPayload = beforeProviderRequest(
   },
   requestContext,
 );
-assert.deepEqual(patchedPayload.input, injectedHistory);
+assert.deepEqual(patchedPayload.input, [
+  transientDeveloperInputItem,
+  ...replacementHistory,
+  postCompactionUserInputItem,
+  transientCustomInputItem,
+]);
+assert.equal(patchedPayload.input[0], transientDeveloperInputItem);
+assert.equal(patchedPayload.input.at(-1), transientCustomInputItem);
+assert.equal(
+  JSON.stringify(patchedPayload.input).match(/CURRENT_USER_TURN/g)?.length,
+  1,
+  "the current user turn retained across compaction must appear exactly once",
+);
+assert.equal(
+  JSON.stringify(patchedPayload.input).match(/POST_COMPACTION_USER_TURN/g)?.length,
+  1,
+  "new turns after remote compaction must appear exactly once",
+);
+assert.equal(
+  JSON.stringify(patchedPayload.input).match(/RETAINED_PRE_COMPACTION/g)?.length,
+  1,
+  "Pi-retained user messages must be replaced rather than duplicated",
+);
 assert.equal("messages" in patchedPayload, false);
 assert.equal("previous_response_id" in patchedPayload, false);
+
+const replayWarnings: string[] = [];
+const unsafeInput = [
+  transientDeveloperInputItem,
+  { ...checkpointInputItem, role: "developer" },
+  retainedUserInputItem,
+  currentUserInputItem,
+  postCompactionUserInputItem,
+  transientCustomInputItem,
+];
+const originalConsoleWarn = console.warn;
+let unsafePatch: unknown;
+console.warn = (message?: unknown) => {
+  replayWarnings.push(String(message));
+};
+try {
+  unsafePatch = beforeProviderRequest(
+    { payload: { model: proxyResponsesModel.id, input: unsafeInput } },
+    requestContext,
+  );
+} finally {
+  console.warn = originalConsoleWarn;
+}
+assert.equal(unsafePatch, undefined);
+assert.match(replayWarnings.at(-1) ?? "", /native replay.*not injected.*original provider input/i);
+assert.deepEqual(unsafeInput, [
+  transientDeveloperInputItem,
+  { ...checkpointInputItem, role: "developer" },
+  retainedUserInputItem,
+  currentUserInputItem,
+  postCompactionUserInputItem,
+  transientCustomInputItem,
+]);
 
 const untouchedCodexPayload = beforeProviderRequest(
   { payload: { model: "gpt-5.4-nano", input: [] } },
@@ -1002,7 +1194,16 @@ const lifecycleState = {
   replacementHistory: lifecycleHistory,
   explicitHistory: lifecycleHistory,
 };
-const lifecycleContext = (branchEntries: unknown[] = []) => ({
+const lifecycleCheckpointBranch = [{
+  type: "compaction",
+  id: "lifecycle-compaction",
+  parentId: null,
+  timestamp: "2026-08-18T01:00:00.000Z",
+  summary: REMOTE_COMPACTION_CHECKPOINT_SUMMARY,
+  firstKeptEntryId: "missing-retained-entry",
+  tokensBefore: 1_000,
+}];
+const lifecycleContext = (branchEntries: unknown[] = lifecycleCheckpointBranch) => ({
   ...requestContext,
   sessionManager: {
     getSessionId() {
@@ -1053,7 +1254,7 @@ for (const eventName of [
   );
   assert.deepEqual(
     beforeProviderRequest(
-      { payload: { model: proxyResponsesModel.id, input: [] } },
+      { payload: { model: proxyResponsesModel.id, input: [checkpointInputItem] } },
       lifecycleContext(),
     )?.input,
     lifecycleHistory,

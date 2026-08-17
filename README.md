@@ -46,13 +46,15 @@ On compaction, the extension:
 2. Requires a completed response containing exactly one valid compaction item.
 3. Stores a fixed `[Remote Responses compaction checkpoint]` marker in `CompactionEntry.summary`, retains recent user messages using Codex's current 64K approximate-token budget in `CompactionEntry.details.remoteCompaction`, and records the operation's usage in Pi's standard compaction usage field.
 4. Reconstructs replacement history after resume, tree navigation, forks, and later compactions.
-5. Replaces the `input` of later model-compatible `openai-responses` requests with the reconstructed history.
+5. Replaces only the replay replacement span in later model-compatible `openai-responses` inputs, leaving current-turn and extension-added provider items in place.
 
 The extension intentionally does not add `store`, `context_management`, or `previous_response_id` to ordinary requests. Those are separate persistence, automatic-context-management, and continuation concerns.
 
 ### Remote compaction request controls
 
-On ordinary requests, the extension preserves Pi's effective provider parameters while patching only replay input and stale continuation fields. The extension-owned remote compaction request instead uses an explicit allowlist: it carries a string `service_tier` only when the latest observed ordinary request for the same session and model key contained that value. Observed reasoning takes precedence over fallback inference; otherwise the selected model's thinking-level mapping is used. Compaction-safe text settings such as verbosity may be carried, while structured-output formats are excluded.
+On ordinary requests, the extension preserves Pi's effective provider parameters while patching only the replay replacement span and stale continuation fields. It locates the unique span containing the serialized checkpoint marker and Pi-retained pre-compaction entries, replaces that span with replacement history, and leaves earlier or later provider items unchanged. This preserves system/developer context, current turns, and additions from other payload hooks without duplicating retained user messages. If the replay replacement span is missing or ambiguous, native replay is not injected, the original provider input is preserved, and a warning is emitted.
+
+The extension-owned remote compaction request instead uses an explicit allowlist: it carries a string `service_tier` only when the latest observed ordinary request for the same session and model key contained that value. Observed reasoning takes precedence over fallback inference; otherwise the selected model's thinking-level mapping is used. Compaction-safe text settings such as verbosity may be carried, while structured-output formats are excluded.
 
 Arbitrary sampling parameters are not merged into remote compaction. Values for `temperature`, `top_p`, unknown provider fields, and protocol-owned fields are not copied. The extension constructs the compaction model, input, tools, trigger, streaming mode, `store: false`, and encrypted-reasoning inclusion itself. If no matching `service_tier` was observed, the field is omitted and the endpoint default applies.
 
@@ -106,7 +108,7 @@ Remote compaction is always enabled for eligible models, and activation notifica
 - The remote compaction request uses `store: false`.
 - Returned compaction items are stored as replacement history in Pi's local session JSONL.
 - Persisted details are validated before reconstruction; legacy version 1 details remain readable, while new compactions write version 2.
-- Ordinary requests are not changed until matching replacement history needs replay.
+- Ordinary requests are changed only when matching replacement history needs replay and the replay replacement span can be identified exactly; otherwise their provider input is preserved.
 - Switching to an incompatible model does not replay replacement history and may expose only the checkpoint marker and post-compaction context.
 
 ## Testing
@@ -117,7 +119,7 @@ Offline core checks:
 npm test
 ```
 
-The smoke suite covers only project-owned requirements: provider-agnostic `openai-responses` gating, request-body construction and settings, compaction usage accounting, compaction-item validation, replacement-history reconstruction and injection, and the absence of provider registration.
+The smoke suite covers only project-owned requirements: provider-agnostic `openai-responses` gating, request-body construction and settings, compaction usage accounting, compaction-item validation, replacement-history reconstruction, narrow replay replacement span injection with transient provider additions, conservative replay failure, and the absence of provider registration.
 
 Credentialed live regression:
 

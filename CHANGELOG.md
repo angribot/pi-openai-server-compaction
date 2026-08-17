@@ -3,6 +3,8 @@
 This changelog intentionally starts at **0.1.0**.
 
 ## Unreleased
+- preserve current-turn and extension-added provider items during native replay by replacing only the exact replay replacement span, leaving unmatched inputs unchanged with a warning
+- align remote compaction conversion with Pi's image serialization and text-only user/tool image placeholders
 - bound remote compaction requests to the selected model's context window by reducing oversized tool outputs first, preserving call/output pairs, and visibly truncating retained message boundaries
 - align remote compaction with the selected model's reasoning map, exclude structured-output schemas, and include service-tier-adjusted usage in Pi's session totals
 - preserve native replay across cancelled session navigation, rebuild it at successful lifecycle boundaries, and reject incomplete persisted replay details without breaking colon-bearing model IDs

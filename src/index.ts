@@ -32,6 +32,7 @@ import {
   messagesToResponseItems,
   normalizeResponseItemsForPrompt,
   reconstructRemoteCompactionStateFromBranch,
+  type ResponseItem,
 } from "./remote-compaction.ts";
 import {
   clearAllRuntimeState,
@@ -44,13 +45,17 @@ import {
 } from "./state.ts";
 
 type TargetModel = Parameters<typeof modelKey>[0];
+type ResponsesModel = Exclude<Parameters<typeof messagesToResponseItems>[1], undefined>;
 
 type BranchEntry = {
   type: string;
   id: string;
+  parentId?: string | null;
+  timestamp?: string;
   details?: unknown;
   message?: unknown;
   thinkingLevel?: unknown;
+  summary?: unknown;
 };
 
 type SessionContextLike = {
@@ -104,6 +109,47 @@ function getMatchingResponsesRequestShape(
 ): ReturnType<typeof getResponsesRequestShapeState> {
   const requestShape = getResponsesRequestShapeState(sessionId);
   return requestShape?.modelKey === modelKey(model) ? requestShape : undefined;
+}
+
+function isCheckpointInputItem(item: ResponseItem | undefined): boolean {
+  if (item?.type !== "message" || item.role !== "user" || !Array.isArray(item.content)) {
+    return false;
+  }
+  return item.content.some((part) => (
+    part.type === "input_text" && part.text.includes(REMOTE_COMPACTION_CHECKPOINT_SUMMARY)
+  ));
+}
+
+function getExpectedReplayReplacementSpan(params: {
+  branchEntries: BranchEntry[];
+  compactionEntryId: string;
+  model: ResponsesModel;
+}): ResponseItem[] | undefined {
+  const compactionEntry = params.branchEntries.find(
+    (entry) => entry.id === params.compactionEntryId,
+  );
+  if (
+    compactionEntry?.type !== "compaction" ||
+    compactionEntry.summary !== REMOTE_COMPACTION_CHECKPOINT_SUMMARY
+  ) {
+    return undefined;
+  }
+
+  try {
+    const checkpointContext = buildSessionContext(
+      params.branchEntries as Parameters<typeof buildSessionContext>[0],
+      params.compactionEntryId,
+    );
+    const expectedReplayReplacementSpan = messagesToResponseItems(
+      convertToLlm(checkpointContext.messages),
+      params.model,
+    );
+    return isCheckpointInputItem(expectedReplayReplacementSpan[0])
+      ? expectedReplayReplacementSpan
+      : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 function getCompatibleNativeReplayTailMessages(params: {
@@ -306,10 +352,32 @@ export default function openaiServerCompactionExtension(pi: ExtensionAPI) {
     const remoteState = getMatchingRemoteState(sessionId, model);
     if (!remoteState) return undefined;
 
-    const payload = applyRemoteHistoryPayloadPatch({
-      payload: event.payload,
-      explicitHistory: normalizeResponseItemsForPrompt(remoteState.explicitHistory, model) as unknown[],
+    const expectedReplayReplacementSpan = getExpectedReplayReplacementSpan({
+      branchEntries: ctx.sessionManager.getBranch() as BranchEntry[],
+      compactionEntryId: remoteState.compactionEntryId,
+      model,
     });
+    const replacementHistory = normalizeResponseItemsForPrompt(
+      remoteState.replacementHistory,
+      model,
+    ) as unknown[];
+    const payload = expectedReplayReplacementSpan
+      ? applyRemoteHistoryPayloadPatch({
+          payload: event.payload,
+          expectedReplayReplacementSpan,
+          replacementHistory,
+        })
+      : undefined;
+    if (!payload) {
+      const warning =
+        "OpenAI native replay was not injected because its replay replacement span could not be matched safely; the original provider input was preserved.";
+      if (ctx.hasUI) {
+        ctx.ui.notify(warning, "warning");
+      } else {
+        console.warn(warning);
+      }
+      return undefined;
+    }
     return payload;
   });
 }

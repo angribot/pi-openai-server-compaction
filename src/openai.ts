@@ -4,6 +4,7 @@
  * Remote compaction is provider-agnostic and applies only to the plain
  * `openai-responses` API. Transport selection belongs to a separate extension.
  */
+import { isDeepStrictEqual } from "node:util";
 import { clampThinkingLevel, type Model, type ModelThinkingLevel } from "@earendil-works/pi-ai";
 import type {
   RemoteCompactionTextConfig,
@@ -77,13 +78,78 @@ export function thinkingLevelToResponsesReasoning(
   };
 }
 
+function serializedProviderItem(value: unknown): unknown | undefined {
+  try {
+    const json = JSON.stringify(value);
+    if (json === undefined) return undefined;
+    const serialized = JSON.parse(json) as unknown;
+    if (
+      isRecord(serialized) &&
+      !("type" in serialized) &&
+      typeof serialized.role === "string" &&
+      "content" in serialized
+    ) {
+      return { ...serialized, type: "message" };
+    }
+    return serialized;
+  } catch {
+    return undefined;
+  }
+}
+
+function isSameSerializedProviderItem(actual: unknown, expected: unknown): boolean {
+  const serializedActual = serializedProviderItem(actual);
+  const serializedExpected = serializedProviderItem(expected);
+  return serializedActual !== undefined &&
+    serializedExpected !== undefined &&
+    isDeepStrictEqual(serializedActual, serializedExpected);
+}
+
+function findUniqueReplayReplacementSpan(
+  input: unknown[],
+  expectedReplayReplacementSpan: unknown[],
+): number | undefined {
+  if (
+    expectedReplayReplacementSpan.length === 0 ||
+    expectedReplayReplacementSpan.length > input.length
+  ) {
+    return undefined;
+  }
+
+  let matchStart: number | undefined;
+  const lastStart = input.length - expectedReplayReplacementSpan.length;
+  for (let start = 0; start <= lastStart; start++) {
+    const matches = expectedReplayReplacementSpan.every((item, offset) => (
+      isSameSerializedProviderItem(input[start + offset], item)
+    ));
+    if (!matches) continue;
+    if (matchStart !== undefined) return undefined;
+    matchStart = start;
+  }
+  return matchStart;
+}
+
 export function applyRemoteHistoryPayloadPatch(params: {
   payload: JsonRecord;
-  explicitHistory: unknown[];
-}): JsonRecord {
+  expectedReplayReplacementSpan: unknown[];
+  replacementHistory: unknown[];
+}): JsonRecord | undefined {
+  if (!Array.isArray(params.payload.input)) return undefined;
+
+  const matchStart = findUniqueReplayReplacementSpan(
+    params.payload.input,
+    params.expectedReplayReplacementSpan,
+  );
+  if (matchStart === undefined) return undefined;
+
+  const matchEnd = matchStart + params.expectedReplayReplacementSpan.length;
   const nextPayload: JsonRecord = {
     ...params.payload,
-    input: params.explicitHistory,
+    input: [
+      ...params.payload.input.slice(0, matchStart),
+      ...params.replacementHistory,
+      ...params.payload.input.slice(matchEnd),
+    ],
   };
   delete nextPayload.messages;
   delete nextPayload.previous_response_id;
