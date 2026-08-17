@@ -73,11 +73,6 @@ function getBranchThinkingLevel(branchEntries: BranchEntry[]): string | undefine
   return undefined;
 }
 
-function clearSessionRuntimeState(sessionId: string | undefined): void {
-  clearRemoteCompactionState(sessionId);
-  clearResponsesRequestShapeState(sessionId);
-}
-
 function syncRemoteState(ctx: SessionContextLike): void {
   const sessionId = getSessionId(ctx);
   const branchEntries = ctx.sessionManager.getBranch() as Array<{
@@ -166,18 +161,13 @@ export default function openaiServerCompactionExtension(pi: ExtensionAPI) {
     syncRemoteState(ctx);
   });
 
-  const clearBeforeSessionChange = (_event: unknown, ctx: SessionContextLike): void => {
-    clearSessionRuntimeState(getSessionId(ctx));
-  };
-  pi.on("session_before_switch", clearBeforeSessionChange);
-  pi.on("session_before_fork", clearBeforeSessionChange);
-  pi.on("session_before_tree", clearBeforeSessionChange);
-
-  const syncAfterSessionChange = (_event: unknown, ctx: SessionContextLike): void => {
+  pi.on("session_tree", (_event, ctx) => {
+    clearResponsesRequestShapeState(getSessionId(ctx));
     syncRemoteState(ctx);
-  };
-  pi.on("session_tree", syncAfterSessionChange);
-  pi.on("session_compact", syncAfterSessionChange);
+  });
+  pi.on("session_compact", (_event, ctx) => {
+    syncRemoteState(ctx);
+  });
 
   pi.on("model_select", (_event, ctx) => {
     clearResponsesRequestShapeState(getSessionId(ctx));
