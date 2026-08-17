@@ -293,9 +293,16 @@ function parseTextSignature(value: unknown): ParsedTextSignature | undefined {
   }
 }
 
+function sanitizeSurrogates(text: string): string {
+  return text.replace(
+    /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g,
+    "",
+  );
+}
+
 function contentToResponseContentItems(content: unknown): ResponseContentItem[] {
   if (typeof content === "string") {
-    return content ? [{ type: "input_text", text: content }] : [];
+    return content ? [{ type: "input_text", text: sanitizeSurrogates(content) }] : [];
   }
   if (!Array.isArray(content)) return [];
 
@@ -305,7 +312,7 @@ function contentToResponseContentItems(content: unknown): ResponseContentItem[] 
       (part.type === "text" || part.type === "input_text" || part.type === "output_text") &&
       typeof part.text === "string"
     ) {
-      items.push({ type: "input_text", text: part.text });
+      items.push({ type: "input_text", text: sanitizeSurrogates(part.text) });
       continue;
     }
     if (part.type === "image" && typeof part.data === "string" && typeof part.mimeType === "string") {
@@ -329,7 +336,7 @@ function toolResultContentToOutput(
   content: unknown,
   model?: { input?: readonly unknown[] },
 ): string | ToolResultOutputItem[] {
-  if (typeof content === "string") return content;
+  if (typeof content === "string") return sanitizeSurrogates(content);
   if (!Array.isArray(content)) return "(no tool output)";
 
   const textParts: string[] = [];
@@ -338,7 +345,7 @@ function toolResultContentToOutput(
     if (!item || typeof item !== "object") continue;
     const part = item as ContentPartLike;
     if (part.type === "text" && typeof part.text === "string") {
-      textParts.push(part.text);
+      textParts.push(sanitizeSurrogates(part.text));
     } else if (
       part.type === "image" &&
       typeof part.data === "string" &&
@@ -468,6 +475,7 @@ export function messageToResponseItems(
 
     for (const block of message.content) {
       if (block.type === "thinking") {
+        if (block.redacted && !sameModel) continue;
         if (sameModel) {
           const reasoning = parseThinkingSignature(block.thinkingSignature);
           if (reasoning) items.push(reasoning);
@@ -479,7 +487,11 @@ export function messageToResponseItems(
             type: "message",
             ...(id ? { id } : {}),
             role: "assistant",
-            content: [{ type: "output_text", text: block.thinking, annotations: [] }],
+            content: [{
+              type: "output_text",
+              text: sanitizeSurrogates(block.thinking),
+              annotations: [],
+            }],
             status: "completed",
           });
         }
@@ -497,7 +509,11 @@ export function messageToResponseItems(
           type: "message",
           ...(id ? { id } : {}),
           role: "assistant",
-          content: [{ type: "output_text", text: block.text, annotations: [] }],
+          content: [{
+            type: "output_text",
+            text: sanitizeSurrogates(block.text),
+            annotations: [],
+          }],
           status: "completed",
           ...(signature?.phase ? { phase: signature.phase } : {}),
         });

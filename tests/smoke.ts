@@ -406,12 +406,21 @@ const foreignToolHistory = messagesToResponseItems(
       provider: "anthropic",
       api: "anthropic-messages",
       model: "claude-sonnet-4-6",
-      content: [{
-        type: "toolCall",
-        id: "call weird|foreign.item",
-        name: "read",
-        arguments: { path: "README.md" },
-      }],
+      content: [
+        {
+          type: "thinking",
+          thinking: "[Reasoning redacted]",
+          thinkingSignature: "REDACTED",
+          redacted: true,
+        },
+        { type: "text", text: "FOREIGN_TEXT\uD800" },
+        {
+          type: "toolCall",
+          id: "call weird|foreign.item",
+          name: "read",
+          arguments: { path: "README.md" },
+        },
+      ],
       stopReason: "toolUse",
       timestamp: 1,
     },
@@ -419,7 +428,7 @@ const foreignToolHistory = messagesToResponseItems(
       role: "toolResult",
       toolCallId: "call weird|foreign.item",
       toolName: "read",
-      content: [{ type: "text", text: "FOREIGN_TOOL_RESULT" }],
+      content: [{ type: "text", text: "FOREIGN\uD800_TOOL_RESULT" }],
       isError: false,
       timestamp: 2,
     },
@@ -441,6 +450,9 @@ assert.equal(foreignToolCall?.call_id, "call_weird");
 assert.match(String(foreignToolCall?.id), /^fc_/);
 assert.equal(foreignToolResult?.call_id, foreignToolCall?.call_id);
 assert.equal(foreignToolResult?.output, "FOREIGN_TOOL_RESULT");
+const foreignToolHistoryJson = JSON.stringify(foreignToolHistory);
+assert.doesNotMatch(foreignToolHistoryJson, /Reasoning redacted|\\ud800/i);
+assert.match(foreignToolHistoryJson, /FOREIGN_TEXT/);
 
 const compactedHistory = processCompactedHistory([
   { type: "message", role: "developer", content: [{ type: "input_text", text: "drop developer" }] },
