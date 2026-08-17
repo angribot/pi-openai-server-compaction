@@ -91,6 +91,19 @@ for (const packageName of [
   ensureLocalPeerLink(packageName);
 }
 
+const { discoverAndLoadExtensions } = await import("@earendil-works/pi-coding-agent");
+const loaderResult = await discoverAndLoadExtensions(
+  [join(repoRoot, "index.ts")],
+  repoRoot,
+  join(repoRoot, "tests", ".pi-agent-loader-smoke"),
+);
+assert.deepEqual(
+  loaderResult.errors,
+  [],
+  "extension should load through Pi's production jiti resolver",
+);
+assert.equal(loaderResult.extensions.length, 1);
+
 const { default: extensionFactory } = await import(pathToFileURL(join(repoRoot, "src", "index.ts")).href);
 assert.equal(typeof extensionFactory, "function", "extension entrypoint should export a function");
 

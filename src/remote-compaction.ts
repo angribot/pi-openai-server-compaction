@@ -11,6 +11,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
+import type { ToolInfo } from "@earendil-works/pi-coding-agent";
 import {
   calculateCost,
   type Model,
@@ -40,7 +41,7 @@ type ContentPartLike = {
 export type ResponseContentItem =
   | { type: "input_text"; text: string }
   | { type: "input_image"; image_url: string }
-  | { type: "output_text"; text: string };
+  | { type: "output_text"; text: string; annotations?: unknown[] };
 
 export type ResponseItem =
   | {
@@ -269,11 +270,22 @@ function isAssistantPhase(value: unknown): value is AssistantPhase {
   return value === "commentary" || value === "final_answer";
 }
 
-function parseTextSignaturePhase(value: unknown): AssistantPhase | undefined {
+type ParsedTextSignature = {
+  id?: string;
+  phase?: AssistantPhase;
+};
+
+function parseTextSignature(value: unknown): ParsedTextSignature | undefined {
   if (typeof value !== "string" || !value.trim()) return undefined;
+  if (!value.startsWith("{")) return { id: value };
+
   try {
-    const parsed = JSON.parse(value) as { phase?: unknown };
-    return isAssistantPhase(parsed.phase) ? parsed.phase : undefined;
+    const parsed = JSON.parse(value) as { v?: unknown; id?: unknown; phase?: unknown };
+    if (parsed.v !== 1 || typeof parsed.id !== "string") return undefined;
+    return {
+      id: parsed.id,
+      ...(isAssistantPhase(parsed.phase) ? { phase: parsed.phase } : {}),
+    };
   } catch {
     return undefined;
   }
@@ -311,56 +323,48 @@ function contentToResponseContentItems(content: unknown): ResponseContentItem[] 
   return items;
 }
 
-function toolResultContentToOutput(content: unknown): string | ToolResultOutputItem[] {
+function toolResultContentToOutput(
+  content: unknown,
+  model?: { input?: readonly unknown[] },
+): string | ToolResultOutputItem[] {
   if (typeof content === "string") return content;
-  if (!Array.isArray(content)) return "";
+  if (!Array.isArray(content)) return "(no tool output)";
 
-  const output: ToolResultOutputItem[] = [];
+  const textParts: string[] = [];
+  const images: ContentPartLike[] = [];
   for (const item of content) {
     if (!item || typeof item !== "object") continue;
     const part = item as ContentPartLike;
     if (part.type === "text" && typeof part.text === "string") {
-      output.push({ type: "input_text", text: part.text });
-    } else if (part.type === "image" && typeof part.data === "string" && typeof part.mimeType === "string") {
-      output.push({ type: "input_image", image_url: `data:${part.mimeType};base64,${part.data}` });
+      textParts.push(part.text);
+    } else if (
+      part.type === "image" &&
+      typeof part.data === "string" &&
+      typeof part.mimeType === "string"
+    ) {
+      images.push(part);
     }
   }
-  return output;
+  const text = textParts.join("\n");
+
+  if (images.length === 0 || !modelSupportsImageInput(model ?? {})) {
+    return text || (images.length > 0 ? "(see attached image)" : "(no tool output)");
+  }
+
+  return [
+    ...(text ? [{ type: "input_text" as const, text }] : []),
+    ...images.map((image) => ({
+      type: "input_image" as const,
+      image_url: `data:${image.mimeType};base64,${image.data}`,
+    })),
+  ];
 }
 
 function parseThinkingSignature(value: unknown): ResponseItem | undefined {
   if (typeof value !== "string" || !value.trim()) return undefined;
   try {
     const parsed = JSON.parse(value);
-    if (!isRecord(parsed) || parsed.type !== "reasoning") return undefined;
-
-    const summary = Array.isArray(parsed.summary)
-      ? parsed.summary
-          .map((item) =>
-            isRecord(item) && typeof item.text === "string"
-              ? { type: "summary_text" as const, text: item.text }
-              : undefined,
-          )
-          .filter((item): item is { type: "summary_text"; text: string } => Boolean(item))
-      : [];
-    const content = Array.isArray(parsed.content)
-      ? parsed.content
-          .map((item) => {
-            if (!isRecord(item) || typeof item.text !== "string") return undefined;
-            return {
-              type: item.type === "reasoning_text" ? "reasoning_text" : "text",
-              text: item.text,
-            } as const;
-          })
-          .filter((item): item is { type: "reasoning_text" | "text"; text: string } => Boolean(item))
-      : undefined;
-
-    return {
-      type: "reasoning",
-      summary,
-      ...(content && content.length > 0 ? { content } : {}),
-      encrypted_content: typeof parsed.encrypted_content === "string" ? parsed.encrypted_content : null,
-    };
+    return isResponseItem(parsed) && parsed.type === "reasoning" ? cloneResponseItem(parsed) : undefined;
   } catch {
     return undefined;
   }
@@ -377,7 +381,33 @@ function isCompactionItem(value: unknown): value is ResponseItem {
     value.encrypted_content.length > 0;
 }
 
-export function messageToResponseItems(message: AgentMessage): ResponseItem[] {
+function assistantMessageMatchesTarget(
+  message: Extract<AgentMessage, { role: "assistant" }>,
+  model: Model<any> | undefined,
+): boolean {
+  return !model || (
+    message.provider === model.provider &&
+    message.api === model.api &&
+    message.model === model.id
+  );
+}
+
+function fallbackAssistantMessageId(messageIndex: number, textBlockIndex: number): string {
+  return textBlockIndex === 0
+    ? `msg_pi_${messageIndex}`
+    : `msg_pi_${messageIndex}_${textBlockIndex}`;
+}
+
+/**
+ * Pi 0.84's production extension loader does not expose pi-ai's public `api/*`
+ * runtime subpaths. Keep this narrow adapter aligned with Pi's ordinary
+ * OpenAI Responses conversion until the loader exposes the shared converter.
+ */
+export function messageToResponseItems(
+  message: AgentMessage,
+  model?: Model<any>,
+  messageIndex?: number,
+): ResponseItem[] {
   const items: ResponseItem[] = [];
 
   if (message.role === "user") {
@@ -389,47 +419,62 @@ export function messageToResponseItems(message: AgentMessage): ResponseItem[] {
   }
 
   if (message.role === "assistant") {
-    let phase: AssistantPhase | undefined;
-    const textBlocks: string[] = [];
+    if (message.stopReason === "error" || message.stopReason === "aborted") return items;
 
-    const flushText = () => {
-      if (textBlocks.length === 0) return;
-      items.push({
-        type: "message",
-        role: "assistant",
-        content: [{ type: "output_text", text: textBlocks.join("") }],
-        ...(phase ? { phase } : {}),
-      });
-      textBlocks.length = 0;
-    };
+    const sameModel = assistantMessageMatchesTarget(message, model);
+    let textBlockIndex = 0;
 
     for (const block of message.content) {
-      if (block.type === "text") {
-        if (!phase) {
-          phase = parseTextSignaturePhase(block.textSignature);
-        }
-        textBlocks.push(block.text);
-        continue;
-      }
       if (block.type === "thinking") {
-        flushText();
-        const reasoning = parseThinkingSignature(block.thinkingSignature);
-        if (reasoning) items.push(reasoning);
+        if (sameModel) {
+          const reasoning = parseThinkingSignature(block.thinkingSignature);
+          if (reasoning) items.push(reasoning);
+        } else if (block.thinking.trim()) {
+          const id = messageIndex === undefined
+            ? undefined
+            : fallbackAssistantMessageId(messageIndex, textBlockIndex++);
+          items.push({
+            type: "message",
+            ...(id ? { id } : {}),
+            role: "assistant",
+            content: [{ type: "output_text", text: block.thinking, annotations: [] }],
+            status: "completed",
+          });
+        }
         continue;
       }
+
+      if (block.type === "text") {
+        const signature = sameModel ? parseTextSignature(block.textSignature) : undefined;
+        const fallbackId = messageIndex === undefined
+          ? undefined
+          : fallbackAssistantMessageId(messageIndex, textBlockIndex);
+        textBlockIndex++;
+        const id = signature?.id && signature.id.length <= 64 ? signature.id : fallbackId;
+        items.push({
+          type: "message",
+          ...(id ? { id } : {}),
+          role: "assistant",
+          content: [{ type: "output_text", text: block.text, annotations: [] }],
+          status: "completed",
+          ...(signature?.phase ? { phase: signature.phase } : {}),
+        });
+        continue;
+      }
+
       if (block.type !== "toolCall") continue;
 
-      flushText();
-      const callId = typeof block.id === "string" ? block.id.split("|", 1)[0] : block.id;
+      const [callId, itemId] = block.id.split("|");
+      const responseItemId = sameModel && itemId?.startsWith("fc_") ? itemId : undefined;
       items.push({
         type: "function_call",
+        ...(responseItemId ? { id: responseItemId } : {}),
         name: block.name,
-        call_id: typeof callId === "string" ? callId : String(callId),
+        call_id: callId,
         arguments: JSON.stringify(block.arguments ?? {}),
       });
     }
 
-    flushText();
     return items;
   }
 
@@ -437,11 +482,18 @@ export function messageToResponseItems(message: AgentMessage): ResponseItem[] {
     items.push({
       type: "function_call_output",
       call_id: message.toolCallId.split("|", 1)[0],
-      output: toolResultContentToOutput(message.content),
+      output: toolResultContentToOutput(message.content, model),
     });
   }
 
   return items;
+}
+
+export function messagesToResponseItems(
+  messages: AgentMessage[],
+  model?: Model<any>,
+): ResponseItem[] {
+  return messages.flatMap((message, index) => messageToResponseItems(message, model, index));
 }
 
 function cloneResponseItem(item: ResponseItem): ResponseItem {
@@ -676,6 +728,23 @@ export function buildRemoteCompactionV2History(
     ...truncateRetainedMessages(retainedUserMessages, RETAINED_MESSAGE_TOKEN_BUDGET),
     cloneResponseItem(compactionItem),
   ];
+}
+
+export function buildToolsPayload(
+  allTools: ToolInfo[],
+  activeToolNames: string[],
+  supportsStrictMode = false,
+): Record<string, unknown>[] {
+  const active = new Set(activeToolNames);
+  return allTools
+    .filter((tool) => active.has(tool.name))
+    .map((tool) => ({
+      type: "function",
+      name: tool.name,
+      description: tool.description,
+      parameters: tool.parameters,
+      ...(supportsStrictMode ? { strict: false } : {}),
+    }));
 }
 
 function extractCacheWriteTokens(value: unknown): number {

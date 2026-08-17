@@ -7,10 +7,6 @@
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import type { OpenAIResponsesCompat } from "@earendil-works/pi-ai";
 import {
-  convertResponsesMessages,
-  convertResponsesTools,
-} from "@earendil-works/pi-ai/api/openai-responses-shared";
-import {
   buildSessionContext,
   convertToLlm,
   type ExtensionAPI,
@@ -29,12 +25,13 @@ import {
 } from "./openai.ts";
 import {
   buildRemoteCompactionDetails,
+  buildToolsPayload,
   callRemoteCompactionEndpoint,
   REMOTE_COMPACTION_CHECKPOINT_SUMMARY,
   messageToResponseItems,
+  messagesToResponseItems,
   normalizeResponseItemsForPrompt,
   reconstructRemoteCompactionStateFromBranch,
-  type ResponseItem,
 } from "./remote-compaction.ts";
 import {
   clearAllRuntimeState,
@@ -47,8 +44,6 @@ import {
 } from "./state.ts";
 
 type TargetModel = Parameters<typeof modelKey>[0];
-
-const OPENAI_TOOL_CALL_PROVIDERS = new Set(["openai", "openai-codex", "opencode"]);
 
 type BranchEntry = {
   type: string;
@@ -204,17 +199,12 @@ export default function openaiServerCompactionExtension(pi: ExtensionAPI) {
       if (!auth.ok) throw new Error(auth.error);
 
       const allTools = pi.getAllTools();
-      const activeToolNames = new Set(pi.getActiveTools());
-      const activeTools = allTools.filter((tool) => activeToolNames.has(tool.name));
       const responsesCompat = model.compat as OpenAIResponsesCompat | undefined;
-      const toolOptions = {
-        supportsStrictMode: responsesCompat?.supportsStrictMode ?? false,
-        supportsOpenAIGrammarTools: responsesCompat?.supportsOpenAIGrammarTools ?? false,
-      };
-      const tools = convertResponsesTools(activeTools, toolOptions) as unknown as Record<
-        string,
-        unknown
-      >[];
+      const tools = buildToolsPayload(
+        allTools,
+        pi.getActiveTools(),
+        responsesCompat?.supportsStrictMode ?? false,
+      );
       const sessionId = getSessionId(ctx);
       const branchEntries = event.branchEntries as BranchEntry[];
       const remoteState = getMatchingRemoteState(sessionId, model);
@@ -226,12 +216,7 @@ export default function openaiServerCompactionExtension(pi: ExtensionAPI) {
           })
         : buildSessionContext(event.branchEntries).messages;
       const effectiveMessages = convertToLlm(contextMessages);
-      const convertedResponseItems = convertResponsesMessages(
-        model,
-        { messages: effectiveMessages, tools: activeTools },
-        OPENAI_TOOL_CALL_PROVIDERS,
-        { includeSystemPrompt: false, toolOptions },
-      ) as unknown as ResponseItem[];
+      const convertedResponseItems = messagesToResponseItems(effectiveMessages, model);
       const responseItems = remoteState
         ? [...remoteState.replacementHistory, ...convertedResponseItems]
         : convertedResponseItems;
