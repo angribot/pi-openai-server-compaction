@@ -32,6 +32,10 @@ _Avoid_: Remote replay, artifact replay
 Fixed human-readable text marking where detailed earlier context moved into replacement history. It identifies native replay state but does not summarize that context.
 _Avoid_: Checkpoint summary, native replay checkpoint, portable summary
 
+**Replay replacement span**:
+The unique contiguous portion of an ordinary request's final Responses input that contains the checkpoint marker and Pi-retained pre-compaction entries. Native replay replaces only this span with replacement history so surrounding provider items remain unchanged.
+_Avoid_: Checkpoint history, Historical replay span, Checkpoint region, Pre-compaction span (when referring to this exact provider-input region)
+
 **Model key**:
 The provider, API type, and model ID considered together as the identity that determines native replay compatibility. Request-specific credentials and resolved endpoints are not part of this identity.
 _Avoid_: Model ID, provider name

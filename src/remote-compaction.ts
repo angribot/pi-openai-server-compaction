@@ -27,9 +27,10 @@ import {
 } from "./openai.ts";
 
 type AssistantPhase = "commentary" | "final_answer";
+type InputImageItem = { type: "input_image"; image_url: string; detail?: "auto" };
 type ToolResultOutputItem =
   | { type: "input_text"; text: string }
-  | { type: "input_image"; image_url: string };
+  | InputImageItem;
 
 type ContentPartLike = {
   type?: string;
@@ -41,7 +42,7 @@ type ContentPartLike = {
 
 export type ResponseContentItem =
   | { type: "input_text"; text: string }
-  | { type: "input_image"; image_url: string }
+  | InputImageItem
   | { type: "output_text"; text: string; annotations?: unknown[] };
 
 export type ResponseItem =
@@ -76,7 +77,8 @@ export type RemoteCompactionTextConfig = {
 
 export type RemoteCompactionUsageSnapshot = Usage;
 
-const IMAGE_CONTENT_OMITTED_PLACEHOLDER = "image content omitted because you do not support image input";
+const NON_VISION_USER_IMAGE_PLACEHOLDER = "(image omitted: model does not support images)";
+const NON_VISION_TOOL_IMAGE_PLACEHOLDER = "(tool image omitted: model does not support images)";
 const APPROXIMATE_CHARS_PER_TOKEN = 4;
 const APPROXIMATE_IMAGE_CHARS = 4_800;
 const REMOTE_COMPACTION_MESSAGE_TRUNCATION_MARKER =
@@ -309,23 +311,41 @@ function sanitizeSurrogates(text: string): string {
   );
 }
 
-function contentToResponseContentItems(content: unknown): ResponseContentItem[] {
+function createInputImageItem(imageUrl: string): InputImageItem {
+  return { type: "input_image", image_url: imageUrl, detail: "auto" };
+}
+
+function contentToResponseContentItems(
+  content: unknown,
+  unsupportedImagePlaceholder?: string,
+): ResponseContentItem[] {
   if (typeof content === "string") {
     return content ? [{ type: "input_text", text: sanitizeSurrogates(content) }] : [];
   }
   if (!Array.isArray(content)) return [];
 
   const items: ResponseContentItem[] = [];
+  let previousWasPlaceholder = false;
   for (const part of content as ContentPartLike[]) {
     if (
       (part.type === "text" || part.type === "input_text" || part.type === "output_text") &&
       typeof part.text === "string"
     ) {
-      items.push({ type: "input_text", text: sanitizeSurrogates(part.text) });
+      const text = sanitizeSurrogates(part.text);
+      items.push({ type: "input_text", text });
+      previousWasPlaceholder = text === unsupportedImagePlaceholder;
       continue;
     }
     if (part.type === "image" && typeof part.data === "string" && typeof part.mimeType === "string") {
-      items.push({ type: "input_image", image_url: `data:${part.mimeType};base64,${part.data}` });
+      if (unsupportedImagePlaceholder) {
+        if (!previousWasPlaceholder) {
+          items.push({ type: "input_text", text: unsupportedImagePlaceholder });
+        }
+        previousWasPlaceholder = true;
+      } else {
+        items.push(createInputImageItem(`data:${part.mimeType};base64,${part.data}`));
+        previousWasPlaceholder = false;
+      }
       continue;
     }
     if (
@@ -335,8 +355,18 @@ function contentToResponseContentItems(content: unknown): ResponseContentItem[] 
       (part.source as { type?: unknown }).type === "url" &&
       typeof (part.source as { url?: unknown }).url === "string"
     ) {
-      items.push({ type: "input_image", image_url: (part.source as { url: string }).url });
+      if (unsupportedImagePlaceholder) {
+        if (!previousWasPlaceholder) {
+          items.push({ type: "input_text", text: unsupportedImagePlaceholder });
+        }
+        previousWasPlaceholder = true;
+      } else {
+        items.push(createInputImageItem((part.source as { url: string }).url));
+        previousWasPlaceholder = false;
+      }
+      continue;
     }
+    previousWasPlaceholder = false;
   }
   return items;
 }
@@ -348,33 +378,23 @@ function toolResultContentToOutput(
   if (typeof content === "string") return sanitizeSurrogates(content);
   if (!Array.isArray(content)) return "(no tool output)";
 
-  const textParts: string[] = [];
-  const images: ContentPartLike[] = [];
-  for (const item of content) {
-    if (!item || typeof item !== "object") continue;
-    const part = item as ContentPartLike;
-    if (part.type === "text" && typeof part.text === "string") {
-      textParts.push(sanitizeSurrogates(part.text));
-    } else if (
-      part.type === "image" &&
-      typeof part.data === "string" &&
-      typeof part.mimeType === "string"
-    ) {
-      images.push(part);
-    }
-  }
-  const text = textParts.join("\n");
+  const supportsImages = modelSupportsImageInput(model ?? {});
+  const converted = contentToResponseContentItems(
+    content,
+    supportsImages ? undefined : NON_VISION_TOOL_IMAGE_PLACEHOLDER,
+  );
+  const text = converted
+    .filter((item): item is Extract<ResponseContentItem, { type: "input_text" }> => (
+      item.type === "input_text"
+    ))
+    .map((item) => item.text)
+    .join("\n");
+  const images = converted.filter((item): item is InputImageItem => item.type === "input_image");
 
-  if (images.length === 0 || !modelSupportsImageInput(model ?? {})) {
-    return text || (images.length > 0 ? "(see attached image)" : "(no tool output)");
-  }
-
+  if (images.length === 0) return text || "(no tool output)";
   return [
     ...(text ? [{ type: "input_text" as const, text }] : []),
-    ...images.map((image) => ({
-      type: "input_image" as const,
-      image_url: `data:${image.mimeType};base64,${image.data}`,
-    })),
+    ...images,
   ];
 }
 
@@ -465,7 +485,12 @@ export function messageToResponseItems(
   const items: ResponseItem[] = [];
 
   if (message.role === "user") {
-    const content = contentToResponseContentItems(message.content);
+    const content = contentToResponseContentItems(
+      message.content,
+      model && !modelSupportsImageInput(model)
+        ? NON_VISION_USER_IMAGE_PLACEHOLDER
+        : undefined,
+    );
     if (content.length > 0) {
       items.push({ type: "message", role: "user", content });
     }
@@ -689,7 +714,7 @@ function modelSupportsImageInput(model: { input?: readonly unknown[] }): boolean
 function stripUnsupportedImageContentItems(items: ResponseContentItem[]): ResponseContentItem[] {
   return items.map((item) => (
     item.type === "input_image"
-      ? { type: "input_text", text: IMAGE_CONTENT_OMITTED_PLACEHOLDER }
+      ? { type: "input_text", text: NON_VISION_USER_IMAGE_PLACEHOLDER }
       : item
   ));
 }
@@ -698,7 +723,7 @@ function stripUnsupportedFunctionOutputImages(output: unknown): unknown {
   if (Array.isArray(output)) {
     return output.map((item) => (
       isRecord(item) && item.type === "input_image"
-        ? { type: "input_text", text: IMAGE_CONTENT_OMITTED_PLACEHOLDER }
+        ? { type: "input_text", text: NON_VISION_TOOL_IMAGE_PLACEHOLDER }
         : item
     ));
   }
