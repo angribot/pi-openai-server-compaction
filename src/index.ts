@@ -116,6 +116,35 @@ function getMatchingResponsesRequestShape(
   return requestShape?.modelKey === modelKey(model) ? requestShape : undefined;
 }
 
+function getCompatibleNativeReplayTailMessages(params: {
+  branchEntries: Parameters<typeof buildSessionContext>[0];
+  compactionEntryId: string;
+  model: TargetModel;
+}): AgentMessage[] {
+  const compactionIndex = params.branchEntries.findIndex(
+    (entry) => entry.id === params.compactionEntryId,
+  );
+  if (compactionIndex < 0) return [];
+
+  const trailingContext = buildSessionContext(params.branchEntries.slice(compactionIndex + 1));
+  const compatibleMessages: AgentMessage[] = [];
+  let pendingMessages: AgentMessage[] = [];
+
+  for (const message of trailingContext.messages) {
+    if (message.role !== "assistant") {
+      pendingMessages.push(message);
+      continue;
+    }
+
+    if (messageMatchesModel(message, params.model)) {
+      compatibleMessages.push(...pendingMessages, message);
+    }
+    pendingMessages = [];
+  }
+
+  return compatibleMessages;
+}
+
 function extendRemoteHistoryIfCompatible(params: {
   sessionId: string;
   model: TargetModel | undefined;
@@ -182,20 +211,31 @@ export default function openaiServerCompactionExtension(pi: ExtensionAPI) {
         supportsStrictMode: responsesCompat?.supportsStrictMode ?? false,
         supportsOpenAIGrammarTools: responsesCompat?.supportsOpenAIGrammarTools ?? false,
       };
-      const tools = convertResponsesTools(activeTools, toolOptions) as unknown as Record<string, unknown>[];
+      const tools = convertResponsesTools(activeTools, toolOptions) as unknown as Record<
+        string,
+        unknown
+      >[];
       const sessionId = getSessionId(ctx);
       const branchEntries = event.branchEntries as BranchEntry[];
-      const effectiveMessages = convertToLlm(buildSessionContext(event.branchEntries).messages);
       const remoteState = getMatchingRemoteState(sessionId, model);
-      const observedRequestShape = getMatchingResponsesRequestShape(sessionId, model);
-      const responseItems = remoteState
-        ? remoteState.explicitHistory
-        : convertResponsesMessages(
+      const contextMessages = remoteState
+        ? getCompatibleNativeReplayTailMessages({
+            branchEntries: event.branchEntries,
+            compactionEntryId: remoteState.compactionEntryId,
             model,
-            { messages: effectiveMessages, tools: activeTools },
-            OPENAI_TOOL_CALL_PROVIDERS,
-            { includeSystemPrompt: false, toolOptions },
-          ) as unknown as ResponseItem[];
+          })
+        : buildSessionContext(event.branchEntries).messages;
+      const effectiveMessages = convertToLlm(contextMessages);
+      const convertedResponseItems = convertResponsesMessages(
+        model,
+        { messages: effectiveMessages, tools: activeTools },
+        OPENAI_TOOL_CALL_PROVIDERS,
+        { includeSystemPrompt: false, toolOptions },
+      ) as unknown as ResponseItem[];
+      const responseItems = remoteState
+        ? [...remoteState.replacementHistory, ...convertedResponseItems]
+        : convertedResponseItems;
+      const observedRequestShape = getMatchingResponsesRequestShape(sessionId, model);
       const promptResponseItems = normalizeResponseItemsForPrompt(responseItems, model);
       const thinkingLevel = pi.getThinkingLevel();
       const fallbackReasoning = model.reasoning

@@ -734,85 +734,88 @@ try {
 
   requestBodies.length = 0;
   responsePlan = [sseResponse("EFFECTIVE_CONTEXT_ENCRYPTED")];
-  const effectiveContextResult = await sessionBeforeCompact({
-    ...compactEvent,
-    branchEntries: [
-      {
-        type: "message",
-        id: "old-user",
-        parentId: null,
-        timestamp: "2026-08-07T00:00:00.000Z",
-        message: {
-          role: "user",
-          content: [{ type: "text", text: "DROP_OLD_CONTEXT" }],
-          timestamp: 1,
+  const effectiveContextResult = await sessionBeforeCompact(
+    {
+      ...compactEvent,
+      branchEntries: [
+        {
+          type: "message",
+          id: "old-user",
+          parentId: null,
+          timestamp: "2026-08-07T00:00:00.000Z",
+          message: {
+            role: "user",
+            content: [{ type: "text", text: "DROP_OLD_CONTEXT" }],
+            timestamp: 1,
+          },
         },
-      },
-      {
-        type: "message",
-        id: "kept-user",
-        parentId: "old-user",
-        timestamp: "2026-08-07T00:00:01.000Z",
-        message: {
-          role: "user",
-          content: [{ type: "text", text: "KEEP_RETAINED_TAIL" }],
-          timestamp: 2,
+        {
+          type: "message",
+          id: "kept-user",
+          parentId: "old-user",
+          timestamp: "2026-08-07T00:00:01.000Z",
+          message: {
+            role: "user",
+            content: [{ type: "text", text: "KEEP_RETAINED_TAIL" }],
+            timestamp: 2,
+          },
         },
-      },
-      {
-        type: "branch_summary",
-        id: "branch-summary",
-        parentId: "kept-user",
-        timestamp: "2026-08-07T00:00:02.000Z",
-        fromId: "old-user",
-        summary: "KEEP_BRANCH_SUMMARY",
-      },
-      {
-        type: "custom_message",
-        id: "custom-message",
-        parentId: "branch-summary",
-        timestamp: "2026-08-07T00:00:03.000Z",
-        customType: "test-context",
-        content: "KEEP_CUSTOM_CONTEXT",
-        display: false,
-      },
-      {
-        type: "message",
-        id: "bash-execution",
-        parentId: "custom-message",
-        timestamp: "2026-08-07T00:00:04.000Z",
-        message: {
-          role: "bashExecution",
-          command: "printf KEEP_SHELL_COMMAND",
-          output: "KEEP_SHELL_OUTPUT",
-          exitCode: 0,
-          cancelled: false,
-          truncated: false,
-          timestamp: 3,
+        {
+          type: "branch_summary",
+          id: "branch-summary",
+          parentId: "kept-user",
+          timestamp: "2026-08-07T00:00:02.000Z",
+          fromId: "old-user",
+          summary: "KEEP_BRANCH_SUMMARY",
         },
-      },
-      {
-        type: "compaction",
-        id: "pi-compaction",
-        parentId: "bash-execution",
-        timestamp: "2026-08-07T00:00:05.000Z",
-        summary: "KEEP_PI_COMPACTION_SUMMARY",
-        firstKeptEntryId: "kept-user",
-        tokensBefore: 1234,
-      },
-      {
-        type: "message",
-        id: "post-compaction-user",
-        parentId: "pi-compaction",
-        timestamp: "2026-08-07T00:00:06.000Z",
-        message: {
-          role: "user",
-          content: [{ type: "text", text: "KEEP_POST_COMPACTION" }],
-          timestamp: 4,
+        {
+          type: "custom_message",
+          id: "custom-message",
+          parentId: "branch-summary",
+          timestamp: "2026-08-07T00:00:03.000Z",
+          customType: "test-context",
+          content: "KEEP_CUSTOM_CONTEXT",
+          display: false,
         },
-      },
-    ],
-  }, compactContext);
+        {
+          type: "message",
+          id: "bash-execution",
+          parentId: "custom-message",
+          timestamp: "2026-08-07T00:00:04.000Z",
+          message: {
+            role: "bashExecution",
+            command: "printf KEEP_SHELL_COMMAND",
+            output: "KEEP_SHELL_OUTPUT",
+            exitCode: 0,
+            cancelled: false,
+            truncated: false,
+            timestamp: 3,
+          },
+        },
+        {
+          type: "compaction",
+          id: "pi-compaction",
+          parentId: "bash-execution",
+          timestamp: "2026-08-07T00:00:05.000Z",
+          summary: "KEEP_PI_COMPACTION_SUMMARY",
+          firstKeptEntryId: "kept-user",
+          tokensBefore: 1234,
+        },
+        {
+          type: "message",
+          id: "post-compaction-user",
+          parentId: "pi-compaction",
+          timestamp: "2026-08-07T00:00:06.000Z",
+          message: {
+            role: "user",
+            content: [{ type: "text", text: "KEEP_POST_COMPACTION" }],
+            timestamp: 4,
+          },
+        },
+      ],
+    },
+    compactContext,
+  );
   assert.equal(effectiveContextResult?.compaction?.details?.remoteCompaction?.version, 2);
   const effectiveContextBody = requestBodies[0];
   assert.match(effectiveContextBody, /KEEP_PI_COMPACTION_SUMMARY/);
@@ -828,95 +831,156 @@ try {
   responsePlan = [sseResponse("PI_RESPONSES_CONVERSION_ENCRYPTED")];
   const originalGetAllToolsForConversion = fakePi.getAllTools;
   const originalGetActiveToolsForConversion = fakePi.getActiveTools;
-  fakePi.getAllTools = () => [{
-    name: "read",
-    description: "Read a file",
-    parameters: {
-      type: "object",
-      properties: { path: { type: "string" } },
-      required: ["path"],
-    },
-  }];
-  fakePi.getActiveTools = () => ["read"];
-  try {
-    const conversionResult = await sessionBeforeCompact({
-      ...compactEvent,
-      branchEntries: [
-        {
-          type: "message",
-          id: "multi-phase-assistant",
-          parentId: null,
-          timestamp: "2026-08-07T01:00:00.000Z",
-          message: {
-            role: "assistant",
-            provider: compactContext.model.provider,
-            api: compactContext.model.api,
-            model: compactContext.model.id,
-            content: [
-              {
-                type: "text",
-                text: "COMMENTARY_BLOCK",
-                textSignature: JSON.stringify({
-                  v: 1,
-                  id: "msg_commentary_1",
-                  phase: "commentary",
-                }),
-              },
-              {
-                type: "thinking",
-                thinking: "",
-                thinkingSignature: JSON.stringify({
-                  type: "reasoning",
-                  id: "rs_reasoning_1",
-                  summary: [{ type: "summary_text", text: "REASONING_SUMMARY" }],
-                  encrypted_content: "ENCRYPTED_REASONING",
-                }),
-              },
-              {
-                type: "toolCall",
-                id: "call_read_1|fc_read_1",
-                name: "read",
-                arguments: { path: "README.md" },
-              },
-              {
-                type: "text",
-                text: "FINAL_BLOCK",
-                textSignature: JSON.stringify({
-                  v: 1,
-                  id: "msg_final_1",
-                  phase: "final_answer",
-                }),
-              },
-            ],
-            stopReason: "toolUse",
-            timestamp: 5,
-          },
-        },
-        {
-          type: "message",
-          id: "multi-phase-tool-result",
-          parentId: "multi-phase-assistant",
-          timestamp: "2026-08-07T01:00:01.000Z",
-          message: {
-            role: "toolResult",
-            toolCallId: "call_read_1|fc_read_1",
-            toolName: "read",
-            content: [{ type: "text", text: "TOOL_RESULT" }],
-            isError: false,
-            timestamp: 6,
-          },
-        },
-      ],
-    }, {
-      ...compactContext,
-      model: {
-        ...compactContext.model,
-        compat: { supportsStrictMode: true },
+  fakePi.getAllTools = () => [
+    {
+      name: "read",
+      description: "Read a file",
+      parameters: {
+        type: "object",
+        properties: { path: { type: "string" } },
+        required: ["path"],
       },
-    });
+    },
+  ];
+  fakePi.getActiveTools = () => ["read"];
+  const priorReplacementHistory = [
+    {
+      type: "compaction",
+      encrypted_content: "PRIOR_REMOTE_COMPACTION",
+    },
+  ];
+  setRemoteCompactionState(sessionId, {
+    compactionEntryId: "prior-remote-compaction",
+    modelKey: modelKey(compactContext.model),
+    replacementHistory: priorReplacementHistory,
+    explicitHistory: [
+      ...priorReplacementHistory,
+      {
+        type: "message",
+        role: "assistant",
+        content: [{ type: "output_text", text: "STALE_SERIALIZED_HISTORY" }],
+      },
+    ],
+  });
+  try {
+    const conversionResult = await sessionBeforeCompact(
+      {
+        ...compactEvent,
+        branchEntries: [
+          {
+            type: "compaction",
+            id: "prior-remote-compaction",
+            parentId: null,
+            timestamp: "2026-08-07T00:59:59.000Z",
+            summary: REMOTE_COMPACTION_CHECKPOINT_SUMMARY,
+            firstKeptEntryId: "prior-user",
+            tokensBefore: 1000,
+          },
+          {
+            type: "message",
+            id: "multi-phase-assistant",
+            parentId: "prior-remote-compaction",
+            timestamp: "2026-08-07T01:00:00.000Z",
+            message: {
+              role: "assistant",
+              provider: compactContext.model.provider,
+              api: compactContext.model.api,
+              model: compactContext.model.id,
+              content: [
+                {
+                  type: "text",
+                  text: "COMMENTARY_BLOCK",
+                  textSignature: JSON.stringify({
+                    v: 1,
+                    id: "msg_commentary_1",
+                    phase: "commentary",
+                  }),
+                },
+                {
+                  type: "thinking",
+                  thinking: "",
+                  thinkingSignature: JSON.stringify({
+                    type: "reasoning",
+                    id: "rs_reasoning_1",
+                    summary: [{ type: "summary_text", text: "REASONING_SUMMARY" }],
+                    encrypted_content: "ENCRYPTED_REASONING",
+                  }),
+                },
+                {
+                  type: "toolCall",
+                  id: "call_read_1|fc_read_1",
+                  name: "read",
+                  arguments: { path: "README.md" },
+                },
+                {
+                  type: "text",
+                  text: "FINAL_BLOCK",
+                  textSignature: JSON.stringify({
+                    v: 1,
+                    id: "msg_final_1",
+                    phase: "final_answer",
+                  }),
+                },
+              ],
+              stopReason: "toolUse",
+              timestamp: 5,
+            },
+          },
+          {
+            type: "message",
+            id: "multi-phase-tool-result",
+            parentId: "multi-phase-assistant",
+            timestamp: "2026-08-07T01:00:01.000Z",
+            message: {
+              role: "toolResult",
+              toolCallId: "call_read_1|fc_read_1",
+              toolName: "read",
+              content: [{ type: "text", text: "TOOL_RESULT" }],
+              isError: false,
+              timestamp: 6,
+            },
+          },
+          {
+            type: "message",
+            id: "post-tool-assistant",
+            parentId: "multi-phase-tool-result",
+            timestamp: "2026-08-07T01:00:02.000Z",
+            message: {
+              role: "assistant",
+              provider: compactContext.model.provider,
+              api: compactContext.model.api,
+              model: compactContext.model.id,
+              content: [{
+                type: "text",
+                text: "POST_TOOL_BLOCK",
+                textSignature: JSON.stringify({ v: 1, id: "msg_post_tool_1" }),
+              }],
+              stopReason: "stop",
+              timestamp: 7,
+            },
+          },
+        ],
+      },
+      {
+        ...compactContext,
+        model: {
+          ...compactContext.model,
+          compat: { supportsStrictMode: true },
+        },
+      },
+    );
     assert.equal(conversionResult?.compaction?.details?.remoteCompaction?.version, 2);
     const conversionBody = JSON.parse(requestBodies[0]);
-    const convertedInput = conversionBody.input as Array<{ id?: string; type?: string }>;
+    const convertedInput = conversionBody.input as Array<{
+      encrypted_content?: string;
+      id?: string;
+      type?: string;
+    }>;
+    assert.equal(
+      convertedInput.find((item) => item.type === "compaction")?.encrypted_content,
+      "PRIOR_REMOTE_COMPACTION",
+    );
+    assert.doesNotMatch(requestBodies[0], /STALE_SERIALIZED_HISTORY/);
     assert.deepEqual(
       convertedInput.filter((item) => item.id === "msg_commentary_1" || item.id === "msg_final_1"),
       [
@@ -938,10 +1002,7 @@ try {
         },
       ],
     );
-    assert.equal(
-      convertedInput.find((item) => item.type === "reasoning")?.id,
-      "rs_reasoning_1",
-    );
+    assert.equal(convertedInput.find((item) => item.type === "reasoning")?.id, "rs_reasoning_1");
     assert.deepEqual(
       convertedInput.find((item) => item.type === "function_call"),
       {
@@ -960,18 +1021,21 @@ try {
         output: "TOOL_RESULT",
       },
     );
-    assert.deepEqual(conversionBody.tools, [{
-      type: "function",
-      name: "read",
-      description: "Read a file",
-      parameters: {
-        type: "object",
-        properties: { path: { type: "string" } },
-        required: ["path"],
+    assert.deepEqual(conversionBody.tools, [
+      {
+        type: "function",
+        name: "read",
+        description: "Read a file",
+        parameters: {
+          type: "object",
+          properties: { path: { type: "string" } },
+          required: ["path"],
+        },
+        strict: false,
       },
-      strict: false,
-    }]);
+    ]);
   } finally {
+    clearRemoteCompactionState(sessionId);
     fakePi.getAllTools = originalGetAllToolsForConversion;
     fakePi.getActiveTools = originalGetActiveToolsForConversion;
   }
