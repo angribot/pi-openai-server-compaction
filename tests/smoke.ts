@@ -128,6 +128,7 @@ const {
 const {
   clearAllRuntimeState,
   clearRemoteCompactionState,
+  clearResponsesRequestShapeState,
   getRemoteCompactionState,
   getResponsesRequestShapeState,
   setRemoteCompactionState,
@@ -639,6 +640,7 @@ for (const [name, remoteCompaction] of [
 
 type Hook = (...args: any[]) => any;
 
+let currentThinkingLevel: unknown;
 const handlers = new Map<string, Hook>();
 const fakePi = {
   registerProvider() {
@@ -654,7 +656,7 @@ const fakePi = {
     return [];
   },
   getThinkingLevel() {
-    return undefined;
+    return currentThinkingLevel;
   },
 };
 extensionFactory(fakePi);
@@ -860,7 +862,22 @@ assert.equal(
 );
 clearAllRuntimeState();
 beforeProviderRequest(
-  { payload: { model: proxyResponsesModel.id, input: [], service_tier: "priority" } },
+  {
+    payload: {
+      model: proxyResponsesModel.id,
+      input: [],
+      service_tier: "priority",
+      reasoning: { effort: "high", summary: "detailed" },
+      text: {
+        verbosity: "high",
+        format: {
+          type: "json_schema",
+          name: "ordinary_response",
+          schema: { type: "object" },
+        },
+      },
+    },
+  },
   requestContext,
 );
 
@@ -872,7 +889,13 @@ const requestHeaders: Headers[] = [];
 const originalFetch = globalThis.fetch;
 try {
   let responsePlan: Array<Response | Error> = [];
-  const sseResponse = (encryptedContent: string, completed = true) => new Response([
+  const sseResponse = (
+    encryptedContent: string,
+    completed = true,
+    completedResponse: Record<string, unknown> = {
+      usage: { input_tokens: 10, output_tokens: 2, total_tokens: 12 },
+    },
+  ) => new Response([
     `data: ${JSON.stringify({
       type: "response.output_item.done",
       item: { type: "compaction", encrypted_content: encryptedContent },
@@ -880,7 +903,7 @@ try {
     ...(completed
       ? [`data: ${JSON.stringify({
           type: "response.completed",
-          response: { usage: { input_tokens: 10, output_tokens: 2, total_tokens: 12 } },
+          response: completedResponse,
         })}\n\n`]
       : []),
   ].join(""), {
@@ -955,7 +978,8 @@ try {
     model: {
       ...proxyResponsesModel,
       name: "Header-authenticated proxy",
-      reasoning: false,
+      reasoning: true,
+      thinkingLevelMap: { minimal: "low", max: "max" },
       input: ["text"],
       cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
       contextWindow: 100_000,
@@ -975,6 +999,7 @@ try {
     },
   };
 
+  currentThinkingLevel = "minimal";
   responsePlan = [sseResponse("SUCCESS_ENCRYPTED")];
   const successResult = await sessionBeforeCompact(compactEvent, compactContext);
   assert.equal(requestBodies.length, 1);
@@ -996,6 +1021,12 @@ try {
   assert.equal(successfulRequestBody.tool_choice, "auto");
   assert.equal(successfulRequestBody.parallel_tool_calls, true);
   assert.deepEqual(successfulRequestBody.include, ["reasoning.encrypted_content"]);
+  assert.deepEqual(
+    successfulRequestBody.reasoning,
+    { effort: "high", summary: "detailed" },
+    "observed ordinary-request reasoning must take precedence over fallback inference",
+  );
+  assert.deepEqual(successfulRequestBody.text, { verbosity: "high" });
   assert.equal(successfulRequestBody.prompt_cache_key, sessionId);
   for (const field of [
     "messages",
@@ -1013,12 +1044,118 @@ try {
     );
   }
   assert.equal(successResult?.compaction?.summary, REMOTE_COMPACTION_CHECKPOINT_SUMMARY);
+  assert.deepEqual(successResult?.compaction?.usage, {
+    input: 10,
+    output: 2,
+    cacheRead: 0,
+    cacheWrite: 0,
+    totalTokens: 12,
+    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+  });
   assert.equal(successResult?.compaction?.details?.remoteCompaction?.version, 2);
+  assert.deepEqual(
+    successResult?.compaction?.details?.remoteCompaction?.usage,
+    successResult?.compaction?.usage,
+    "persisted usage and Pi's standard compaction usage field must describe the same operation",
+  );
   assert.equal(
     successResult?.compaction?.details?.remoteCompaction?.modelKey,
     modelKey(compactContext.model),
     "credential-resolved endpoints must not change persisted model identity",
   );
+
+  clearResponsesRequestShapeState(sessionId);
+  requestBodies.length = 0;
+  responsePlan = [sseResponse("MAPPED_MINIMAL_ENCRYPTED")];
+  const mappedMinimalResult = await sessionBeforeCompact(compactEvent, compactContext);
+  assert.equal(mappedMinimalResult?.compaction?.details?.remoteCompaction?.version, 2);
+  assert.deepEqual(JSON.parse(requestBodies[0]).reasoning, {
+    effort: "low",
+    summary: "auto",
+  });
+
+  currentThinkingLevel = "max";
+  requestBodies.length = 0;
+  responsePlan = [sseResponse("MAX_REASONING_ENCRYPTED")];
+  const maxReasoningResult = await sessionBeforeCompact(compactEvent, compactContext);
+  assert.equal(maxReasoningResult?.compaction?.details?.remoteCompaction?.version, 2);
+  assert.deepEqual(JSON.parse(requestBodies[0]).reasoning, {
+    effort: "max",
+    summary: "auto",
+  });
+
+  currentThinkingLevel = "off";
+  requestBodies.length = 0;
+  responsePlan = [sseResponse("OFF_REASONING_ENCRYPTED")];
+  const offReasoningResult = await sessionBeforeCompact(compactEvent, compactContext);
+  assert.equal(offReasoningResult?.compaction?.details?.remoteCompaction?.version, 2);
+  assert.deepEqual(JSON.parse(requestBodies[0]).reasoning, { effort: "none" });
+  currentThinkingLevel = "minimal";
+
+  const meteredCost = { input: 2, output: 10, cacheRead: 1, cacheWrite: 3 };
+  const meteredUsage = {
+    input_tokens: 100,
+    input_tokens_details: { cached_tokens: 20, cache_write_tokens: 10 },
+    output_tokens: 5,
+  };
+  const runMeteredCompaction = async (
+    model: typeof compactContext.model,
+    serviceTier: string,
+    responseServiceTier?: string,
+  ) => {
+    setResponsesRequestShapeState(sessionId, {
+      modelKey: modelKey(model),
+      updatedAt: Date.now(),
+      serviceTier,
+    });
+    requestBodies.length = 0;
+    responsePlan = [sseResponse("METERED_USAGE_ENCRYPTED", true, {
+      ...(responseServiceTier ? { service_tier: responseServiceTier } : {}),
+      usage: meteredUsage,
+    })];
+    const result = await sessionBeforeCompact(compactEvent, {
+      ...compactContext,
+      model,
+    });
+    return result?.compaction?.usage;
+  };
+
+  const priorityUsage = await runMeteredCompaction(
+    { ...compactContext.model, id: "gpt-5.5", cost: meteredCost },
+    "priority",
+  );
+  assert.deepEqual(
+    {
+      input: priorityUsage?.input,
+      output: priorityUsage?.output,
+      cacheRead: priorityUsage?.cacheRead,
+      cacheWrite: priorityUsage?.cacheWrite,
+      totalTokens: priorityUsage?.totalTokens,
+    },
+    { input: 70, output: 5, cacheRead: 20, cacheWrite: 10, totalTokens: 105 },
+  );
+  assert.ok(
+    Math.abs((priorityUsage?.cost.total ?? 0) - 0.0006) < 1e-12,
+    "gpt-5.5 priority compaction usage must use Pi's 2.5x pricing adjustment",
+  );
+
+  const flexUsage = await runMeteredCompaction(
+    { ...compactContext.model, cost: meteredCost },
+    "flex",
+    "flex",
+  );
+  assert.ok(
+    Math.abs((flexUsage?.cost.total ?? 0) - 0.00012) < 1e-12,
+    "flex compaction usage must use Pi's 0.5x pricing adjustment",
+  );
+
+  setResponsesRequestShapeState(sessionId, {
+    modelKey: modelKey(compactContext.model),
+    updatedAt: Date.now(),
+    reasoning: { effort: "high", summary: "detailed" },
+    text: { verbosity: "high" },
+    serviceTier: "priority",
+  });
 
   requestBodies.length = 0;
   responsePlan = [sseResponse("EFFECTIVE_CONTEXT_ENCRYPTED")];

@@ -42,9 +42,9 @@ On compaction, the extension:
 1. Calls the model's normal Responses endpoint with:
    - the current explicit history;
    - a trailing `{ "type": "compaction_trigger" }`;
-   - the current system prompt, optional custom compaction guidance, tools, reasoning configuration, text configuration, and allowlisted service tier.
+   - the current system prompt, optional custom compaction guidance, tools, reasoning configuration, compaction-safe text configuration, and allowlisted service tier.
 2. Requires a completed response containing exactly one valid compaction item.
-3. Stores a fixed `[Remote Responses compaction checkpoint]` marker in `CompactionEntry.summary` and retains recent user messages using Codex's current 64K approximate-token budget in `CompactionEntry.details.remoteCompaction`.
+3. Stores a fixed `[Remote Responses compaction checkpoint]` marker in `CompactionEntry.summary`, retains recent user messages using Codex's current 64K approximate-token budget in `CompactionEntry.details.remoteCompaction`, and records the operation's usage in Pi's standard compaction usage field.
 4. Reconstructs replacement history after resume, tree navigation, forks, and later compactions.
 5. Replaces the `input` of later model-compatible `openai-responses` requests with the reconstructed history.
 
@@ -52,7 +52,7 @@ The extension intentionally does not add `store`, `context_management`, or `prev
 
 ### Remote compaction request controls
 
-On ordinary requests, the extension preserves Pi's effective provider parameters while patching only replay input and stale continuation fields. The extension-owned remote compaction request instead uses an explicit allowlist: it carries a string `service_tier` only when the latest observed ordinary request for the same session and model key contained that value. It continues to handle `reasoning` and `text` through their dedicated paths.
+On ordinary requests, the extension preserves Pi's effective provider parameters while patching only replay input and stale continuation fields. The extension-owned remote compaction request instead uses an explicit allowlist: it carries a string `service_tier` only when the latest observed ordinary request for the same session and model key contained that value. Observed reasoning takes precedence over fallback inference; otherwise the selected model's thinking-level mapping is used. Compaction-safe text settings such as verbosity may be carried, while structured-output formats are excluded.
 
 Arbitrary sampling parameters are not merged into remote compaction. Values for `temperature`, `top_p`, unknown provider fields, and protocol-owned fields are not copied. The extension constructs the compaction model, input, tools, trigger, streaming mode, `store: false`, and encrypted-reasoning inclusion itself. If no matching `service_tier` was observed, the field is omitted and the endpoint default applies.
 
@@ -115,7 +115,7 @@ Offline core checks:
 npm test
 ```
 
-The smoke suite covers only project-owned requirements: provider-agnostic `openai-responses` gating, request-body construction, compaction-item validation, replacement-history reconstruction and injection, and the absence of provider registration.
+The smoke suite covers only project-owned requirements: provider-agnostic `openai-responses` gating, request-body construction and settings, compaction usage accounting, compaction-item validation, replacement-history reconstruction and injection, and the absence of provider registration.
 
 Credentialed live regression:
 

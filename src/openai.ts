@@ -4,7 +4,11 @@
  * Remote compaction is provider-agnostic and applies only to the plain
  * `openai-responses` API. Transport selection belongs to a separate extension.
  */
-import type { ResponsesReasoningConfig, ResponsesTextConfig } from "./remote-compaction.ts";
+import { clampThinkingLevel, type Model, type ModelThinkingLevel } from "@earendil-works/pi-ai";
+import type {
+  RemoteCompactionTextConfig,
+  ResponsesReasoningConfig,
+} from "./remote-compaction.ts";
 
 export type JsonRecord = Record<string, unknown>;
 
@@ -20,6 +24,20 @@ export type ModelLike = {
   reasoning?: unknown;
   input?: readonly unknown[];
 };
+
+const MODEL_THINKING_LEVELS = {
+  off: true,
+  minimal: true,
+  low: true,
+  medium: true,
+  high: true,
+  xhigh: true,
+  max: true,
+} satisfies Record<ModelThinkingLevel, true>;
+
+function isModelThinkingLevel(value: unknown): value is ModelThinkingLevel {
+  return typeof value === "string" && Object.hasOwn(MODEL_THINKING_LEVELS, value);
+}
 
 export function hostnameFromBaseUrl(baseUrl: unknown): string | undefined {
   if (typeof baseUrl !== "string" || !baseUrl.trim()) return undefined;
@@ -43,14 +61,20 @@ export function modelKey(model: ModelLike): string {
 }
 
 export function thinkingLevelToResponsesReasoning(
+  model: Model<any>,
   thinkingLevel: unknown,
 ): ResponsesReasoningConfig | undefined {
-  if (thinkingLevel === "minimal") return { effort: "minimal", summary: "auto" };
-  if (thinkingLevel === "low") return { effort: "low", summary: "auto" };
-  if (thinkingLevel === "medium") return { effort: "medium", summary: "auto" };
-  if (thinkingLevel === "high") return { effort: "high", summary: "auto" };
-  if (thinkingLevel === "xhigh") return { effort: "xhigh", summary: "auto" };
-  return undefined;
+  if (!isModelThinkingLevel(thinkingLevel)) return undefined;
+
+  const clampedLevel = clampThinkingLevel(model, thinkingLevel);
+  if (clampedLevel === "off") {
+    return { effort: model.thinkingLevelMap?.off ?? "none" };
+  }
+
+  return {
+    effort: model.thinkingLevelMap?.[clampedLevel] ?? clampedLevel,
+    summary: "auto",
+  };
 }
 
 export function applyRemoteHistoryPayloadPatch(params: {
@@ -81,8 +105,13 @@ export function extractResponsesReasoningConfig(payload: unknown): ResponsesReas
   return Object.keys(normalized).length > 0 ? normalized : undefined;
 }
 
-export function extractResponsesTextConfig(payload: unknown): ResponsesTextConfig | undefined {
-  return isRecord(payload) && isRecord(payload.text) ? payload.text : undefined;
+export function extractRemoteCompactionTextConfig(
+  payload: unknown,
+): RemoteCompactionTextConfig | undefined {
+  if (!isRecord(payload) || !isRecord(payload.text)) return undefined;
+  return typeof payload.text.verbosity === "string"
+    ? { verbosity: payload.text.verbosity }
+    : undefined;
 }
 
 export function extractResponsesServiceTier(payload: unknown): string | undefined {

@@ -6,15 +6,15 @@
  */
 import type {
   RemoteCompactionSessionState,
+  RemoteCompactionTextConfig,
   ResponsesReasoningConfig,
-  ResponsesTextConfig,
 } from "./remote-compaction.ts";
 
 export type ResponsesRequestShapeState = {
   modelKey: string;
   updatedAt: number;
   reasoning?: ResponsesReasoningConfig;
-  text?: ResponsesTextConfig;
+  text?: RemoteCompactionTextConfig;
   serviceTier?: string;
 };
 
