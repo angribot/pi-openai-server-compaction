@@ -113,6 +113,7 @@ const {
   buildRemoteCompactionRequestBody,
   buildRemoteCompactionV2History,
   extractRemoteCompactionDetails,
+  messagesToResponseItems,
   normalizeResponseItemsForPrompt,
   parseRemoteCompactionV2Events,
   processCompactedHistory,
@@ -182,9 +183,9 @@ const reconstructed = reconstructRemoteCompactionStateFromBranch({
       id: "assistant-b1",
       message: {
         role: "assistant",
-        provider: "anthropic",
-        api: "anthropic-messages",
-        model: "claude-sonnet-4-6",
+        provider: "openai",
+        api: "openai-codex-responses",
+        model: "gpt-5.4-nano",
         content: [{ type: "text", text: "DROP_REPLY" }],
       },
     },
@@ -393,10 +394,53 @@ assert.deepEqual(normalizedPromptItems[0].content, [
 assert.deepEqual(normalizedPromptItems[2], {
   type: "function_call_output",
   call_id: "call-1",
-  output: "aborted",
+  output: "No result provided",
 });
 assert.equal(normalizedPromptItems[3].result, "");
 assert.doesNotMatch(JSON.stringify(normalizedPromptItems), /orphan|ghost_snapshot/);
+
+const foreignToolHistory = messagesToResponseItems(
+  [
+    {
+      role: "assistant",
+      provider: "anthropic",
+      api: "anthropic-messages",
+      model: "claude-sonnet-4-6",
+      content: [{
+        type: "toolCall",
+        id: "call weird|foreign.item",
+        name: "read",
+        arguments: { path: "README.md" },
+      }],
+      stopReason: "toolUse",
+      timestamp: 1,
+    },
+    {
+      role: "toolResult",
+      toolCallId: "call weird|foreign.item",
+      toolName: "read",
+      content: [{ type: "text", text: "FOREIGN_TOOL_RESULT" }],
+      isError: false,
+      timestamp: 2,
+    },
+  ],
+  {
+    provider: "openai",
+    api: "openai-responses",
+    id: "gpt-5.4-nano",
+    input: ["text"],
+  },
+);
+const foreignToolCall = foreignToolHistory.find((item: { type?: string }) => (
+  item.type === "function_call"
+));
+const foreignToolResult = foreignToolHistory.find((item: { type?: string }) => (
+  item.type === "function_call_output"
+));
+assert.equal(foreignToolCall?.call_id, "call_weird");
+assert.match(String(foreignToolCall?.id), /^fc_/);
+assert.equal(foreignToolResult?.call_id, foreignToolCall?.call_id);
+assert.equal(foreignToolResult?.output, "FOREIGN_TOOL_RESULT");
 
 const compactedHistory = processCompactedHistory([
   { type: "message", role: "developer", content: [{ type: "input_text", text: "drop developer" }] },
@@ -949,6 +993,7 @@ try {
                   type: "toolCall",
                   id: "call_read_1|fc_read_1",
                   name: "read",
+                  namespace: "filesystem",
                   arguments: { path: "README.md" },
                 },
                 {
@@ -1050,6 +1095,7 @@ try {
         id: "fc_read_1",
         call_id: "call_read_1",
         name: "read",
+        namespace: "filesystem",
         arguments: JSON.stringify({ path: "README.md" }),
       },
     );

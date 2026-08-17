@@ -21,6 +21,7 @@ import {
 import {
   hostnameFromBaseUrl,
   isRecord,
+  messageMatchesModel,
   supportsRemoteCompactionModel,
   modelKey,
 } from "./openai.ts";
@@ -74,6 +75,7 @@ export type ResponsesTextConfig = Record<string, unknown>;
 export type RemoteCompactionUsageSnapshot = Usage;
 
 const IMAGE_CONTENT_OMITTED_PLACEHOLDER = "image content omitted because you do not support image input";
+const OPENAI_TOOL_CALL_PROVIDERS = new Set(["openai", "openai-codex", "opencode"]);
 const REMOTE_COMPACTION_V2_FEATURE = "remote_compaction_v2";
 export const REMOTE_COMPACTION_CHECKPOINT_SUMMARY =
   "[Remote Responses compaction checkpoint]\n\n" +
@@ -381,15 +383,51 @@ function isCompactionItem(value: unknown): value is ResponseItem {
     value.encrypted_content.length > 0;
 }
 
+function normalizeResponseIdPart(part: string): string {
+  const sanitized = part.replace(/[^a-zA-Z0-9_-]/g, "_");
+  return sanitized.slice(0, 64).replace(/_+$/, "");
+}
+
+function shortHash(value: string): string {
+  let first = 0xdeadbeef;
+  let second = 0x41c6ce57;
+  for (let index = 0; index < value.length; index++) {
+    const character = value.charCodeAt(index);
+    first = Math.imul(first ^ character, 2654435761);
+    second = Math.imul(second ^ character, 1597334677);
+  }
+  first = Math.imul(first ^ (first >>> 16), 2246822507) ^
+    Math.imul(second ^ (second >>> 13), 3266489909);
+  second = Math.imul(second ^ (second >>> 16), 2246822507) ^
+    Math.imul(first ^ (first >>> 13), 3266489909);
+  return (second >>> 0).toString(36) + (first >>> 0).toString(36);
+}
+
+function normalizeToolCallIdForTarget(
+  id: string,
+  source: Extract<AgentMessage, { role: "assistant" }>,
+  model: Model<any>,
+): string {
+  if (!OPENAI_TOOL_CALL_PROVIDERS.has(model.provider)) return normalizeResponseIdPart(id);
+  if (!id.includes("|")) return normalizeResponseIdPart(id);
+
+  const [callId, itemId] = id.split("|");
+  const normalizedCallId = normalizeResponseIdPart(callId);
+  const isForeign = source.provider !== model.provider || source.api !== model.api;
+  let normalizedItemId = isForeign
+    ? `fc_${shortHash(itemId)}`
+    : normalizeResponseIdPart(itemId);
+  if (!normalizedItemId.startsWith("fc_")) {
+    normalizedItemId = normalizeResponseIdPart(`fc_${normalizedItemId}`);
+  }
+  return `${normalizedCallId}|${normalizedItemId}`;
+}
+
 function assistantMessageMatchesTarget(
   message: Extract<AgentMessage, { role: "assistant" }>,
   model: Model<any> | undefined,
 ): boolean {
-  return !model || (
-    message.provider === model.provider &&
-    message.api === model.api &&
-    message.model === model.id
-  );
+  return !model || messageMatchesModel(message, model);
 }
 
 function fallbackAssistantMessageId(messageIndex: number, textBlockIndex: number): string {
@@ -422,6 +460,10 @@ export function messageToResponseItems(
     if (message.stopReason === "error" || message.stopReason === "aborted") return items;
 
     const sameModel = assistantMessageMatchesTarget(message, model);
+    const sameProviderAndApi = !model || (
+      message.provider === model.provider && message.api === model.api
+    );
+    const differentModel = Boolean(model && sameProviderAndApi && message.model !== model.id);
     let textBlockIndex = 0;
 
     for (const block of message.content) {
@@ -465,13 +507,15 @@ export function messageToResponseItems(
       if (block.type !== "toolCall") continue;
 
       const [callId, itemId] = block.id.split("|");
-      const responseItemId = sameModel && itemId?.startsWith("fc_") ? itemId : undefined;
+      const responseItemId = !differentModel && itemId?.startsWith("fc_") ? itemId : undefined;
+      const namespace = (block as typeof block & { namespace?: unknown }).namespace;
       items.push({
         type: "function_call",
         ...(responseItemId ? { id: responseItemId } : {}),
         name: block.name,
         call_id: callId,
         arguments: JSON.stringify(block.arguments ?? {}),
+        ...(sameModel && typeof namespace === "string" ? { namespace } : {}),
       });
     }
 
@@ -493,7 +537,29 @@ export function messagesToResponseItems(
   messages: AgentMessage[],
   model?: Model<any>,
 ): ResponseItem[] {
-  return messages.flatMap((message, index) => messageToResponseItems(message, model, index));
+  const normalizedToolCallIds = new Map<string, string>();
+  const transformedMessages = messages.map((message): AgentMessage => {
+    if (message.role === "assistant" && model && !assistantMessageMatchesTarget(message, model)) {
+      return {
+        ...message,
+        content: message.content.map((block) => {
+          if (block.type !== "toolCall") return block;
+          const normalizedId = normalizeToolCallIdForTarget(block.id, message, model);
+          normalizedToolCallIds.set(block.id, normalizedId);
+          return normalizedId === block.id ? block : { ...block, id: normalizedId };
+        }),
+      };
+    }
+    if (message.role === "toolResult") {
+      const normalizedId = normalizedToolCallIds.get(message.toolCallId);
+      return normalizedId ? { ...message, toolCallId: normalizedId } : message;
+    }
+    return message;
+  });
+
+  return transformedMessages.flatMap((message, index) => (
+    messageToResponseItems(message, model, index)
+  ));
 }
 
 function cloneResponseItem(item: ResponseItem): ResponseItem {
@@ -514,7 +580,7 @@ function syntheticOutputForCall(item: ResponseItem): ResponseItem | undefined {
   if (!callId) return undefined;
 
   if (item.type === "function_call" || item.type === "local_shell_call") {
-    return { type: "function_call_output", call_id: callId, output: "aborted" };
+    return { type: "function_call_output", call_id: callId, output: "No result provided" };
   }
   if (item.type === "tool_search_call") {
     return {
@@ -1317,8 +1383,7 @@ function assistantMessageMatchesModelKey(
 ): boolean {
   const target = parseModelKeyParts(targetModelKey);
   if (!target) return false;
-  if (!isRecord(message)) return false;
-  return message.provider === target.provider && message.model === target.id;
+  return messageMatchesModel(message, target);
 }
 
 export function reconstructRemoteCompactionStateFromBranch(params: {
