@@ -878,9 +878,35 @@ try {
           },
           {
             type: "message",
-            id: "multi-phase-assistant",
+            id: "different-api-user",
             parentId: "prior-remote-compaction",
             timestamp: "2026-08-07T01:00:00.000Z",
+            message: {
+              role: "user",
+              content: [{ type: "text", text: "DROP_DIFFERENT_API_USER" }],
+              timestamp: 5,
+            },
+          },
+          {
+            type: "message",
+            id: "different-api-assistant",
+            parentId: "different-api-user",
+            timestamp: "2026-08-07T01:00:01.000Z",
+            message: {
+              role: "assistant",
+              provider: compactContext.model.provider,
+              api: "openai-codex-responses",
+              model: compactContext.model.id,
+              content: [{ type: "text", text: "DROP_DIFFERENT_API_ASSISTANT" }],
+              stopReason: "stop",
+              timestamp: 6,
+            },
+          },
+          {
+            type: "message",
+            id: "multi-phase-assistant",
+            parentId: "different-api-assistant",
+            timestamp: "2026-08-07T01:00:02.000Z",
             message: {
               role: "assistant",
               provider: compactContext.model.provider,
@@ -930,7 +956,7 @@ try {
             type: "message",
             id: "multi-phase-tool-result",
             parentId: "multi-phase-assistant",
-            timestamp: "2026-08-07T01:00:01.000Z",
+            timestamp: "2026-08-07T01:00:03.000Z",
             message: {
               role: "toolResult",
               toolCallId: "call_read_1|fc_read_1",
@@ -944,7 +970,7 @@ try {
             type: "message",
             id: "post-tool-assistant",
             parentId: "multi-phase-tool-result",
-            timestamp: "2026-08-07T01:00:02.000Z",
+            timestamp: "2026-08-07T01:00:04.000Z",
             message: {
               role: "assistant",
               provider: compactContext.model.provider,
@@ -981,6 +1007,7 @@ try {
       "PRIOR_REMOTE_COMPACTION",
     );
     assert.doesNotMatch(requestBodies[0], /STALE_SERIALIZED_HISTORY/);
+    assert.doesNotMatch(requestBodies[0], /DROP_DIFFERENT_API/);
     assert.deepEqual(
       convertedInput.filter((item) => item.id === "msg_commentary_1" || item.id === "msg_final_1"),
       [
