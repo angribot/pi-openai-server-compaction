@@ -128,10 +128,13 @@ const {
 const {
   clearAllRuntimeState,
   clearRemoteCompactionState,
+  getRemoteCompactionState,
+  getResponsesRequestShapeState,
   setRemoteCompactionState,
+  setResponsesRequestShapeState,
 } = await import(pathToFileURL(join(repoRoot, "src", "state.ts")).href);
 
-const targetModelKey = "openai:openai-responses:gpt-5.4-nano";
+const targetModelKey = "openai:openai-responses:gpt-5.4-nano:variant";
 const reconstructed = reconstructRemoteCompactionStateFromBranch({
   branchEntries: [
     {
@@ -166,7 +169,7 @@ const reconstructed = reconstructRemoteCompactionStateFromBranch({
         role: "assistant",
         provider: "openai",
         api: "openai-responses",
-        model: "gpt-5.4-nano",
+        model: "gpt-5.4-nano:variant",
         content: [{ type: "text", text: "KEEP_REPLY_ONE" }],
       },
     },
@@ -185,7 +188,7 @@ const reconstructed = reconstructRemoteCompactionStateFromBranch({
         role: "assistant",
         provider: "openai",
         api: "openai-codex-responses",
-        model: "gpt-5.4-nano",
+        model: "gpt-5.4-nano:variant",
         content: [{ type: "text", text: "DROP_REPLY" }],
       },
     },
@@ -204,7 +207,7 @@ const reconstructed = reconstructRemoteCompactionStateFromBranch({
         role: "assistant",
         provider: "openai",
         api: "openai-responses",
-        model: "gpt-5.4-nano",
+        model: "gpt-5.4-nano:variant",
         content: [{ type: "text", text: "KEEP_REPLY_TWO" }],
       },
     },
@@ -556,6 +559,84 @@ assert.ok(detailsRoundTrip, "expected remote compaction details round trip");
 assert.equal(detailsRoundTrip.usage?.cacheWrite, 40);
 assert.equal(detailsRoundTrip.usage?.cost.total, 10);
 
+const validLegacyDetails = extractRemoteCompactionDetails({
+  remoteCompaction: {
+    version: 1,
+    provider: "openai-responses-compact",
+    modelKey: "openai:openai-responses:legacy:model",
+    replacementHistory: [{ type: "compaction_summary", encrypted_content: "LEGACY_ENCRYPTED" }],
+  },
+});
+assert.equal(validLegacyDetails?.version, 1);
+assert.equal(validLegacyDetails?.modelKey, "openai:openai-responses:legacy:model");
+
+for (const [name, remoteCompaction] of [
+  [
+    "missing model key",
+    {
+      version: 2,
+      provider: "openai-responses-compaction",
+      replacementHistory: [{ type: "compaction", encrypted_content: "ENCRYPTED" }],
+    },
+  ],
+  [
+    "blank model key",
+    {
+      version: 2,
+      provider: "openai-responses-compaction",
+      modelKey: "   ",
+      replacementHistory: [{ type: "compaction", encrypted_content: "ENCRYPTED" }],
+    },
+  ],
+  [
+    "missing replacement history",
+    {
+      version: 2,
+      provider: "openai-responses-compaction",
+      modelKey: targetModelKey,
+    },
+  ],
+  [
+    "empty replacement history",
+    {
+      version: 2,
+      provider: "openai-responses-compaction",
+      modelKey: targetModelKey,
+      replacementHistory: [],
+    },
+  ],
+  [
+    "partially malformed replacement history",
+    {
+      version: 2,
+      provider: "openai-responses-compaction",
+      modelKey: targetModelKey,
+      replacementHistory: [
+        { type: "compaction", encrypted_content: "ENCRYPTED" },
+        { malformed: true },
+      ],
+    },
+  ],
+  [
+    "replacement history without a valid compaction item",
+    {
+      version: 2,
+      provider: "openai-responses-compaction",
+      modelKey: targetModelKey,
+      replacementHistory: [
+        { type: "message", role: "user", content: [] },
+        { type: "compaction", encrypted_content: "" },
+      ],
+    },
+  ],
+] as const) {
+  assert.equal(
+    extractRemoteCompactionDetails({ remoteCompaction }),
+    undefined,
+    `${name} must fail closed`,
+  );
+}
+
 type Hook = (...args: any[]) => any;
 
 const handlers = new Map<string, Hook>();
@@ -644,6 +725,144 @@ const untouchedCodexPayload = beforeProviderRequest(
 );
 assert.equal(untouchedCodexPayload, undefined);
 clearRemoteCompactionState(sessionId);
+
+const lifecycleSessionId = "native-replay-lifecycle-session";
+const lifecycleHistory = [
+  { type: "compaction", encrypted_content: "LIFECYCLE_ENCRYPTED" },
+];
+const lifecycleState = {
+  compactionEntryId: "lifecycle-compaction",
+  modelKey: modelKey(proxyResponsesModel),
+  replacementHistory: lifecycleHistory,
+  explicitHistory: lifecycleHistory,
+};
+const lifecycleContext = (branchEntries: unknown[] = []) => ({
+  ...requestContext,
+  sessionManager: {
+    getSessionId() {
+      return lifecycleSessionId;
+    },
+    getBranch() {
+      return branchEntries;
+    },
+  },
+});
+const persistedLifecycleBranch = (entryId: string, encryptedContent: string) => [{
+  type: "compaction",
+  id: entryId,
+  details: {
+    remoteCompaction: {
+      version: 2,
+      provider: "openai-responses-compaction",
+      modelKey: modelKey(proxyResponsesModel),
+      replacementHistory: [{ type: "compaction", encrypted_content: encryptedContent }],
+    },
+  },
+}];
+
+for (const eventName of [
+  "session_before_switch",
+  "session_before_fork",
+  "session_before_tree",
+]) {
+  clearAllRuntimeState();
+  setRemoteCompactionState(lifecycleSessionId, lifecycleState);
+  setResponsesRequestShapeState(lifecycleSessionId, {
+    modelKey: modelKey(proxyResponsesModel),
+    updatedAt: 1,
+    serviceTier: "priority",
+  });
+
+  await handlers.get(eventName)?.({}, lifecycleContext());
+
+  assert.deepEqual(
+    getRemoteCompactionState(lifecycleSessionId),
+    lifecycleState,
+    `${eventName} must not clear native replay before the action succeeds`,
+  );
+  assert.equal(
+    getResponsesRequestShapeState(lifecycleSessionId)?.serviceTier,
+    "priority",
+    `${eventName} must not clear the observed request shape before the action succeeds`,
+  );
+  assert.deepEqual(
+    beforeProviderRequest(
+      { payload: { model: proxyResponsesModel.id, input: [] } },
+      lifecycleContext(),
+    )?.input,
+    lifecycleHistory,
+    `${eventName} must leave native replay active when another extension cancels the action`,
+  );
+}
+
+const sessionShutdown = handlers.get("session_shutdown")!;
+const sessionStart = handlers.get("session_start")!;
+const sessionTree = handlers.get("session_tree")!;
+const sessionCompact = handlers.get("session_compact")!;
+assert.equal(typeof sessionShutdown, "function");
+assert.equal(typeof sessionStart, "function");
+assert.equal(typeof sessionTree, "function");
+assert.equal(typeof sessionCompact, "function");
+
+setRemoteCompactionState(lifecycleSessionId, lifecycleState);
+setResponsesRequestShapeState(lifecycleSessionId, {
+  modelKey: modelKey(proxyResponsesModel),
+  updatedAt: 2,
+  serviceTier: "priority",
+});
+await sessionShutdown();
+assert.equal(getRemoteCompactionState(lifecycleSessionId), undefined);
+assert.equal(getResponsesRequestShapeState(lifecycleSessionId), undefined);
+
+await sessionStart({}, lifecycleContext(persistedLifecycleBranch("start-compaction", "START")));
+assert.equal(
+  getRemoteCompactionState(lifecycleSessionId)?.replacementHistory[0]?.encrypted_content,
+  "START",
+  "session start must rebuild native replay after a successful switch or fork",
+);
+assert.equal(getResponsesRequestShapeState(lifecycleSessionId), undefined);
+
+setResponsesRequestShapeState(lifecycleSessionId, {
+  modelKey: modelKey(proxyResponsesModel),
+  updatedAt: 3,
+  serviceTier: "priority",
+});
+await sessionTree({}, lifecycleContext());
+assert.equal(
+  getRemoteCompactionState(lifecycleSessionId),
+  undefined,
+  "successful tree navigation must clear native replay when the selected branch has no persisted details",
+);
+assert.equal(getResponsesRequestShapeState(lifecycleSessionId), undefined);
+
+setResponsesRequestShapeState(lifecycleSessionId, {
+  modelKey: modelKey(proxyResponsesModel),
+  updatedAt: 4,
+  serviceTier: "priority",
+});
+await sessionTree({}, lifecycleContext(persistedLifecycleBranch("tree-compaction", "TREE")));
+assert.equal(
+  getRemoteCompactionState(lifecycleSessionId)?.replacementHistory[0]?.encrypted_content,
+  "TREE",
+  "successful tree navigation must rebuild native replay from the selected branch",
+);
+assert.equal(
+  getResponsesRequestShapeState(lifecycleSessionId),
+  undefined,
+  "successful tree navigation must clear the prior branch request shape",
+);
+
+await sessionCompact({}, lifecycleContext(persistedLifecycleBranch("new-compaction", "COMPACT")));
+assert.equal(
+  getRemoteCompactionState(lifecycleSessionId)?.replacementHistory[0]?.encrypted_content,
+  "COMPACT",
+  "successful compaction must rebuild native replay from the new compaction entry",
+);
+clearAllRuntimeState();
+beforeProviderRequest(
+  { payload: { model: proxyResponsesModel.id, input: [], service_tier: "priority" } },
+  requestContext,
+);
 
 const sessionBeforeCompact = handlers.get("session_before_compact")!;
 assert.equal(typeof sessionBeforeCompact, "function");

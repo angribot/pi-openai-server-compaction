@@ -385,7 +385,7 @@ function isResponseItem(value: unknown): value is ResponseItem {
 
 function isCompactionItem(value: unknown): value is ResponseItem {
   return isRecord(value) &&
-    value.type === "compaction" &&
+    (value.type === "compaction" || value.type === "compaction_summary") &&
     typeof value.encrypted_content === "string" &&
     value.encrypted_content.length > 0;
 }
@@ -1368,38 +1368,35 @@ export function extractRemoteCompactionDetails(details: unknown):
   const isLegacy = remote.provider === "openai-responses-compact" && remote.version === 1;
   const isV2 = remote.provider === "openai-responses-compaction" && remote.version === 2;
   if (!isLegacy && !isV2) return undefined;
-  if (!Array.isArray(remote.replacementHistory)) return undefined;
+  if (typeof remote.modelKey !== "string" || !remote.modelKey.trim()) return undefined;
+  if (!Array.isArray(remote.replacementHistory) || remote.replacementHistory.length === 0) {
+    return undefined;
+  }
+  if (!remote.replacementHistory.every(isResponseItem)) return undefined;
+  if (!remote.replacementHistory.some(isCompactionItem)) return undefined;
 
-  const replacementHistory = remote.replacementHistory.filter(isResponseItem);
-  if (replacementHistory.length === 0) return undefined;
-
+  const replacementHistory = remote.replacementHistory;
   const usage = parseRemoteCompactionUsageSnapshot(remote.usage);
 
   return {
     version: isV2 ? 2 : 1,
     provider: isV2 ? "openai-responses-compaction" : "openai-responses-compact",
     implementation: isV2 ? "responses_compaction_v2" : "responses_compact_v1",
-    modelKey: typeof remote.modelKey === "string" ? remote.modelKey : "",
+    modelKey: remote.modelKey,
     replacementHistory,
     ...(usage ? { usage } : {}),
   };
 }
 
-function parseModelKeyParts(
-  value: string,
-): { provider: string; api: string; id: string } | undefined {
-  const [provider, api, id] = value.split(":", 3);
-  if (!provider || !api || !id) return undefined;
-  return { provider, api, id };
-}
-
 function assistantMessageMatchesModelKey(
-  message: AgentMessage,
+  message: Extract<AgentMessage, { role: "assistant" }>,
   targetModelKey: string,
 ): boolean {
-  const target = parseModelKeyParts(targetModelKey);
-  if (!target) return false;
-  return messageMatchesModel(message, target);
+  return modelKey({
+    provider: message.provider,
+    api: message.api,
+    id: message.model,
+  }) === targetModelKey;
 }
 
 export function reconstructRemoteCompactionStateFromBranch(params: {
