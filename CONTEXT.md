@@ -17,7 +17,7 @@ The standalone `/responses/compact` protocol whose response supplies the next co
 _Avoid_: Remote compaction v2
 
 **Eligible model**:
-A model selected by the exact `openai-responses` API contract for attempting Remote compaction v2. Eligibility does not guarantee that the selected endpoint accepts the v2 trigger or that the model is compatible with an existing compaction item.
+A model selected for attempting Remote compaction v2 either by the exact `openai-responses` API contract, or by Pi's built-in `openai-codex` provider together with the exact `openai-codex-responses` API contract. Eligibility does not guarantee that the selected endpoint accepts the v2 trigger or that the model is compatible with an existing compaction item.
 _Avoid_: Supported provider, compatible model, v2-capable endpoint
 
 **Remote compaction capability**:
@@ -56,9 +56,13 @@ _Avoid_: Checkpoint summary, native replay checkpoint, portable summary
 The unique contiguous portion of an ordinary request's final Responses input that contains the checkpoint marker and Pi-retained pre-compaction entries. Native replay replaces only this span with replacement history so surrounding provider items remain unchanged.
 _Avoid_: Checkpoint history, Historical replay span, Checkpoint region, Pre-compaction span (when referring to this exact provider-input region)
 
+**Compaction compatibility class**:
+An opaque provider-resolved identifier grouping model configurations that can share compaction history; OpenAI Codex calls this `comp_hash`. It may span model aliases and is distinct from a model key.
+_Avoid_: Model family, model hash, Model key
+
 **Model key**:
-The provider, API type, and model ID considered together as the identity that determines native replay compatibility. Request-specific credentials and resolved endpoints are not part of this identity.
-_Avoid_: Model ID, provider name
+The provider, API type, and model ID considered together as this project's conservative native replay compatibility boundary when no Compaction compatibility class is available. Request-specific credentials and resolved endpoints are not part of this boundary.
+_Avoid_: Model ID, provider name, Compaction compatibility class
 
 **Ordinary request**:
 A model request that continues the conversation without asking the endpoint to compact it.

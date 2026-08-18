@@ -15,8 +15,32 @@ export type RemoteCompactionRequest = Readonly<{
   store: false;
 }>;
 
+export function remoteCompactionPayload(
+  request: RemoteCompactionRequest,
+  envelope: unknown = {},
+): Record<string, unknown> {
+  if (!isRecord(envelope)) {
+    throw new Error("Remote compaction provider produced a non-object request payload");
+  }
+
+  const payload: Record<string, unknown> = {
+    ...envelope,
+    model: request.model.id,
+    input: request.input,
+    instructions: request.instructions,
+    store: false,
+    stream: true,
+  };
+  if (request.tools && request.tools.length > 0) payload.tools = request.tools;
+  else delete payload.tools;
+  delete payload.messages;
+  delete payload.previous_response_id;
+  return payload;
+}
+
 export type RemoteCompactionAttemptContext = Readonly<{
-  modelRegistry: Pick<ModelRegistry, "getApiKeyAndHeaders">;
+  modelRegistry: Pick<ModelRegistry, "complete" | "getApiKeyAndHeaders">;
+  sessionId: string;
   signal: AbortSignal;
 }>;
 
@@ -229,6 +253,7 @@ function isTerminalEvent(event: unknown): boolean {
   return (
     isRecord(event) &&
     (event.type === "error" ||
+      event.type === "response.done" ||
       event.type === "response.completed" ||
       event.type === "response.failed" ||
       event.type === "response.incomplete")
@@ -389,10 +414,10 @@ export async function validateRemoteCompactionResponse(
   }
 
   if (!isRecord(streamed.terminal)) {
-    return retryable("stream ended before response.completed");
+    return retryable("stream ended before an explicit response completion");
   }
   const event = streamed.terminal;
-  if (event.type === "response.completed") {
+  if (event.type === "response.done" || event.type === "response.completed") {
     const outcome = completedResult(request, streamed.events, event, signal);
     if (signal.aborted) return { kind: "terminal", error: abortError(signal) };
     return outcome;

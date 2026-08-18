@@ -1,7 +1,3 @@
 # Keep resolved endpoints out of model identity
 
-Persisted native replay compatibility uses a structured model key containing provider, exact API type, and model ID. Credential-resolved endpoints and request headers are per-request routing data and do not participate in that identity.
-
-Separating identity from routing keeps persisted Remote compaction v2 state stable when credentials or endpoint resolution change. The direct operation may send a compaction request to a credential-resolved base URL while replay still compares exact structured provider/API/model identity.
-
-The trade-off remains that two routes sharing the same model key are assumed to accept the same opaque compaction item. The extension cannot prove endpoint-level compatibility without persisting routing data, which would couple session identity to credentials and deployment details.
+Persisted Native replay uses the exact provider/API/model key as a conservative compatibility boundary because Pi `0.84.2` does not expose Codex's provider-resolved Compaction compatibility class; resolved endpoints, accounts, authentication routes, and headers remain per-request routing data. This matches Codex's treatment of opaque compaction items without proving that a newly resolved route will accept old ciphertext, so service acceptance remains a runtime assumption rather than a reason to couple session state to credentials.

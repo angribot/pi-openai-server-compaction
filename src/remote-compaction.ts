@@ -22,9 +22,12 @@ const MAX_ATTEMPTS = 3;
 const MAX_RETRY_DELAY_MS = 60_000;
 const BASE_RETRY_DELAY_MS = 200;
 
+export type RemoteCompactionApi = "openai-responses" | "openai-codex-responses";
+export type RemoteCompactionOperationKind = "direct-responses" | "pi-codex-responses";
+
 export type RemoteCompactionModelKey = {
   provider: string;
-  api: "openai-responses";
+  api: RemoteCompactionApi;
   id: string;
 };
 
@@ -64,7 +67,7 @@ type HookContext = {
   hasUI: boolean;
   ui: { notify(message: string, level: "info" | "warning" | "error"): void };
   modelRegistry: Parameters<RemoteCompactionAttempt>[1]["modelRegistry"];
-  sessionManager: { getBranch(): BranchEntry[] };
+  sessionManager: { getBranch(): BranchEntry[]; getSessionId(): string };
   getSystemPrompt(): string;
   abort(): void;
 };
@@ -79,21 +82,48 @@ function hasExactKeys(value: Record<string, unknown>, keys: readonly string[]): 
   return actual.length === expected.length && actual.every((key, index) => key === expected[index]);
 }
 
+function operationKindForIdentity(
+  provider: unknown,
+  api: unknown,
+): RemoteCompactionOperationKind | undefined {
+  if (api === "openai-responses") return "direct-responses";
+  if (provider === "openai-codex" && api === "openai-codex-responses") {
+    return "pi-codex-responses";
+  }
+  return undefined;
+}
+
+export function remoteCompactionOperationKind(
+  model: unknown,
+): RemoteCompactionOperationKind | undefined {
+  return isRecord(model) ? operationKindForIdentity(model.provider, model.api) : undefined;
+}
+
 function isEligibleModel(model: unknown): model is Model<any> {
-  return isRecord(model) && model.api === "openai-responses";
+  return remoteCompactionOperationKind(model) !== undefined;
+}
+
+function modelKeyFromIdentity(
+  provider: unknown,
+  api: unknown,
+  id: unknown,
+): RemoteCompactionModelKey | undefined {
+  if (typeof provider !== "string" || !provider.trim() || typeof id !== "string" || !id.trim()) {
+    return undefined;
+  }
+
+  const operationKind = operationKindForIdentity(provider, api);
+  if (operationKind === "direct-responses") {
+    return { provider, api: "openai-responses", id };
+  }
+  if (operationKind === "pi-codex-responses") {
+    return { provider: "openai-codex", api: "openai-codex-responses", id };
+  }
+  return undefined;
 }
 
 function modelKey(model: Model<any>): RemoteCompactionModelKey | undefined {
-  if (
-    typeof model.provider !== "string" ||
-    !model.provider.trim() ||
-    typeof model.id !== "string" ||
-    !model.id.trim() ||
-    model.api !== "openai-responses"
-  ) {
-    return undefined;
-  }
-  return { provider: model.provider, api: "openai-responses", id: model.id };
+  return modelKeyFromIdentity(model.provider, model.api, model.id);
 }
 
 function sameModelKey(
@@ -136,12 +166,17 @@ function decodeDetails(
     !hasExactKeys(remote, ["version", "modelKey", "replacementHistory"]) ||
     remote.version !== 2 ||
     !isRecord(remote.modelKey) ||
-    !hasExactKeys(remote.modelKey, ["provider", "api", "id"]) ||
-    typeof remote.modelKey.provider !== "string" ||
-    !remote.modelKey.provider.trim() ||
-    remote.modelKey.api !== "openai-responses" ||
-    typeof remote.modelKey.id !== "string" ||
-    !remote.modelKey.id.trim() ||
+    !hasExactKeys(remote.modelKey, ["provider", "api", "id"])
+  ) {
+    return undefined;
+  }
+  const key = modelKeyFromIdentity(
+    remote.modelKey.provider,
+    remote.modelKey.api,
+    remote.modelKey.id,
+  );
+  if (
+    !key ||
     !Array.isArray(remote.replacementHistory) ||
     remote.replacementHistory.length !== 1 ||
     !isCompactionItem(remote.replacementHistory[0])
@@ -149,11 +184,7 @@ function decodeDetails(
     return undefined;
   }
   return {
-    modelKey: {
-      provider: remote.modelKey.provider,
-      api: "openai-responses",
-      id: remote.modelKey.id,
-    },
+    modelKey: key,
     replacementHistory: [remote.replacementHistory[0]],
   };
 }
@@ -477,6 +508,7 @@ export function installRemoteCompaction(pi: ExtensionAPI, attempt: RemoteCompact
       try {
         outcome = await attempt(request, {
           modelRegistry: context.modelRegistry,
+          sessionId: context.sessionManager.getSessionId(),
           signal: event.signal,
         });
       } catch (error) {
