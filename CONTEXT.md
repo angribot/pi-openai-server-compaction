@@ -41,7 +41,7 @@ Compactable context containing model-visible semantics that cannot be faithfully
 _Avoid_: Unsupported Pi context, unsupported context, unconvertible context
 
 **Replacement history**:
-The replayable Responses item sequence produced by remote compaction, including the compaction item and any retained explicit items.
+The complete replayable Responses item sequence installed by a successful Remote compaction and substituted for the replay replacement span during native replay. In this project's minimum v2 contract it contains exactly the one opaque compaction item and no retained explicit items.
 _Avoid_: Remote history, explicit remote history, native replay history
 
 **Native replay**:
