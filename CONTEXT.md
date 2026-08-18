@@ -36,6 +36,10 @@ _Avoid_: Remote artifact, native artifact, opaque artifact
 The ordered, Pi-persisted, compaction-aware context of the active linear session that a Remote compaction v2 request replaces. Repeated Remote compaction starts from the latest replacement history plus later session entries; ephemeral `context` or provider-payload middleware mutations are not part of this context.
 _Avoid_: Final provider payload, last observed request, effective context
 
+**Unrepresentable compactable context**:
+Compactable context containing model-visible semantics that cannot be faithfully reconstructed as Responses input through Pi 0.84.2 public APIs. Its presence cancels Remote compaction rather than permitting silent omission, approximation, or partial replacement.
+_Avoid_: Unsupported Pi context, unsupported context, unconvertible context
+
 **Replacement history**:
 The replayable Responses item sequence produced by remote compaction, including the compaction item and any retained explicit items.
 _Avoid_: Remote history, explicit remote history, native replay history
