@@ -15,6 +15,29 @@ export type RemoteCompactionRequest = Readonly<{
   store: false;
 }>;
 
+export function remoteCompactionPayload(
+  request: RemoteCompactionRequest,
+  envelope: unknown = {},
+): Record<string, unknown> {
+  if (!isRecord(envelope)) {
+    throw new Error("Remote compaction provider produced a non-object request payload");
+  }
+
+  const payload: Record<string, unknown> = {
+    ...envelope,
+    model: request.model.id,
+    input: request.input,
+    instructions: request.instructions,
+    store: false,
+    stream: true,
+  };
+  if (request.tools && request.tools.length > 0) payload.tools = request.tools;
+  else delete payload.tools;
+  delete payload.messages;
+  delete payload.previous_response_id;
+  return payload;
+}
+
 export type RemoteCompactionAttemptContext = Readonly<{
   modelRegistry: Pick<ModelRegistry, "complete" | "getApiKeyAndHeaders">;
   sessionId: string;

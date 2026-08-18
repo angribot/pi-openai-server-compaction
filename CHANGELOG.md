@@ -4,7 +4,7 @@ This changelog intentionally starts at **0.1.0**.
 
 ## Unreleased
 
-- support Remote compaction v2 and exact-key Native replay for Pi's built-in `openai-codex` provider with `openai-codex-responses`, using Pi-managed Codex SSE requests and raw response capture while keeping third-party providers declaring that API ineligible
+- support Remote compaction v2 and Native replay using the exact Model key for Pi's built-in `openai-codex` provider with `openai-codex-responses`, using Pi-managed Codex SSE requests and raw response capture while keeping third-party providers declaring that API ineligible
 
 ## 0.8.0 - 2026-08-18
 

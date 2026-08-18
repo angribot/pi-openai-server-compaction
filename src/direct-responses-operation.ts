@@ -1,9 +1,9 @@
 import type { Model, ProviderHeaders } from "@earendil-works/pi-ai";
 import {
   remoteCompactionFailureOutcome,
+  remoteCompactionPayload,
   validateRemoteCompactionResponse,
   type RemoteCompactionAttempt,
-  type RemoteCompactionRequest,
 } from "./remote-compaction-operation.ts";
 
 function deleteHeader(headers: Record<string, string>, name: string): void {
@@ -65,17 +65,6 @@ function endpointUrl(model: Model<any>, resolvedBaseUrl: string | undefined): st
   return baseUrl.endsWith("/responses") ? baseUrl : `${baseUrl}/responses`;
 }
 
-function requestBody(request: RemoteCompactionRequest): Record<string, unknown> {
-  return {
-    model: request.model.id,
-    input: request.input,
-    instructions: request.instructions,
-    ...(request.tools && request.tools.length > 0 ? { tools: request.tools } : {}),
-    store: false,
-    stream: true,
-  };
-}
-
 export const attemptDirectResponsesOperation: RemoteCompactionAttempt = async (
   request,
   context,
@@ -105,7 +94,7 @@ export const attemptDirectResponsesOperation: RemoteCompactionAttempt = async (
 
   let body: string;
   try {
-    body = JSON.stringify(requestBody(request));
+    body = JSON.stringify(remoteCompactionPayload(request));
   } catch (error) {
     return remoteCompactionFailureOutcome(
       "terminal",

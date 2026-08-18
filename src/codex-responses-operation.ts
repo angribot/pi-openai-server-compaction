@@ -1,37 +1,10 @@
 import type { AssistantMessage, Context } from "@earendil-works/pi-ai";
 import {
   remoteCompactionFailureOutcome,
+  remoteCompactionPayload,
   validateRemoteCompactionResponse,
   type RemoteCompactionAttempt,
-  type RemoteCompactionRequest,
 } from "./remote-compaction-operation.ts";
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-function compactionPayload(
-  payload: unknown,
-  request: RemoteCompactionRequest,
-): Record<string, unknown> {
-  if (!isRecord(payload)) {
-    throw new Error("Pi's Codex provider produced a non-object request payload");
-  }
-
-  const patched: Record<string, unknown> = {
-    ...payload,
-    model: request.model.id,
-    input: request.input,
-    instructions: request.instructions,
-    store: false,
-    stream: true,
-  };
-  if (request.tools && request.tools.length > 0) patched.tools = request.tools;
-  else delete patched.tools;
-  delete patched.messages;
-  delete patched.previous_response_id;
-  return patched;
-}
 
 function providerCompletionError(completion: AssistantMessage): Error {
   return new Error(
@@ -67,7 +40,7 @@ export const attemptCodexResponsesOperation: RemoteCompactionAttempt = async (re
       transport: "sse",
       maxRetries: 0,
       sessionId: context.sessionId,
-      onPayload: (payload: unknown) => compactionPayload(payload, request),
+      onPayload: (payload: unknown) => remoteCompactionPayload(request, payload),
       fetch: capturingFetch,
     });
   } catch (error) {

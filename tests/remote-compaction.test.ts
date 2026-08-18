@@ -100,7 +100,7 @@ const usage = {
   cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
 };
 
-test("attempts only eligible API identities and publishes one atomic first compaction", async () => {
+test("attempts only Eligible models and publishes one atomic first compaction", async () => {
   const tools = [
     {
       name: "read",
@@ -324,7 +324,7 @@ test("cancels preparation and abort races without leaking partial acceptance", a
   assert.equal(delayCalls, 1);
 });
 
-test("reconstructs latest Codex v2 state and replaces one unique full-array replay span", () => {
+test("reconstructs latest built-in Codex Remote compaction v2 state and replaces one unique full-array replay span", () => {
   const selectedModel = responsesModel({
     provider: "openai-codex",
     api: "openai-codex-responses",
