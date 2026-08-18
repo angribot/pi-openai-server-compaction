@@ -22,9 +22,11 @@ const MAX_ATTEMPTS = 3;
 const MAX_RETRY_DELAY_MS = 60_000;
 const BASE_RETRY_DELAY_MS = 200;
 
+export type RemoteCompactionApi = "openai-responses" | "openai-codex-responses";
+
 export type RemoteCompactionModelKey = {
   provider: string;
-  api: "openai-responses";
+  api: RemoteCompactionApi;
   id: string;
 };
 
@@ -64,7 +66,7 @@ type HookContext = {
   hasUI: boolean;
   ui: { notify(message: string, level: "info" | "warning" | "error"): void };
   modelRegistry: Parameters<RemoteCompactionAttempt>[1]["modelRegistry"];
-  sessionManager: { getBranch(): BranchEntry[] };
+  sessionManager: { getBranch(): BranchEntry[]; getSessionId(): string };
   getSystemPrompt(): string;
   abort(): void;
 };
@@ -79,21 +81,28 @@ function hasExactKeys(value: Record<string, unknown>, keys: readonly string[]): 
   return actual.length === expected.length && actual.every((key, index) => key === expected[index]);
 }
 
+function isEligibleIdentity(provider: unknown, api: unknown): api is RemoteCompactionApi {
+  return (
+    api === "openai-responses" || (provider === "openai-codex" && api === "openai-codex-responses")
+  );
+}
+
 function isEligibleModel(model: unknown): model is Model<any> {
-  return isRecord(model) && model.api === "openai-responses";
+  return isRecord(model) && isEligibleIdentity(model.provider, model.api);
 }
 
 function modelKey(model: Model<any>): RemoteCompactionModelKey | undefined {
+  const { provider, api, id } = model;
   if (
-    typeof model.provider !== "string" ||
-    !model.provider.trim() ||
-    typeof model.id !== "string" ||
-    !model.id.trim() ||
-    model.api !== "openai-responses"
+    typeof provider !== "string" ||
+    !provider.trim() ||
+    !isEligibleIdentity(provider, api) ||
+    typeof id !== "string" ||
+    !id.trim()
   ) {
     return undefined;
   }
-  return { provider: model.provider, api: "openai-responses", id: model.id };
+  return { provider, api, id };
 }
 
 function sameModelKey(
@@ -139,7 +148,7 @@ function decodeDetails(
     !hasExactKeys(remote.modelKey, ["provider", "api", "id"]) ||
     typeof remote.modelKey.provider !== "string" ||
     !remote.modelKey.provider.trim() ||
-    remote.modelKey.api !== "openai-responses" ||
+    !isEligibleIdentity(remote.modelKey.provider, remote.modelKey.api) ||
     typeof remote.modelKey.id !== "string" ||
     !remote.modelKey.id.trim() ||
     !Array.isArray(remote.replacementHistory) ||
@@ -151,7 +160,7 @@ function decodeDetails(
   return {
     modelKey: {
       provider: remote.modelKey.provider,
-      api: "openai-responses",
+      api: remote.modelKey.api,
       id: remote.modelKey.id,
     },
     replacementHistory: [remote.replacementHistory[0]],
@@ -477,6 +486,7 @@ export function installRemoteCompaction(pi: ExtensionAPI, attempt: RemoteCompact
       try {
         outcome = await attempt(request, {
           modelRegistry: context.modelRegistry,
+          sessionId: context.sessionManager.getSessionId(),
           signal: event.signal,
         });
       } catch (error) {

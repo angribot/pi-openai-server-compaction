@@ -34,7 +34,7 @@ function remoteDetails(
       version: 2,
       modelKey: {
         provider: model.provider,
-        api: "openai-responses",
+        api: model.api,
         id: model.id,
       },
       replacementHistory: [item],
@@ -100,7 +100,7 @@ const usage = {
   cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
 };
 
-test("attempts only exact openai-responses models and publishes one atomic first compaction", async () => {
+test("attempts only eligible API identities and publishes one atomic first compaction", async () => {
   const tools = [
     {
       name: "read",
@@ -113,7 +113,10 @@ test("attempts only exact openai-responses models and publishes one atomic first
       parameters: { type: "object" },
     },
   ] as unknown as ToolInfo[];
-  const recorded = recordingAttempt([accepted(firstCompactionItem, usage)]);
+  const recorded = recordingAttempt([
+    accepted(firstCompactionItem, usage),
+    accepted(firstCompactionItem, usage),
+  ]);
   const fixture = createRecordingPi({ tools, activeTools: ["read"] });
   installRemoteCompaction(fixture.pi, recorded.attempt);
   const branch = chainEntries([
@@ -163,6 +166,29 @@ test("attempts only exact openai-responses models and publishes one atomic first
   });
   assert.doesNotMatch(JSON.stringify(result), /compaction_trigger|SYSTEM-PROMPT|CUSTOM-GUIDANCE/);
 
+  const codexModel = responsesModel({
+    provider: "openai-codex",
+    api: "openai-codex-responses",
+    id: "gpt-codex",
+  });
+  const codexBranch = chainEntries([
+    messageEntry("codex-user", {
+      role: "user",
+      content: [{ type: "text", text: "CODEX-CONTEXT" }],
+      timestamp: 2,
+    }),
+  ]);
+  const codex = createHookContext({ branch: codexBranch, model: codexModel });
+  const codexResult = (await fixture.handlers.get("session_before_compact")?.(
+    compactionEvent(codexBranch),
+    codex.context,
+  )) as any;
+  assert.equal(recorded.requests.length, 2);
+  assert.equal(recorded.requests[1]?.model.provider, "openai-codex");
+  assert.equal(recorded.requests[1]?.model.api, "openai-codex-responses");
+  assert.equal(recorded.contexts[1]?.sessionId, "test-session");
+  assert.deepEqual(codexResult.compaction.details, remoteDetails(firstCompactionItem, codexModel));
+
   const ineligibleBranch = chainEntries([
     messageEntry("other", {
       role: "user",
@@ -172,7 +198,10 @@ test("attempts only exact openai-responses models and publishes one atomic first
   ]);
   const ineligible = createHookContext({
     branch: ineligibleBranch,
-    model: responsesModel({ api: "openai-responses-v2" }),
+    model: responsesModel({
+      provider: "third-party-codex",
+      api: "openai-codex-responses",
+    }),
   });
   assert.equal(
     await fixture.handlers.get("session_before_compact")?.(
@@ -181,7 +210,7 @@ test("attempts only exact openai-responses models and publishes one atomic first
     ),
     undefined,
   );
-  assert.equal(recorded.requests.length, 1);
+  assert.equal(recorded.requests.length, 2);
 });
 
 test("owns one immutable three-attempt retry budget and cancels terminal failures", async () => {
@@ -295,12 +324,17 @@ test("cancels preparation and abort races without leaking partial acceptance", a
   assert.equal(delayCalls, 1);
 });
 
-test("reconstructs latest v2 state and replaces one unique full-array replay span", () => {
-  const branch = checkpointBranch();
+test("reconstructs latest Codex v2 state and replaces one unique full-array replay span", () => {
+  const selectedModel = responsesModel({
+    provider: "openai-codex",
+    api: "openai-codex-responses",
+    id: "gpt-codex",
+  });
+  const branch = checkpointBranch({ details: remoteDetails(firstCompactionItem, selectedModel) });
   const fixture = installed();
   const { context, abortCalls } = createHookContext({
     branch,
-    model: responsesModel({ baseUrl: "https://different-route.example/v1" }),
+    model: { ...selectedModel, baseUrl: "https://different-route.example" },
   });
   const before = { type: "provider_context", value: "BEFORE" };
   const after = { type: "provider_context", value: "AFTER" };

@@ -19,6 +19,7 @@ const checkpointMarker =
 const paddingBeyondDefaultRetainedSuffix = "remote-compaction-live-context ".repeat(5_000);
 
 type JsonRecord = Record<string, unknown>;
+type RemoteCompactionModelKey = { provider: string; api: string; id: string };
 type Pending = {
   resolve(value: JsonRecord): void;
   reject(error: Error): void;
@@ -53,7 +54,10 @@ function assistantText(messages: unknown[]): string {
   return "";
 }
 
-function validateRemoteCompaction(value: unknown): JsonRecord {
+function validateRemoteCompaction(
+  value: unknown,
+  expectedModelKey: RemoteCompactionModelKey,
+): JsonRecord {
   const details = asRecord(value, "compaction details");
   assert.deepEqual(Object.keys(details), ["remoteCompaction"]);
   const remote = asRecord(details.remoteCompaction, "details.remoteCompaction");
@@ -62,9 +66,7 @@ function validateRemoteCompaction(value: unknown): JsonRecord {
 
   const modelKey = asRecord(remote.modelKey, "remoteCompaction.modelKey");
   assert.deepEqual(Object.keys(modelKey).sort(), ["api", "id", "provider"]);
-  assert.equal(modelKey.api, "openai-responses");
-  assert.ok(typeof modelKey.provider === "string" && modelKey.provider.length > 0);
-  assert.ok(typeof modelKey.id === "string" && modelKey.id.length > 0);
+  assert.deepEqual(modelKey, expectedModelKey);
 
   assert.ok(Array.isArray(remote.replacementHistory));
   assert.equal(remote.replacementHistory.length, 1);
@@ -197,6 +199,20 @@ class PiRpcClient {
     return data.messages;
   }
 
+  async modelKey(): Promise<RemoteCompactionModelKey> {
+    const state = asRecord((await this.send({ type: "get_state" }, 30_000)).data, "state");
+    const selected = asRecord(state.model, "state.model");
+    const provider = asString(selected.provider, "state.model.provider");
+    const api = asString(selected.api, "state.model.api");
+    const id = asString(selected.id, "state.model.id");
+    assert.ok(
+      api === "openai-responses" ||
+        (provider === "openai-codex" && api === "openai-codex-responses"),
+      `selected model is not eligible: ${provider}/${api}/${id}`,
+    );
+    return { provider, api, id };
+  }
+
   async sessionFile(): Promise<string> {
     const state = asRecord((await this.send({ type: "get_state" }, 30_000)).data, "state");
     return asString(state.sessionFile, "state.sessionFile");
@@ -237,11 +253,13 @@ test(
     const secondSecret = `SECOND-${randomBytes(8).toString("hex").toUpperCase()}`;
     let sessionFile = "";
     let secondDetails: unknown;
+    let expectedModelKey: RemoteCompactionModelKey;
 
     try {
       const client = new PiRpcClient(sessionDir);
       try {
         await client.waitIdle();
+        expectedModelKey = await client.modelKey();
         await client.prompt(
           `Remember this unpredictable first secret for later: ${firstSecret}. Reply only with MEMORIZED-FIRST.`,
         );
@@ -249,7 +267,7 @@ test(
 
         const first = await client.compact();
         assert.equal(first.summary, checkpointMarker);
-        const firstRemote = validateRemoteCompaction(first.details);
+        const firstRemote = validateRemoteCompaction(first.details, expectedModelKey);
         const firstVisible = JSON.stringify({
           ...firstRemote,
           replacementHistory: (firstRemote.replacementHistory as JsonRecord[]).map((item) => ({
@@ -268,7 +286,7 @@ test(
         await client.prompt(`${paddingBeyondDefaultRetainedSuffix}\nReply only with READY-SECOND.`);
         const second = await client.compact();
         assert.equal(second.summary, checkpointMarker);
-        validateRemoteCompaction(second.details);
+        validateRemoteCompaction(second.details, expectedModelKey);
         secondDetails = second.details;
         sessionFile = await client.sessionFile();
 
@@ -279,7 +297,7 @@ test(
         assert.ok(sameProcessLatest);
         assert.equal(sameProcessLatest.summary, checkpointMarker);
         assert.deepEqual(sameProcessLatest.details, secondDetails);
-        validateRemoteCompaction(sameProcessLatest.details);
+        validateRemoteCompaction(sameProcessLatest.details, expectedModelKey);
       } finally {
         await client.close();
       }
@@ -303,7 +321,7 @@ test(
       const latest = compactions.at(-1)!;
       assert.equal(latest.summary, checkpointMarker);
       assert.deepEqual(latest.details, secondDetails);
-      validateRemoteCompaction(latest.details);
+      validateRemoteCompaction(latest.details, expectedModelKey);
 
       await rm(artifacts, { recursive: true, force: true });
     } catch (error) {

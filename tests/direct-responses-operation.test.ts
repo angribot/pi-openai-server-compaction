@@ -1,9 +1,11 @@
 import assert from "node:assert/strict";
 import { mock, test } from "node:test";
-import type { Model } from "@earendil-works/pi-ai";
+import type { AssistantMessage, Model } from "@earendil-works/pi-ai";
+import { attemptCodexResponsesOperation } from "../src/codex-responses-operation.ts";
 import { attemptDirectResponsesOperation } from "../src/direct-responses-operation.ts";
 import {
   validateRemoteCompactionResponse,
+  type RemoteCompactionAttemptContext,
   type RemoteCompactionAttemptOutcome,
   type RemoteCompactionRequest,
 } from "../src/remote-compaction-operation.ts";
@@ -22,6 +24,16 @@ function model(overrides: Partial<Model<any>> = {}): Model<any> {
     maxTokens: 4_096,
     ...overrides,
   };
+}
+
+function codexModel(overrides: Partial<Model<any>> = {}): Model<any> {
+  return model({
+    provider: "openai-codex",
+    api: "openai-codex-responses",
+    id: "gpt-codex",
+    baseUrl: "https://chatgpt.com/backend-api",
+    ...overrides,
+  });
 }
 
 function request(selectedModel = model()): RemoteCompactionRequest {
@@ -47,14 +59,55 @@ function request(selectedModel = model()): RemoteCompactionRequest {
 function context(
   signal: AbortSignal = new AbortController().signal,
   auth: Record<string, unknown> = { ok: true, apiKey: "sk-default" },
-) {
+): RemoteCompactionAttemptContext {
   return {
     signal,
+    sessionId: "test-session",
     modelRegistry: {
       async getApiKeyAndHeaders() {
         return auth as any;
       },
+      async complete() {
+        throw new Error("complete must not be called by the direct adapter");
+      },
     },
+  };
+}
+
+function codexContext(
+  complete: RemoteCompactionAttemptContext["modelRegistry"]["complete"],
+  signal: AbortSignal = new AbortController().signal,
+): RemoteCompactionAttemptContext {
+  return {
+    signal,
+    sessionId: "codex-session",
+    modelRegistry: {
+      async getApiKeyAndHeaders() {
+        throw new Error("getApiKeyAndHeaders must not be called by the Codex adapter");
+      },
+      complete,
+    },
+  };
+}
+
+function providerCompletion(overrides: Partial<AssistantMessage> = {}): AssistantMessage {
+  return {
+    role: "assistant",
+    content: [],
+    api: "openai-codex-responses",
+    provider: "openai-codex",
+    model: "gpt-codex",
+    usage: {
+      input: 0,
+      output: 0,
+      cacheRead: 0,
+      cacheWrite: 0,
+      totalTokens: 0,
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+    },
+    stopReason: "stop",
+    timestamp: 1,
+    ...overrides,
   };
 }
 
@@ -105,6 +158,167 @@ function assertOutcome(
 ): void {
   assert.equal(outcome.kind, kind, outcome.kind === "accepted" ? undefined : outcome.error.message);
 }
+
+test("runs built-in Codex through Pi while owning only the compaction payload", async () => {
+  const selectedModel = codexModel();
+  const compactionRequest = request(selectedModel);
+  const providerPayload = {
+    model: "provider-model",
+    input: [{ role: "user", content: "provider input" }],
+    instructions: "provider instructions",
+    tools: [{ type: "function", name: "provider-tool" }],
+    store: true,
+    stream: false,
+    messages: ["legacy"],
+    previous_response_id: "resp-old",
+    text: { verbosity: "low" },
+    include: ["reasoning.encrypted_content"],
+    prompt_cache_key: "provider-cache-key",
+    tool_choice: "auto",
+    parallel_tool_calls: true,
+    future_provider_field: { preserved: true },
+  };
+  let operationOptions: Record<string, any> | undefined;
+  let patchedPayload: unknown;
+  let forwardedInput: RequestInfo | URL | undefined;
+  let forwardedInit: RequestInit | undefined;
+  const signal = new AbortController().signal;
+
+  await withFetch(
+    async (input, init) => {
+      forwardedInput = input;
+      forwardedInit = init;
+      return streamResponse([
+        sse({
+          type: "response.output_item.done",
+          item: { type: "compaction", id: "cmp-codex", encrypted_content: "opaque-codex" },
+        }),
+        sse({ type: "response.done", response: { status: "completed" } }),
+      ]);
+    },
+    async () => {
+      const outcome = await attemptCodexResponsesOperation(
+        compactionRequest,
+        codexContext(async (selected, _providerContext, options) => {
+          assert.equal(selected, compactionRequest.model);
+          operationOptions = options as Record<string, any>;
+          patchedPayload = await options?.onPayload?.(providerPayload, selected);
+          const response = await options?.fetch?.(
+            "https://provider-owned.example/codex/responses",
+            {
+              method: "POST",
+              headers: { "x-provider-owned": "yes" },
+              body: "provider-owned-body",
+              signal: options.signal,
+            },
+          );
+          assert.ok(response);
+          await response.text();
+          return providerCompletion();
+        }, signal),
+      );
+      assert.equal(outcome.kind, "accepted");
+      if (outcome.kind === "accepted") {
+        assert.deepEqual(outcome.item, {
+          type: "compaction",
+          id: "cmp-codex",
+          encrypted_content: "opaque-codex",
+        });
+      }
+    },
+  );
+
+  assert.equal(operationOptions?.transport, "sse");
+  assert.equal(operationOptions?.maxRetries, 0);
+  assert.equal(operationOptions?.sessionId, "codex-session");
+  assert.equal(operationOptions?.signal, signal);
+  assert.deepEqual(patchedPayload, {
+    model: "gpt-codex",
+    input: compactionRequest.input,
+    instructions: "system instructions",
+    tools: compactionRequest.tools,
+    store: false,
+    stream: true,
+    text: { verbosity: "low" },
+    include: ["reasoning.encrypted_content"],
+    prompt_cache_key: "provider-cache-key",
+    tool_choice: "auto",
+    parallel_tool_calls: true,
+    future_provider_field: { preserved: true },
+  });
+  assert.equal(String(forwardedInput), "https://provider-owned.example/codex/responses");
+  assert.equal(forwardedInit?.body, "provider-owned-body");
+  assert.equal(new Headers(forwardedInit?.headers).get("x-provider-owned"), "yes");
+});
+
+test("requires Codex provider completion and raw capture to agree", async () => {
+  const selectedModel = codexModel();
+
+  await withFetch(
+    async () =>
+      streamResponse([
+        sse({
+          type: "response.output_item.done",
+          item: { type: "compaction", encrypted_content: "opaque" },
+        }),
+        sse({ type: "response.completed", response: {} }),
+      ]),
+    async () => {
+      const outcome = await attemptCodexResponsesOperation(
+        request(selectedModel),
+        codexContext(async (selected, _providerContext, options) => {
+          const response = await options?.fetch?.("https://provider.example/codex/responses");
+          assert.ok(response);
+          await response.text();
+          return providerCompletion({ stopReason: "error", errorMessage: "provider rejected" });
+        }),
+      );
+      assertOutcome(outcome, "terminal");
+    },
+  );
+
+  const uncaptured = await attemptCodexResponsesOperation(
+    request(selectedModel),
+    codexContext(async () => providerCompletion()),
+  );
+  assertOutcome(uncaptured, "terminal");
+});
+
+test("leaves Codex network retry to the shared budget and stops before work on abort", async () => {
+  const selectedModel = codexModel();
+  await withFetch(
+    async () => {
+      throw new TypeError("connection reset");
+    },
+    async () => {
+      const outcome = await attemptCodexResponsesOperation(
+        request(selectedModel),
+        codexContext(async (selected, _providerContext, options) => {
+          try {
+            await options?.fetch?.("https://provider.example/codex/responses");
+          } catch {
+            return providerCompletion({ stopReason: "error", errorMessage: "connection reset" });
+          }
+          throw new Error("expected fetch to fail");
+        }),
+      );
+      assertOutcome(outcome, "retryable");
+    },
+  );
+
+  const controller = new AbortController();
+  controller.abort();
+  let completeCalls = 0;
+  const outcome = await attemptCodexResponsesOperation(
+    request(selectedModel),
+    codexContext(async () => {
+      completeCalls++;
+      return providerCompletion();
+    }, controller.signal),
+  );
+  assertOutcome(outcome, "terminal");
+  assert.equal(completeCalls, 0);
+});
 
 test("resolves routing and header precedence and sends the minimal HTTP/SSE body once", async () => {
   const selectedModel = model({
