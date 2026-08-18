@@ -1,11 +1,13 @@
 import assert from "node:assert/strict";
 import { mock, test } from "node:test";
 import type { Model } from "@earendil-works/pi-ai";
+import type { ModelRegistry } from "@earendil-works/pi-coding-agent";
+import { attemptDirectResponsesOperation } from "../src/direct-responses-operation.ts";
 import {
-  attemptDirectResponsesOperation,
-  type DirectResponsesAttemptOutcome,
+  validateRemoteCompactionResponse,
+  type RemoteCompactionAttemptOutcome,
   type RemoteCompactionRequest,
-} from "../src/direct-responses-operation.ts";
+} from "../src/remote-compaction-operation.ts";
 
 function model(overrides: Partial<Model<any>> = {}): Model<any> {
   return {
@@ -53,7 +55,7 @@ function context(
       async getApiKeyAndHeaders() {
         return auth as any;
       },
-    },
+    } as unknown as ModelRegistry,
   };
 }
 
@@ -99,8 +101,8 @@ async function withFetch(
 }
 
 function assertOutcome(
-  outcome: DirectResponsesAttemptOutcome,
-  kind: DirectResponsesAttemptOutcome["kind"],
+  outcome: RemoteCompactionAttemptOutcome,
+  kind: RemoteCompactionAttemptOutcome["kind"],
 ): void {
   assert.equal(outcome.kind, kind, outcome.kind === "accepted" ? undefined : outcome.error.message);
 }
@@ -177,7 +179,7 @@ test("resolves routing and header precedence and sends the minimal HTTP/SSE body
   });
 });
 
-test("accepts split CRLF SSE at explicit completion without waiting for close", async () => {
+test("validates captured split CRLF SSE at explicit completion without waiting for close", async () => {
   const item = {
     type: "compaction",
     id: "cmp_1",
@@ -203,29 +205,28 @@ test("accepts split CRLF SSE at explicit completion without waiting for close", 
   ].join("");
   const chunks = [wire.slice(0, 7), wire.slice(7, 39), wire.slice(39, 113), wire.slice(113)];
 
-  await withFetch(
-    async () => openStreamResponse(chunks),
-    async () => {
-      const outcome = await attemptDirectResponsesOperation(request(), context());
-      assert.equal(outcome.kind, "accepted");
-      if (outcome.kind !== "accepted") return;
-      assert.deepEqual(outcome.item, item);
-      assert.deepEqual(outcome.usage, {
-        input: 8,
-        output: 4,
-        cacheRead: 2,
-        cacheWrite: 0,
-        totalTokens: 14,
-        cost: {
-          input: 0.000008,
-          output: 0.000008,
-          cacheRead: 0.000001,
-          cacheWrite: 0,
-          total: 0.000017,
-        },
-      });
-    },
+  const outcome = await validateRemoteCompactionResponse(
+    request(),
+    openStreamResponse(chunks),
+    new AbortController().signal,
   );
+  assert.equal(outcome.kind, "accepted");
+  if (outcome.kind !== "accepted") return;
+  assert.deepEqual(outcome.item, item);
+  assert.deepEqual(outcome.usage, {
+    input: 8,
+    output: 4,
+    cacheRead: 2,
+    cacheWrite: 0,
+    totalTokens: 14,
+    cost: {
+      input: 0.000008,
+      output: 0.000008,
+      cacheRead: 0.000001,
+      cacheWrite: 0,
+      total: 0.000017,
+    },
+  });
 });
 
 test("requires response.completed and classifies pre-completion stream failures as retryable", async () => {
