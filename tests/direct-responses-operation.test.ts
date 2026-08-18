@@ -191,6 +191,7 @@ test("accepts split CRLF SSE at explicit completion without waiting for close", 
     sse({
       type: "response.completed",
       response: {
+        output: [],
         usage: {
           input_tokens: 10,
           output_tokens: 4,

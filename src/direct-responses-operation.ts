@@ -373,16 +373,17 @@ function completedResult(
   signal: AbortSignal,
 ): DirectResponsesAttemptOutcome {
   const response = isRecord(completedEvent.response) ? completedEvent.response : {};
-  const observedItems = events.flatMap((event) => {
-    if (!isRecord(event) || event.type !== "response.output_item.done" || !isRecord(event.item)) {
+  const compactionItems = events.flatMap((event) => {
+    if (
+      !isRecord(event) ||
+      event.type !== "response.output_item.done" ||
+      !isRecord(event.item) ||
+      event.item.type !== "compaction"
+    ) {
       return [];
     }
     return [event.item];
   });
-  const outputItems = Array.isArray(response.output)
-    ? response.output.filter(isRecord)
-    : observedItems;
-  const compactionItems = outputItems.filter((item) => item.type === "compaction");
   if (compactionItems.length !== 1) {
     return terminal(`completed response contained ${compactionItems.length} compaction items`);
   }

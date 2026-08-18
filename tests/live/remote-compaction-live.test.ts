@@ -15,7 +15,8 @@ const extensionPath = join(repoRoot, "index.ts");
 const checkpointMarker =
   "[Remote Responses compaction checkpoint]\n\n" +
   "Detailed context before this checkpoint is retained in the native replay artifact and is available only to compatible Responses models.";
-const padding = "remote-compaction-live-context ".repeat(1_200);
+// Pi estimates text at four chars per token; this exceeds its default 20K retained suffix.
+const paddingBeyondDefaultRetainedSuffix = "remote-compaction-live-context ".repeat(5_000);
 
 type JsonRecord = Record<string, unknown>;
 type Pending = {
@@ -244,7 +245,7 @@ test(
         await client.prompt(
           `Remember this unpredictable first secret for later: ${firstSecret}. Reply only with MEMORIZED-FIRST.`,
         );
-        await client.prompt(`${padding}\nReply only with READY-FIRST.`);
+        await client.prompt(`${paddingBeyondDefaultRetainedSuffix}\nReply only with READY-FIRST.`);
 
         const first = await client.compact();
         assert.equal(first.summary, checkpointMarker);
@@ -264,7 +265,7 @@ test(
         await client.prompt(
           `Remember this unpredictable second secret too: ${secondSecret}. Reply only with MEMORIZED-SECOND.`,
         );
-        await client.prompt(`${padding}\nReply only with READY-SECOND.`);
+        await client.prompt(`${paddingBeyondDefaultRetainedSuffix}\nReply only with READY-SECOND.`);
         const second = await client.compact();
         assert.equal(second.summary, checkpointMarker);
         validateRemoteCompaction(second.details);
