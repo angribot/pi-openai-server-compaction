@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
 import { mock, test } from "node:test";
 import type { Model } from "@earendil-works/pi-ai";
-import type { ModelRegistry } from "@earendil-works/pi-coding-agent";
 import { attemptDirectResponsesOperation } from "../src/direct-responses-operation.ts";
 import {
   validateRemoteCompactionResponse,
@@ -55,7 +54,7 @@ function context(
       async getApiKeyAndHeaders() {
         return auth as any;
       },
-    } as unknown as ModelRegistry,
+    },
   };
 }
 

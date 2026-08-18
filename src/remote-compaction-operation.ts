@@ -16,7 +16,7 @@ export type RemoteCompactionRequest = Readonly<{
 }>;
 
 export type RemoteCompactionAttemptContext = Readonly<{
-  modelRegistry: ModelRegistry;
+  modelRegistry: Pick<ModelRegistry, "getApiKeyAndHeaders">;
   signal: AbortSignal;
 }>;
 
@@ -105,6 +105,25 @@ function retryable(message: string, retryAfterMs?: number): RemoteCompactionAtte
 
 function isAbort(error: unknown, signal: AbortSignal): boolean {
   return signal.aborted || (error instanceof Error && error.name === "AbortError");
+}
+
+export function remoteCompactionFailureOutcome(
+  kind: "retryable" | "terminal",
+  error: unknown,
+  fallback: string,
+  signal: AbortSignal,
+  retryAfterMs?: number,
+): RemoteCompactionAttemptOutcome {
+  if (isAbort(error, signal)) return { kind: "terminal", error: abortError(signal) };
+  const failure = outcomeError(errorMessage(error, fallback));
+  if (kind === "retryable") {
+    return {
+      kind,
+      error: failure,
+      ...(retryAfterMs === undefined ? {} : { retryAfterMs }),
+    };
+  }
+  return { kind, error: failure };
 }
 
 function parseRetryAfter(value: string | null, now = Date.now()): number | undefined {

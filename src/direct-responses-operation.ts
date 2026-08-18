@@ -1,47 +1,10 @@
 import type { Model, ProviderHeaders } from "@earendil-works/pi-ai";
 import {
+  remoteCompactionFailureOutcome,
   validateRemoteCompactionResponse,
   type RemoteCompactionAttempt,
-  type RemoteCompactionAttemptOutcome,
   type RemoteCompactionRequest,
 } from "./remote-compaction-operation.ts";
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-function errorMessage(value: unknown, fallback: string): string {
-  if (isRecord(value) && typeof value.message === "string" && value.message) {
-    return value.message;
-  }
-  return fallback;
-}
-
-function outcomeError(message: string): Error {
-  return new Error(`Remote compaction v2: ${message}`);
-}
-
-function abortError(signal: AbortSignal): Error {
-  return signal.reason instanceof Error
-    ? signal.reason
-    : new DOMException("This operation was aborted", "AbortError");
-}
-
-function terminal(message: string): RemoteCompactionAttemptOutcome {
-  return { kind: "terminal", error: outcomeError(message) };
-}
-
-function retryable(message: string): RemoteCompactionAttemptOutcome {
-  return { kind: "retryable", error: outcomeError(message) };
-}
-
-function isAbort(error: unknown, signal: AbortSignal): boolean {
-  return signal.aborted || (error instanceof Error && error.name === "AbortError");
-}
-
-function throwIfAborted(signal: AbortSignal): void {
-  if (signal.aborted) throw abortError(signal);
-}
 
 function deleteHeader(headers: Record<string, string>, name: string): void {
   const expected = name.toLowerCase();
@@ -118,26 +81,38 @@ export const attemptDirectResponsesOperation: RemoteCompactionAttempt = async (
   context,
 ) => {
   const { signal } = context;
-  if (signal.aborted) return { kind: "terminal", error: abortError(signal) };
+  if (signal.aborted) {
+    return remoteCompactionFailureOutcome("terminal", signal.reason, "request was aborted", signal);
+  }
 
   let auth: Awaited<ReturnType<typeof context.modelRegistry.getApiKeyAndHeaders>>;
   try {
-    throwIfAborted(signal);
     auth = await context.modelRegistry.getApiKeyAndHeaders(request.model);
-    throwIfAborted(signal);
   } catch (error) {
-    if (isAbort(error, signal)) {
-      return { kind: "terminal", error: abortError(signal) };
-    }
-    return terminal(errorMessage(error, "authentication resolution failed"));
+    return remoteCompactionFailureOutcome(
+      "terminal",
+      error,
+      "authentication resolution failed",
+      signal,
+    );
   }
-  if (!auth.ok) return terminal(auth.error);
+  if (signal.aborted) {
+    return remoteCompactionFailureOutcome("terminal", signal.reason, "request was aborted", signal);
+  }
+  if (!auth.ok) {
+    return remoteCompactionFailureOutcome("terminal", undefined, auth.error, signal);
+  }
 
   let body: string;
   try {
     body = JSON.stringify(requestBody(request));
   } catch (error) {
-    return terminal(errorMessage(error, "request serialization failed"));
+    return remoteCompactionFailureOutcome(
+      "terminal",
+      error,
+      "request serialization failed",
+      signal,
+    );
   }
 
   let response: Response;
@@ -149,10 +124,7 @@ export const attemptDirectResponsesOperation: RemoteCompactionAttempt = async (
       signal,
     });
   } catch (error) {
-    if (isAbort(error, signal)) {
-      return { kind: "terminal", error: abortError(signal) };
-    }
-    return retryable(errorMessage(error, "network request failed"));
+    return remoteCompactionFailureOutcome("retryable", error, "network request failed", signal);
   }
 
   return validateRemoteCompactionResponse(request, response, signal);
