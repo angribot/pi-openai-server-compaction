@@ -5,12 +5,14 @@ This changelog intentionally starts at **0.1.0**.
 ## Unreleased
 
 ## 0.8.0 - 2026-08-18
+
 - accept streamed Remote compaction items when the completed Responses envelope reports an empty output array, avoiding false `0 compaction items` cancellation
 - break compatibility with pre-refactor Remote compaction v1 and v2 checkpoints by accepting only the structured v2 model key and one-item replacement history; affected sessions now fail closed and must restart or return before the checkpoint
 - rebuild Remote compaction around Pi 0.84.2 persisted compactable context, atomic cancellation, one shared three-attempt maximum, and fail-closed native replay without lossy context fitting
 - require the Pi 0.84.2 development baseline and replace the smoke/live commands with focused offline tests and one credentialed linear, repeated-compaction, and reload scenario
 
 ## 0.7.0 - 2026-08-18
+
 - align deterministic long assistant item IDs and ordinary tool-call fields with Pi 0.84 Responses conversion while documenting that grammar/custom tools and deferred tool search remain unavailable at Pi's public compaction seam
 - preserve trailing current-user and extension-added context across repeated remote compaction before an assistant response from a compatible model exists
 - preserve current-turn and extension-added provider items during native replay by replacing only the exact replay replacement span, leaving unmatched inputs unchanged with a warning
@@ -22,21 +24,25 @@ This changelog intentionally starts at **0.1.0**.
 - load through Pi 0.84's production extension resolver without importing an unsupported runtime subpath
 
 ## 0.6.0 - 2026-08-06
+
 - support Pi 0.84 request auth for remote compaction, including null header deletion and credential-resolved Responses endpoints
 - forward the observed `service_tier` for the same model key while keeping arbitrary sampling parameters out of remote compaction requests
 
 ## 0.5.0 - 2026-08-01
+
 - align retained user-message replay with Codex's current 64K approximate-token budget
 - retry transient Responses compaction v2 failures twice with abortable Codex-style backoff and incremental SSE validation
 - cancel failed remote compaction instead of falling back to Pi's text compactor, preserving native replay semantics
 
 ## 0.4.0 - 2026-07-31
+
 - run only the remote Responses compaction request on the successful path instead of concurrently generating a second local summary
 - persist a fixed native replay checkpoint marker: `[Remote Responses compaction checkpoint]` plus its compatibility note
 - return control to Pi's default compaction on remote failure and preserve explicit cancellation on abort, including while credentials are resolving
 - update the compaction contract, validation plan, and architecture docs for native-continuity-first behavior
 
 ## 0.3.0 - 2026-07-31
+
 - enable remote compaction by exact `model.api === "openai-responses"` instead of provider name or endpoint classification
 - support custom providers and relays through their configured Responses base URL
 - stop registering or overriding providers; replay remote replacement history through `before_provider_request`
@@ -49,6 +55,7 @@ This changelog intentionally starts at **0.1.0**.
 - document the current raw transport capability gap: the compaction RPC remains HTTP/SSE until Pi exposes a provider-aware raw transport seam
 
 ## 0.2.0 - 2026-07-31
+
 - target Pi 0.83.0 and the `@earendil-works/*` package namespace while leaving Pi peer dependencies unpinned
 - align compaction fallback, Responses payload normalization, Codex identity headers, and WebSocket behavior with Pi 0.83.0
 - replace the legacy `/responses/compact` call with Codex's current Responses compaction v2 protocol
@@ -61,6 +68,7 @@ This changelog intentionally starts at **0.1.0**.
 During local development on 2026-04-09, the project used temporary internal version bumps while features, tests, docs, and packaging were being assembled. Those local-only bumps were collapsed before the first public push so the repository does not imply a longer tracked public release history than it actually has.
 
 ## 0.1.0 - 2026-04-09
+
 - initial public release
 - added hybrid Codex-style remote compaction for direct OpenAI Responses models
 - added OpenAI `POST /v1/responses/compact` integration
