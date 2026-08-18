@@ -59,7 +59,13 @@ export type ResponseItem =
       content?: Array<{ type: "reasoning_text" | "text"; text: string }>;
       encrypted_content: string | null;
     }
-  | { type: "function_call"; name: string; arguments: string; call_id: string }
+  | {
+      type: "function_call";
+      id?: string;
+      name: string;
+      arguments: string;
+      call_id: string;
+    }
   | { type: "function_call_output"; call_id: string; output: string | ToolResultOutputItem[] }
   | { type: "compaction"; encrypted_content: string }
   | { type: "compaction_summary"; encrypted_content: string }
@@ -537,7 +543,12 @@ export function messageToResponseItems(
           ? undefined
           : fallbackAssistantMessageId(messageIndex, textBlockIndex);
         textBlockIndex++;
-        const id = signature?.id && signature.id.length <= 64 ? signature.id : fallbackId;
+        let id = signature?.id;
+        if (!id) {
+          id = fallbackId;
+        } else if (id.length > 64) {
+          id = `msg_${shortHash(id)}`;
+        }
         items.push({
           type: "message",
           ...(id ? { id } : {}),
@@ -557,14 +568,12 @@ export function messageToResponseItems(
 
       const [callId, itemId] = block.id.split("|");
       const responseItemId = !differentModel && itemId?.startsWith("fc_") ? itemId : undefined;
-      const namespace = (block as typeof block & { namespace?: unknown }).namespace;
       items.push({
         type: "function_call",
         ...(responseItemId ? { id: responseItemId } : {}),
         name: block.name,
         call_id: callId,
         arguments: JSON.stringify(block.arguments ?? {}),
-        ...(sameModel && typeof namespace === "string" ? { namespace } : {}),
       });
     }
 

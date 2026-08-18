@@ -60,6 +60,10 @@ Arbitrary sampling parameters are not merged into remote compaction. Values for 
 
 Before sending, the extension estimates the complete remote-compaction request against the selected model's context window using Pi's coarse character-based accounting. Requests already within budget are left unchanged. For an oversized request, old function and tool outputs are reduced first; if more space is needed, the oldest remaining history is discarded as complete call/output pairs and a boundary text message may be retained with content from both its beginning and end around an explicit truncation marker.
 
+### Current Responses conversion limits
+
+Pi 0.84's public extension surface does not expose the ordinary Responses converter's grammar-tool input-property map or deferred-tool map at the compaction seam. The extension can therefore align deterministic assistant items and ordinary function calls, but it cannot safely reconstruct grammar-backed `custom_tool_call` / `custom_tool_call_output` items or synthesize deferred `tool_search_call` / `tool_search_output` items. At this seam, grammar-backed calls fall back to ordinary `function_call` / `function_call_output` items and deferred tool-search events are omitted; the extension does not import Pi internals to bridge this capability gap.
+
 ## Native replay semantics
 
 The package maintains:
