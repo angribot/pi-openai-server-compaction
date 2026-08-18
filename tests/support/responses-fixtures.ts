@@ -1,9 +1,9 @@
 import type {
   CompactionItem,
-  DirectResponsesAttempt,
-  DirectResponsesAttemptOutcome,
+  RemoteCompactionAttempt,
+  RemoteCompactionAttemptOutcome,
   RemoteCompactionRequest,
-} from "../../src/direct-responses-operation.ts";
+} from "../../src/remote-compaction-operation.ts";
 
 export const firstCompactionItem: CompactionItem = {
   type: "compaction",
@@ -20,27 +20,27 @@ export const secondCompactionItem: CompactionItem = {
 
 export function accepted(
   item: CompactionItem = firstCompactionItem,
-  usage?: Extract<DirectResponsesAttemptOutcome, { kind: "accepted" }>["usage"],
-): DirectResponsesAttemptOutcome {
+  usage?: Extract<RemoteCompactionAttemptOutcome, { kind: "accepted" }>["usage"],
+): RemoteCompactionAttemptOutcome {
   return { kind: "accepted", item, ...(usage ? { usage } : {}) };
 }
 
-export function retryable(message = "transient", retryAfterMs = 0): DirectResponsesAttemptOutcome {
+export function retryable(message = "transient", retryAfterMs = 0): RemoteCompactionAttemptOutcome {
   return { kind: "retryable", error: new Error(message), retryAfterMs };
 }
 
-export function terminal(message = "terminal"): DirectResponsesAttemptOutcome {
+export function terminal(message = "terminal"): RemoteCompactionAttemptOutcome {
   return { kind: "terminal", error: new Error(message) };
 }
 
-export function recordingAttempt(outcomes: DirectResponsesAttemptOutcome[]): {
-  attempt: DirectResponsesAttempt;
+export function recordingAttempt(outcomes: RemoteCompactionAttemptOutcome[]): {
+  attempt: RemoteCompactionAttempt;
   requests: RemoteCompactionRequest[];
-  contexts: Parameters<DirectResponsesAttempt>[1][];
+  contexts: Parameters<RemoteCompactionAttempt>[1][];
 } {
   const requests: RemoteCompactionRequest[] = [];
-  const contexts: Parameters<DirectResponsesAttempt>[1][] = [];
-  const attempt: DirectResponsesAttempt = async (request, context) => {
+  const contexts: Parameters<RemoteCompactionAttempt>[1][] = [];
+  const attempt: RemoteCompactionAttempt = async (request, context) => {
     requests.push(request);
     contexts.push(context);
     const outcome = outcomes.shift();

@@ -4,10 +4,10 @@ import type { Model, Usage } from "@earendil-works/pi-ai";
 import { buildSessionContext, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import type {
   CompactionItem,
-  DirectResponsesAttempt,
-  DirectResponsesAttemptOutcome,
+  RemoteCompactionAttempt,
+  RemoteCompactionAttemptOutcome,
   RemoteCompactionRequest,
-} from "./direct-responses-operation.ts";
+} from "./remote-compaction-operation.ts";
 import {
   projectActiveFunctionTools,
   projectCompactableContext,
@@ -63,7 +63,7 @@ type HookContext = {
   model?: Model<any>;
   hasUI: boolean;
   ui: { notify(message: string, level: "info" | "warning" | "error"): void };
-  modelRegistry: Parameters<DirectResponsesAttempt>[1]["modelRegistry"];
+  modelRegistry: Parameters<RemoteCompactionAttempt>[1]["modelRegistry"];
   sessionManager: { getBranch(): BranchEntry[] };
   getSystemPrompt(): string;
   abort(): void;
@@ -316,7 +316,7 @@ function immutableRequest(request: RemoteCompactionRequest): RemoteCompactionReq
 }
 
 function retryDelay(
-  outcome: Extract<DirectResponsesAttemptOutcome, { kind: "retryable" }>,
+  outcome: Extract<RemoteCompactionAttemptOutcome, { kind: "retryable" }>,
   retry: number,
 ): number {
   if (typeof outcome.retryAfterMs === "number" && Number.isFinite(outcome.retryAfterMs)) {
@@ -388,7 +388,7 @@ function successResult(
     preparation: { firstKeptEntryId: string; tokensBefore: number };
   },
   key: RemoteCompactionModelKey,
-  accepted: Extract<DirectResponsesAttemptOutcome, { kind: "accepted" }>,
+  accepted: Extract<RemoteCompactionAttemptOutcome, { kind: "accepted" }>,
 ): {
   compaction: {
     summary: string;
@@ -415,7 +415,7 @@ function successResult(
   };
 }
 
-export function installRemoteCompaction(pi: ExtensionAPI, attempt: DirectResponsesAttempt): void {
+export function installRemoteCompaction(pi: ExtensionAPI, attempt: RemoteCompactionAttempt): void {
   pi.on("session_before_compact", async (event, rawContext) => {
     const context = rawContext as unknown as HookContext;
     const model = context.model;
@@ -473,7 +473,7 @@ export function installRemoteCompaction(pi: ExtensionAPI, attempt: DirectRespons
 
     for (let attemptIndex = 0; attemptIndex < MAX_ATTEMPTS; attemptIndex++) {
       if (event.signal.aborted) return { cancel: true };
-      let outcome: DirectResponsesAttemptOutcome;
+      let outcome: RemoteCompactionAttemptOutcome;
       try {
         outcome = await attempt(request, {
           modelRegistry: context.modelRegistry,
