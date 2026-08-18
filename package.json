@@ -2,43 +2,44 @@
   "name": "pi-openai-server-compaction",
   "version": "0.7.0",
   "private": true,
-  "type": "module",
-  "description": "Pi extension for OpenAI server-side compaction with Codex-quality continuity.",
+  "description": "Pi extension for OpenAI Responses Remote compaction with native replay.",
+  "keywords": [
+    "codex",
+    "compaction",
+    "openai",
+    "pi-extension",
+    "pi-package",
+    "responses"
+  ],
+  "homepage": "https://github.com/angribot/pi-openai-server-compaction#readme",
+  "bugs": {
+    "url": "https://github.com/angribot/pi-openai-server-compaction/issues"
+  },
   "license": "MIT",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/angribot/pi-openai-server-compaction.git"
   },
-  "homepage": "https://github.com/angribot/pi-openai-server-compaction#readme",
-  "bugs": {
-    "url": "https://github.com/angribot/pi-openai-server-compaction/issues"
-  },
-  "keywords": [
-    "pi-package",
-    "pi-extension",
-    "openai",
-    "responses",
-    "compaction",
-    "codex"
-  ],
-  "engines": {
-    "node": ">=22"
-  },
   "files": [
+    "index.ts",
     "src",
-    "tests",
     "README.md",
-    "ARCHITECTURE.md",
-    "TESTPLAN.md",
-    "VALIDATION.md",
-    "TODO.md",
     "CHANGELOG.md",
     "LICENSE.md"
   ],
-  "pi": {
-    "extensions": [
-      "./index.ts"
-    ]
+  "type": "module",
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test:offline": "node --experimental-strip-types --test ./tests/*.test.ts",
+    "test": "npm run typecheck && npm run test:offline",
+    "test:live": "node --experimental-strip-types --test ./tests/live/*-live.test.ts"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-agent-core": "0.84.2",
+    "@earendil-works/pi-ai": "0.84.2",
+    "@earendil-works/pi-coding-agent": "0.84.2",
+    "@types/node": "^24.10.0",
+    "typescript": "^5.9.3"
   },
   "peerDependencies": {
     "@earendil-works/pi-agent-core": "*",
@@ -56,17 +57,12 @@
       "optional": true
     }
   },
-  "scripts": {
-    "smoke": "node --experimental-strip-types ./tests/smoke.ts",
-    "typecheck": "tsc --noEmit",
-    "test": "npm run typecheck && npm run smoke",
-    "test:live": "node --experimental-strip-types ./tests/live/openai-compaction-rpc-live.ts"
+  "engines": {
+    "node": ">=22"
   },
-  "devDependencies": {
-    "@earendil-works/pi-agent-core": "0.84.0",
-    "@earendil-works/pi-ai": "0.84.0",
-    "@earendil-works/pi-coding-agent": "0.84.0",
-    "@types/node": "^24.10.0",
-    "typescript": "^5.9.3"
+  "pi": {
+    "extensions": [
+      "./index.ts"
+    ]
   }
 }
