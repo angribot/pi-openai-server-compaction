@@ -4,6 +4,11 @@ This changelog intentionally starts at **0.1.0**.
 
 ## Unreleased
 
+- accept streamed Remote compaction items when the completed Responses envelope reports an empty output array, avoiding false `0 compaction items` cancellation
+- break compatibility with pre-refactor Remote compaction v1 and v2 checkpoints by accepting only the structured v2 model key and one-item replacement history; affected sessions now fail closed and must restart or return before the checkpoint
+- rebuild Remote compaction around Pi 0.84.2 persisted compactable context, atomic cancellation, one shared three-attempt maximum, and fail-closed native replay without lossy context fitting
+- require the Pi 0.84.2 development baseline and replace the smoke/live commands with focused offline tests and one credentialed linear, repeated-compaction, and reload scenario
+
 ## 0.7.0 - 2026-08-18
 - align deterministic long assistant item IDs and ordinary tool-call fields with Pi 0.84 Responses conversion while documenting that grammar/custom tools and deferred tool search remain unavailable at Pi's public compaction seam
 - preserve trailing current-user and extension-added context across repeated remote compaction before an assistant response from a compatible model exists

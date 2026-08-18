@@ -1,3 +1,7 @@
 # Keep resolved endpoints out of model identity
 
-A credential-resolved endpoint may change where remote compaction is sent, but it does not change the model key used for persisted native replay compatibility. Keeping request routing separate preserves a stable provider/API/model identity and Pi 0.83-compatible session details; the trade-off is that different endpoints with the same model key are assumed to accept the same compaction item.
+Persisted native replay compatibility uses a structured model key containing provider, exact API type, and model ID. Credential-resolved endpoints and request headers are per-request routing data and do not participate in that identity.
+
+Separating identity from routing keeps persisted Remote compaction v2 state stable when credentials or endpoint resolution change. The direct operation may send a compaction request to a credential-resolved base URL while replay still compares exact structured provider/API/model identity.
+
+The trade-off remains that two routes sharing the same model key are assumed to accept the same opaque compaction item. The extension cannot prove endpoint-level compatibility without persisting routing data, which would couple session identity to credentials and deployment details.

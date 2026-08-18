@@ -1,77 +1,22 @@
 # pi-openai-server-compaction
 
-A provider-agnostic Pi extension that adds remote compaction to models using the plain `openai-responses` API.
+A Pi extension for OpenAI Responses Remote compaction with native replay.
 
-On a Pi compaction event, the extension sends the conversation to the model's Responses endpoint over HTTP/SSE with a trailing `compaction_trigger`. It persists the returned compaction item in replacement history with a checkpoint marker, then injects that history into later compatible requests. Those later ordinary requests remain transport-neutral.
+The extension targets Pi `0.84.2` and models whose API type is exactly, case-sensitively, `openai-responses`. Eligibility permits a Remote compaction attempt; actual endpoint capability is discovered from the result.
 
-> **Status:** experimental but live-tested. Install project-local first and keep rollback easy.
+> **Status:** experimental. Install project-local first and keep rollback easy.
 
-## Scope
+> **Breaking persisted-session change:** this refactor does not replay pre-refactor Remote compaction checkpoints. This includes Remote compaction v1 and v0.7.0 v2 details, whose string model key, old tags, duplicated usage, and possible explicit-item replacement history do not match the new exact v2 schema. If the active branch's latest compaction uses the fixed Remote compaction checkpoint marker but lacks valid new v2 details, eligible ordinary requests stop and further Remote compaction is cancelled; the extension does not resurrect an older checkpoint or send incomplete context. Before upgrading, start a new session or return to a point before the Remote compaction checkpoint. No in-place migration is provided.
 
-Remote compaction is enabled by API type, not provider name:
+## Requirements
 
-| Model API | Remote compaction |
-|---|---:|
-| `openai-responses` | Yes |
-| `openai-codex-responses` | No |
-| `azure-openai-responses` | No |
-| Other APIs | No |
+- Node `>=22`
+- Pi `0.84.2` as the implementation baseline
+- a selected model with exact API type `openai-responses`
+- working Pi-managed credentials for that model
+- a Responses endpoint that accepts the Remote compaction v2 trigger and can replay the returned compaction item
 
-Any provider can participate when its model uses `openai-responses` and its Responses endpoint supports the compaction protocol. The extension retries transient remote failures twice, then cancels compaction instead of falling back to Pi's text compactor. This preserves native replay semantics and prevents a compaction item from being irreversibly replaced by a text summary that cannot interpret it.
-
-See [ADR 0001](docs/adr/0001-select-models-by-api-contract.md) and [ADR 0002](docs/adr/0002-prefer-native-replay-continuity.md) for the eligibility and continuity decisions.
-
-## Independent transport composition
-
-This extension does not register or override providers. For ordinary post-compaction turns, it only rewrites the final `openai-responses` payload in `before_provider_request`; Pi's selected provider transport then sends that payload.
-
-The remote-compaction RPC itself currently calls the Responses endpoint directly over HTTP/SSE. Pi does not yet expose a provider-aware raw transport seam that preserves the opaque compaction event, so an independently configured WebSocket transport cannot transparently intercept that RPC without unsafe global patching or a private cross-extension protocol.
-
-Current behavior is therefore:
-
-1. remote-compaction RPC: HTTP/SSE;
-2. later ordinary request: replacement history injected by this extension;
-3. ordinary request transport: selected independently by the provider or a transport extension.
-
-The missing raw transport API and its constraints are tracked in [issue #8](https://github.com/angribot/pi-openai-server-compaction/issues/8). The ownership boundary is recorded in [ADR 0003](docs/adr/0003-keep-provider-transport-independent.md).
-
-## What it does
-
-On compaction, the extension:
-
-1. Calls the model's normal Responses endpoint with:
-   - the current explicit history;
-   - a trailing `{ "type": "compaction_trigger" }`;
-   - the current system prompt, optional custom compaction guidance, tools, reasoning configuration, compaction-safe text configuration, and allowlisted service tier.
-2. Requires a completed response containing exactly one valid compaction item.
-3. Stores a fixed `[Remote Responses compaction checkpoint]` marker in `CompactionEntry.summary`, retains recent user messages using Codex's current 64K approximate-token budget in `CompactionEntry.details.remoteCompaction`, and records the operation's usage in Pi's standard compaction usage field.
-4. Reconstructs replacement history after resume, tree navigation, forks, and later compactions.
-5. Replaces only the replay replacement span in later model-compatible `openai-responses` inputs, leaving current-turn and extension-added provider items in place.
-
-The extension intentionally does not add `store`, `context_management`, or `previous_response_id` to ordinary requests. Those are separate persistence, automatic-context-management, and continuation concerns.
-
-### Remote compaction request controls
-
-On ordinary requests, the extension preserves Pi's effective provider parameters while patching only the replay replacement span and stale continuation fields. It locates the unique span containing the serialized checkpoint marker and Pi-retained pre-compaction entries, replaces that span with replacement history, and leaves earlier or later provider items unchanged. This preserves system/developer context, current turns, and additions from other payload hooks without duplicating retained user messages. If the replay replacement span is missing or ambiguous, native replay is not injected, the original provider input is preserved, and a warning is emitted.
-
-The extension-owned remote compaction request instead uses an explicit allowlist: it carries a string `service_tier` only when the latest observed ordinary request for the same session and model key contained that value. Observed reasoning takes precedence over fallback inference; otherwise the selected model's thinking-level mapping is used. Compaction-safe text settings such as verbosity may be carried, while structured-output formats are excluded.
-
-Arbitrary sampling parameters are not merged into remote compaction. Values for `temperature`, `top_p`, unknown provider fields, and protocol-owned fields are not copied. The extension constructs the compaction model, input, tools, trigger, streaming mode, `store: false`, and encrypted-reasoning inclusion itself. If no matching `service_tier` was observed, the field is omitted and the endpoint default applies.
-
-Before sending, the extension estimates the complete remote-compaction request against the selected model's context window using Pi's coarse character-based accounting. Requests already within budget are left unchanged. For an oversized request, old function and tool outputs are reduced first; if more space is needed, the oldest remaining history is discarded as complete call/output pairs and a boundary text message may be retained with content from both its beginning and end around an explicit truncation marker.
-
-### Current Responses conversion limits
-
-Pi 0.84's public extension surface does not expose the ordinary Responses converter's grammar-tool input-property map or deferred-tool map at the compaction seam. The extension can therefore align deterministic assistant items and ordinary function calls, but it cannot safely reconstruct grammar-backed `custom_tool_call` / `custom_tool_call_output` items or synthesize deferred `tool_search_call` / `tool_search_output` items. At this seam, grammar-backed calls fall back to ordinary `function_call` / `function_call_output` items and deferred tool-search events are omitted; the extension does not import Pi internals to bridge this capability gap.
-
-## Native replay semantics
-
-The package maintains:
-
-- **Replacement history** — retained user items plus the compaction item, for compatible future Responses requests.
-- **Checkpoint marker** — a fixed two-line `CompactionEntry.summary` explaining that detailed context is retained in replacement history and requires a compatible model.
-
-The marker is intentionally not a second model-generated summary. A successful logical compaction may retry the same remote request after a transient transport or stream failure, but it never starts a separate summary request. Switching to an incompatible model may therefore lose access to detailed pre-compaction context. Pi's local session JSONL remains authoritative for persisted replacement history.
+The extension does not infer capability from provider names, model names, or endpoint hostnames. Custom providers and relays are eligible when their selected model uses the exact API contract.
 
 ## Install
 
@@ -87,89 +32,156 @@ Global:
 pi install git:github.com/angribot/pi-openai-server-compaction
 ```
 
-One-shot:
+One-shot from a checkout:
 
 ```bash
 git clone https://github.com/angribot/pi-openai-server-compaction.git
-cd pi-openai-server-compaction && npm install
-pi -e ./src/index.ts --model provider/model
+cd pi-openai-server-compaction
+npm install
+pi -e ./index.ts --model provider/model
 ```
 
-## Requirements
+## Remote compaction contract
 
-- Node `>= 22`
-- Pi with an `openai-responses` model
-- Working authentication for the selected provider
-- A Responses endpoint that accepts `compaction_trigger` and returns a `compaction` item
+On `session_before_compact`, an eligible model receives one immutable logical request containing only:
 
-## Behavior
+- the selected model;
+- Pi's persisted, compaction-aware active linear-session compactable context projected into ordinary Responses input;
+- the effective system instructions plus supplied custom compaction instructions;
+- currently active ordinary function tools, when present;
+- `store: false`; and
+- exactly one terminal, payload-free `{ "type": "compaction_trigger" }`.
 
-Remote compaction is always enabled for eligible models, and activation notifications are disabled. Pi itself decides when compaction occurs; this extension does not maintain a separate compaction threshold.
+The direct adapter adds `stream: true` as a transport detail. It does not carry ordinary-request reasoning, verbosity, service tier, prompt-cache, sampling, telemetry, Codex identity, client metadata, or explicit tool-choice settings. The extension performs no local token estimation, truncation, retained-history budgeting, tool-output rewriting, or other context fitting. Endpoint context overflow is terminal.
 
-## Data handling
+Success requires an explicit `response.completed` event and exactly one output item with `type: "compaction"` and string `encrypted_content`. Empty ciphertext is valid, an item `id` is optional, unknown item fields are preserved, and unrelated output items are ignored. Parseable usage is returned only through Pi's standard compaction usage field.
 
-- Compaction requests send conversation context to the configured Responses endpoint.
-- The remote compaction request uses `store: false`.
-- Returned compaction items are stored as replacement history in Pi's local session JSONL.
-- Persisted details are validated before reconstruction; legacy version 1 details remain readable, while new compactions write version 2.
-- Ordinary requests are changed only when matching replacement history needs replay and the replay replacement span can be identified exactly; otherwise their provider input is preserved.
-- Switching to an incompatible model does not replay replacement history and may expose only the checkpoint marker and post-compaction context.
+A successful operation returns one atomic custom compaction. It never calls `appendEntry()`, generates a second text summary, persists intermediate state, or falls back to Pi's text compactor.
+
+## Persistence
+
+The checkpoint summary is fixed protocol data:
+
+```text
+[Remote Responses compaction checkpoint]
+
+Detailed context before this checkpoint is retained in the native replay artifact and is available only to compatible Responses models.
+```
+
+The matching `CompactionEntry.details` contains exactly:
+
+```ts
+{
+  remoteCompaction: {
+    version: 2,
+    modelKey: {
+      provider: string,
+      api: "openai-responses",
+      id: string,
+    },
+    replacementHistory: [compactionItem],
+  },
+}
+```
+
+Replacement history contains only the newly accepted opaque compaction item. It does not contain retained user or assistant messages, the marker, a trigger, endpoint or routing data, response IDs, implementation tags, or duplicated usage.
+
+Only the active branch's latest `CompactionEntry` can define replay state. The extension reconstructs that state from the branch on every hook; it keeps no replay cache, request-shape cache, invalidation tombstone, or lifecycle synchronization listener. A later ordinary compaction supersedes an older checkpoint. A fixed marker with missing, legacy, unknown-version, or malformed details is a broken checkpoint and fails closed.
+
+## Native replay
+
+Compatibility is exact, structured, and case-sensitive across the persisted provider, API type, and model ID. Credentials and resolved endpoints are routing data, not model identity.
+
+For a compatible ordinary request, the extension:
+
+1. reconstructs the checkpoint marker and Pi-retained pre-compaction entries from the active branch;
+2. projects them through the same ordinary Responses adapter used for compaction;
+3. requires a full-array `payload.input` with exactly one contiguous wire-equivalent replay replacement span;
+4. replaces only that span with the one-item replacement history;
+5. preserves provider items before and after the span; and
+6. removes competing `messages` and `previous_response_id` fields.
+
+A malformed active state, invalidated branch, non-array input, or missing/ambiguous span stops the ordinary request through `ctx.abort()` and emits an explicit error. It does not throw from the hook and allow Pi to continue with the old payload.
+
+Selecting an incompatible model leaves its ordinary payload and transport untouched and emits a compatibility warning. Selection, a failed request, or an aborted assistant turn does not invalidate replay. A persisted successful assistant turn from an incompatible model does invalidate the branch, including text and tool-calling turns. After invalidation, compatible replay stops and further Remote compaction is cancelled; the extension never drops the incompatible turn or constructs a best-effort mixed-model suffix.
+
+## Repeated Remote compaction
+
+A repeated request contains, in order:
+
+1. the current one-item replacement history;
+2. the projected model-visible branch suffix after the owning `CompactionEntry`; and
+3. one new terminal compaction trigger.
+
+It excludes the checkpoint marker, Pi-retained pre-compaction entries, previous triggers, duplicate old compaction items, and retained explicit history. A newly accepted compaction item atomically supersedes the previous replacement history.
+
+## Retry and failure behavior
+
+`src/direct-responses-operation.ts` performs one HTTP/SSE attempt. `src/remote-compaction.ts` owns the only retry loop: one initial attempt plus at most two retries, always with the same deeply immutable logical request.
+
+Transient network, read, idle-timeout, premature-EOF, malformed pre-completion stream, incomplete-response, rate-limit, overload, and retryable HTTP failures may retry. Caller abort, authentication or projection failure, clearly non-transient HTTP failures, invalid request or prompt, unsupported operation, context overflow, quota or policy failure, completed-response item validation failure, and retry exhaustion are terminal. A terminal semantic error overrides an otherwise retryable HTTP status. Standard `Retry-After` is preferred; fallback backoff is finite, capped, jittered, and abort-aware.
+
+Every eligible terminal failure returns `{ cancel: true }`, preventing Pi text-compaction fallback and discarding partial item or usage data.
+
+## Transport boundary and limitations
+
+The extension does not register or override providers. Ordinary requests remain owned by the selected provider transport; this extension only patches native replay in `before_provider_request`.
+
+The Remote compaction operation itself uses direct HTTP/SSE because Pi `0.84.2` does not expose a production-loader-usable raw Responses seam that proves explicit completion while preserving unknown output items such as `compaction`. Routing and authentication use Pi's public model and model-registry APIs. Dynamic provider-only headers, other extensions' header mutations, provider-aware raw transport, and WebSocket composition are outside this package's current contract.
+
+The local Responses projection adapter covers Pi `0.84.2` ordinary semantics for supported persisted messages, images and placeholders, assistant text identity and phase, same-model signed reasoning, ordinary function calls/results and missing-output normalization, built-in custom-message normalization, and active ordinary function tools. Detectable model-visible context that cannot be represented faithfully cancels before transport. Grammar custom-tool metadata, constrained sampling, deferred tool search, provider distinctions already erased by Pi, and ephemeral provider-payload mutations are outside the supported contract.
+
+Architecture decisions:
+
+- [ADR 0001: Select models by API contract](https://github.com/angribot/pi-openai-server-compaction/blob/main/docs/adr/0001-select-models-by-api-contract.md)
+- [ADR 0002: Prefer native replay continuity](https://github.com/angribot/pi-openai-server-compaction/blob/main/docs/adr/0002-prefer-native-replay-continuity.md)
+- [ADR 0003: Keep provider transport independent](https://github.com/angribot/pi-openai-server-compaction/blob/main/docs/adr/0003-keep-provider-transport-independent.md)
+- [ADR 0004: Keep resolved endpoints out of model identity](https://github.com/angribot/pi-openai-server-compaction/blob/main/docs/adr/0004-keep-resolved-endpoints-out-of-model-identity.md)
 
 ## Testing
 
-Offline core checks:
+The offline suite uses Node's built-in test runner and requires no credentials or network:
 
 ```bash
 npm test
 ```
 
-The smoke suite covers only project-owned requirements: provider-agnostic `openai-responses` gating, request-body construction and settings, compaction usage accounting, compaction-item validation, replacement-history reconstruction, narrow replay replacement span injection with transient provider additions, conservative replay failure, and the absence of provider registration.
+Its four focused files are:
 
-Credentialed live regression:
+- `tests/loader.test.ts` — production loader, package factory, exactly two hooks, and no provider override;
+- `tests/responses-projection.test.ts` — supported ordinary Responses projection and fail-closed context;
+- `tests/direct-responses-operation.test.ts` — one-attempt routing, headers, SSE completion, validation, failure classification, usage, and abort;
+- `tests/remote-compaction.test.ts` — protocol retry, cancellation, persistence, reconstruction, native replay, compatibility, invalidation, and repeated compaction.
+
+The credentialed paid live scenario requires Pi CLI `0.84.2`, an explicit eligible model, working Pi-managed credentials and network, endpoint Remote compaction capability, and permission to incur two compactions plus continuation calls:
 
 ```bash
-npm run test:live
-```
-
-Override the model:
-
-```bash
+pi --version
 PI_OPENAI_SERVER_COMPACTION_TEST_MODEL=provider/model npm run test:live
 ```
 
-The live harness covers same-process native replay, reduced-plaintext recovery, fork safety, resume/reload continuity, model switching away and back, and resume after a model-switch round trip. Release validation should additionally exercise repeated compaction, tree navigation, and a controlled final remote failure, confirming that no partial replacement history is persisted and no local fallback or aborted-turn retry occurs.
-
-Cross-project transport matrices, machine-specific provider settings, and temporary live probes are intentionally not stored in this repository. Composition with a WebSocket extension is validated externally; any discovered defect is reduced to a regression at the owning project's interface.
-
-## Benchmarks
-
-The retained product-defaults benchmark exercised the extension's former 20K replay budget and found higher aggregate exact recall than Pi's default textual compactor, with higher output cost, a larger downstream context, and substantial allocation variability. It is retained as historical evidence after the extension's move to Codex's current 64K budget and does not establish better accuracy at an equal token budget.
-
-See:
-
-- `benchmarks/product-defaults/REPORT.md`
-- `benchmarks/product-defaults/README.md`
-- `benchmarks/native-vs-text/REPORT.md` for the superseded matched-cap interpretation
+It covers one linear first-compaction, same-process replay, repeated-compaction, fresh-process reload scenario. If the model variable or credentials are unavailable, live acceptance is not considered passed; report it as not run.
 
 ## Troubleshooting
 
-1. Run Pi with `--no-extensions` to bypass all extensions.
-2. Inspect session JSONL for `compaction.details.remoteCompaction`.
-3. If the endpoint rejects remote compaction or transient retries are exhausted, the extension cancels compaction and does not invoke Pi's text compactor.
+- Use `pi --no-extensions` to bypass all extensions while recovering a session.
+- Inspect the active branch's latest compaction entry in the session JSONL, especially `summary` and `details.remoteCompaction`.
+- If a checkpoint predates this refactor, start a new session or return before that checkpoint; there is no migration reader.
+- If native replay reports a missing or ambiguous span, do not continue from the incomplete payload. Recover through a new session or a complete pre-checkpoint branch point.
+- If an endpoint rejects the trigger, overflows, or exhausts retries, Remote compaction is cancelled and Pi's text compactor is intentionally not invoked.
 
 ## Repository layout
 
-| Path | Purpose |
-|---|---|
-| `src/index.ts` | Pi hooks, replacement-history injection, lifecycle orchestration |
-| `src/remote-compaction.ts` | Responses compaction v2 and replacement-history handling |
-| `src/openai.ts` | `openai-responses` gating and payload helpers |
-| `src/state.ts` | Ephemeral replacement-history and request-shape state |
-| `tests/smoke.ts` | Offline core contract checks |
-| `tests/live/openai-compaction-rpc-live.ts` | Credentialed Pi RPC regression |
-| `CONTEXT.md` | Canonical domain language |
-| `docs/adr/` | Durable architecture decisions |
-| `CHANGELOG.md` | Release history and pending user-visible changes |
+| Path                                | Purpose                                                                           |
+| ----------------------------------- | --------------------------------------------------------------------------------- |
+| `src/index.ts`                      | composition root installing the production operation                              |
+| `src/remote-compaction.ts`          | two-hook Remote compaction protocol, persistence, retry, invalidation, and replay |
+| `src/responses-projection.ts`       | narrow Pi `0.84.2` ordinary Responses projection adapter                          |
+| `src/direct-responses-operation.ts` | one-attempt direct HTTP/SSE capability-gap adapter                                |
+| `tests/`                            | four offline contract files plus one credentialed live scenario                   |
+| `CONTEXT.md`                        | canonical Remote compaction domain language                                       |
+| `docs/adr/`                         | durable architecture decisions                                                    |
+| `CHANGELOG.md`                      | release history and pending user-visible changes                                  |
 
 ## License
 
