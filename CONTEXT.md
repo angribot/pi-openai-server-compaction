@@ -8,9 +8,21 @@ This context covers replacing accumulated Pi conversation context with a server-
 A compaction operation performed by a Responses endpoint that replaces older conversation context with a server-produced compaction item.
 _Avoid_: Server compaction, server-side compaction, Codex-style compaction
 
+**Remote compaction v2**:
+The Codex protocol that sends the current compactable context to `/responses` with one terminal, payload-free `compaction_trigger`, then uses the returned compaction item to form replacement history.
+_Avoid_: `/responses/compact`, public compact endpoint, Remote compaction v1
+
+**Remote compaction v1**:
+The standalone `/responses/compact` protocol whose response supplies the next compacted context window. It is distinct from the v2 trigger protocol and is not implemented by this project.
+_Avoid_: Remote compaction v2
+
 **Eligible model**:
-A model whose API contract permits the extension to request remote compaction. Eligibility does not imply compatibility with an existing compaction item.
-_Avoid_: Supported provider, compatible model
+A model selected by the exact `openai-responses` API contract for attempting Remote compaction v2. Eligibility does not guarantee that the selected endpoint accepts the v2 trigger or that the model is compatible with an existing compaction item.
+_Avoid_: Supported provider, compatible model, v2-capable endpoint
+
+**Remote compaction capability**:
+The selected endpoint's runtime ability to accept a Remote compaction v2 request and return a compaction item. Capability is discovered through the operation's outcome rather than inferred from provider identity.
+_Avoid_: Eligible model, compatible model
 
 **Compatible model**:
 A model with the same provider, API type, and model ID as the model that produced a compaction item. Only a compatible model can continue through native replay.
@@ -19,6 +31,10 @@ _Avoid_: Eligible model, supported model
 **Compaction item**:
 The opaque Responses output item that retains pre-compaction conversation context for later native replay.
 _Avoid_: Remote artifact, native artifact, opaque artifact
+
+**Compactable context**:
+The ordered, Pi-persisted, compaction-aware context of the active linear session that a Remote compaction v2 request replaces. Repeated Remote compaction starts from the latest replacement history plus later session entries; ephemeral `context` or provider-payload middleware mutations are not part of this context.
+_Avoid_: Final provider payload, last observed request, effective context
 
 **Replacement history**:
 The replayable Responses item sequence produced by remote compaction, including the compaction item and any retained explicit items.
