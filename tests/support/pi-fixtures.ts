@@ -9,6 +9,8 @@ export type TestBranchEntry = {
   id: string;
   parentId: string | null;
   timestamp: string;
+  customType?: string;
+  data?: unknown;
   message?: AgentMessage;
   summary?: string;
   firstKeptEntryId?: string;
@@ -93,8 +95,10 @@ export function createRecordingPi(
 ): {
   pi: ExtensionAPI;
   handlers: Map<string, Hook>;
+  appendedEntries: Array<{ customType: string; data: unknown }>;
 } {
   const handlers = new Map<string, Hook>();
+  const appendedEntries: Array<{ customType: string; data: unknown }> = [];
   const pi = {
     on(name: string, handler: Hook) {
       if (handlers.has(name)) throw new Error(`duplicate handler: ${name}`);
@@ -103,8 +107,8 @@ export function createRecordingPi(
     registerProvider() {
       throw new Error("provider registration is forbidden");
     },
-    appendEntry() {
-      throw new Error("appendEntry must not be called");
+    appendEntry(customType: string, data: unknown) {
+      appendedEntries.push({ customType, data });
     },
     getAllTools() {
       return options.tools ?? [];
@@ -113,7 +117,7 @@ export function createRecordingPi(
       return options.activeTools ?? [];
     },
   } as unknown as ExtensionAPI;
-  return { pi, handlers };
+  return { pi, handlers, appendedEntries };
 }
 
 export function createHookContext(options: {
