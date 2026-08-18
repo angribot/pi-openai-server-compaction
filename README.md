@@ -152,7 +152,7 @@ Its four focused files are:
 
 - `tests/loader.test.ts` — production loader, package factory, exactly two hooks, and no provider override;
 - `tests/responses-projection.test.ts` — supported ordinary Responses projection and fail-closed context;
-- `tests/direct-responses-operation.test.ts` — direct and Pi-mediated one-attempt SSE operations, payload ownership, raw completion, validation, failure classification, usage, and abort;
+- `tests/remote-compaction-operation.test.ts` — direct and Pi-mediated one-attempt SSE operations, payload ownership, raw completion, validation, failure classification, usage, and abort;
 - `tests/remote-compaction.test.ts` — protocol retry, cancellation, persistence, reconstruction, native replay, compatibility, invalidation, and repeated compaction.
 
 The credentialed paid live scenario requires Pi CLI `0.84.2`, an explicit eligible model, working Pi-managed credentials and network, endpoint Remote compaction capability, and permission to incur two compactions plus continuation calls:
