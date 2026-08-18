@@ -4,13 +4,13 @@ This changelog intentionally starts at **0.1.0**.
 
 ## Unreleased
 - align deterministic long assistant item IDs and ordinary tool-call fields with Pi 0.84 Responses conversion while documenting that grammar/custom tools and deferred tool search remain unavailable at Pi's public compaction seam
-- preserve trailing current-user and extension-added context across repeated remote compaction before a compatible assistant response exists
+- preserve trailing current-user and extension-added context across repeated remote compaction before an assistant response from a compatible model exists
 - preserve current-turn and extension-added provider items during native replay by replacing only the exact replay replacement span, leaving unmatched inputs unchanged with a warning
 - align remote compaction conversion with Pi's image serialization and text-only user/tool image placeholders
 - bound remote compaction requests to the selected model's context window by reducing oversized tool outputs first, preserving call/output pairs, and visibly truncating retained message boundaries
 - align remote compaction with the selected model's reasoning map, exclude structured-output schemas, and include service-tier-adjusted usage in Pi's session totals
 - preserve native replay across cancelled session navigation, rebuild it at successful lifecycle boundaries, and reject incomplete persisted replay details without breaking colon-bearing model IDs
-- build remote compaction input from Pi's effective context with Pi-compatible Responses conversion, preserving prior summaries, contextual messages, shell output, assistant item metadata, tool compatibility, and exact native-replay model identity
+- build remote compaction input from Pi's effective context with Pi-compatible Responses conversion, preserving prior summaries, contextual messages, shell output, assistant item metadata, tool compatibility, and the exact native-replay model key
 - load through Pi 0.84's production extension resolver without importing an unsupported runtime subpath
 
 ## 0.6.0 - 2026-08-06

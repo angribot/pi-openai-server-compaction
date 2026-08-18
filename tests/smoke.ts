@@ -1173,6 +1173,157 @@ assert.equal(
 assert.equal("messages" in patchedPayload, false);
 assert.equal("previous_response_id" in patchedPayload, false);
 
+const syntheticOutputSessionId = "synthetic-tool-output-replay-session";
+const syntheticOutputReplacementHistory = [
+  { type: "compaction", encrypted_content: "SYNTHETIC_OUTPUT_OPAQUE" },
+];
+const syntheticOutputReplayBranch = [
+  {
+    type: "message",
+    id: "synthetic-output-summarized-user",
+    parentId: null,
+    timestamp: "2026-08-18T00:10:00.000Z",
+    message: {
+      role: "user",
+      content: [{ type: "text", text: "SYNTHETIC_OUTPUT_SUMMARIZED_USER" }],
+      timestamp: 10,
+    },
+  },
+  {
+    type: "message",
+    id: "synthetic-output-retained-user",
+    parentId: "synthetic-output-summarized-user",
+    timestamp: "2026-08-18T00:10:01.000Z",
+    message: {
+      role: "user",
+      content: [{ type: "text", text: "SYNTHETIC_OUTPUT_RETAINED_USER" }],
+      timestamp: 11,
+    },
+  },
+  {
+    type: "message",
+    id: "synthetic-output-retained-call",
+    parentId: "synthetic-output-retained-user",
+    timestamp: "2026-08-18T00:10:02.000Z",
+    message: {
+      role: "assistant",
+      provider: proxyResponsesModel.provider,
+      api: proxyResponsesModel.api,
+      model: proxyResponsesModel.id,
+      content: [
+        {
+          type: "toolCall",
+          id: "call_missing_result|fc_missing_result",
+          name: "read",
+          arguments: { path: "README.md" },
+        },
+      ],
+      stopReason: "toolUse",
+      timestamp: 12,
+    },
+  },
+  {
+    type: "compaction",
+    id: "cmp-synthetic-tool-output",
+    parentId: "synthetic-output-retained-call",
+    timestamp: "2026-08-18T00:10:03.000Z",
+    summary: REMOTE_COMPACTION_CHECKPOINT_SUMMARY,
+    firstKeptEntryId: "synthetic-output-retained-user",
+    tokensBefore: 1_000,
+  },
+  {
+    type: "message",
+    id: "synthetic-output-current-user",
+    parentId: "cmp-synthetic-tool-output",
+    timestamp: "2026-08-18T00:10:04.000Z",
+    message: {
+      role: "user",
+      content: [{ type: "text", text: "SYNTHETIC_OUTPUT_CURRENT_USER" }],
+      timestamp: 13,
+    },
+  },
+];
+const syntheticOutputRetainedUserInputItem = {
+  role: "user",
+  content: [{ type: "input_text", text: "SYNTHETIC_OUTPUT_RETAINED_USER" }],
+};
+const retainedFunctionCallInputItem = {
+  type: "function_call",
+  id: "fc_missing_result",
+  name: "read",
+  call_id: "call_missing_result",
+  arguments: '{"path":"README.md"}',
+};
+const syntheticFunctionCallOutputInputItem = {
+  type: "function_call_output",
+  call_id: "call_missing_result",
+  output: "No result provided",
+};
+const syntheticOutputCurrentUserInputItem = {
+  role: "user",
+  content: [{ type: "input_text", text: "SYNTHETIC_OUTPUT_CURRENT_USER" }],
+};
+setRemoteCompactionState(syntheticOutputSessionId, {
+  compactionEntryId: "cmp-synthetic-tool-output",
+  modelKey: modelKey(proxyResponsesModel),
+  replacementHistory: syntheticOutputReplacementHistory,
+});
+const syntheticOutputContext = {
+  ...requestContext,
+  sessionManager: {
+    getSessionId() {
+      return syntheticOutputSessionId;
+    },
+    getBranch() {
+      return syntheticOutputReplayBranch;
+    },
+  },
+};
+const syntheticOutputReplayWarnings: string[] = [];
+const originalSyntheticOutputConsoleWarn = console.warn;
+let syntheticOutputPatchedPayload: any;
+console.warn = (message?: unknown) => {
+  syntheticOutputReplayWarnings.push(String(message));
+};
+try {
+  syntheticOutputPatchedPayload = beforeProviderRequest(
+    {
+      payload: {
+        model: proxyResponsesModel.id,
+        input: [
+          transientDeveloperInputItem,
+          checkpointInputItem,
+          syntheticOutputRetainedUserInputItem,
+          retainedFunctionCallInputItem,
+          syntheticFunctionCallOutputInputItem,
+          syntheticOutputCurrentUserInputItem,
+          transientCustomInputItem,
+        ],
+      },
+    },
+    syntheticOutputContext,
+  );
+} finally {
+  console.warn = originalSyntheticOutputConsoleWarn;
+}
+assert.deepEqual(syntheticOutputPatchedPayload.input, [
+  transientDeveloperInputItem,
+  ...syntheticOutputReplacementHistory,
+  syntheticOutputCurrentUserInputItem,
+  transientCustomInputItem,
+]);
+assert.equal(
+  JSON.stringify(syntheticOutputPatchedPayload.input).includes("No result provided"),
+  false,
+  "native replay must not leave Pi's synthetic function call output orphaned",
+);
+assert.deepEqual(
+  syntheticOutputReplayWarnings,
+  [],
+  "a complete normalized replay replacement span must match without a warning",
+);
+clearRemoteCompactionState(syntheticOutputSessionId);
+
 const replayWarnings: string[] = [];
 const unsafeInput = [
   transientDeveloperInputItem,

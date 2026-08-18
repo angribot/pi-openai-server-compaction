@@ -139,8 +139,8 @@ function getExpectedReplayReplacementSpan(params: {
       params.branchEntries as Parameters<typeof buildSessionContext>[0],
       params.compactionEntryId,
     );
-    const expectedReplayReplacementSpan = messagesToResponseItems(
-      convertToLlm(checkpointContext.messages),
+    const expectedReplayReplacementSpan = normalizeResponseItemsForPrompt(
+      messagesToResponseItems(convertToLlm(checkpointContext.messages), params.model),
       params.model,
     );
     return isCheckpointInputItem(expectedReplayReplacementSpan[0])
