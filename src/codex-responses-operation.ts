@@ -70,6 +70,9 @@ export const attemptCodexResponsesOperation: RemoteCompactionAttempt = async (re
   }
 
   const rawOutcome = await rawOutcomePromise;
+  if (signal.aborted) {
+    return remoteCompactionFailureOutcome("terminal", signal.reason, "request was aborted", signal);
+  }
   if (rawOutcome.kind !== "accepted") return rawOutcome;
   if (completionFailure !== undefined) {
     return remoteCompactionFailureOutcome(
