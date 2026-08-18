@@ -31,10 +31,32 @@ export type RemoteCompactionModelKey = {
   id: string;
 };
 
-export type RemoteCompactionDetails = {
-  remoteCompaction: {
-    version: 2;
-    modelKey: RemoteCompactionModelKey;
+export type CompactionCompatibilityResolver = (modelId: string) => string | undefined;
+
+export const NATIVE_REPLAY_CHECKPOINT_FORMAT = "native-replay-checkpoint/1";
+export const NATIVE_REPLAY_COMPATIBILITY_DECISION_TYPE = "native-replay-compatibility-decision/1";
+
+const CODEX_COMPACTION_COMPATIBILITY_CLASSES: Readonly<Record<string, string>> = Object.freeze({
+  // OpenAI Codex catalog at 9b9b614b02ba04df55479284749c5cbbed695c24.
+  "gpt-5.4": "2911",
+  "gpt-5.4-mini": "2911",
+  "gpt-5.5": "2911",
+  "gpt-5.6-sol": "3000",
+  "gpt-5.6-terra": "3000",
+  "gpt-5.6-luna": "3000",
+});
+
+export const resolveCodexCompactionCompatibilityClass: CompactionCompatibilityResolver = (
+  modelId,
+) => CODEX_COMPACTION_COMPATIBILITY_CLASSES[modelId];
+
+export type NativeReplayCheckpointDetails = {
+  nativeReplayCheckpoint: {
+    format: typeof NATIVE_REPLAY_CHECKPOINT_FORMAT;
+    producer: {
+      modelKey: RemoteCompactionModelKey;
+      compactionCompatibilityClass: string | null;
+    };
     replacementHistory: [CompactionItem];
   };
 };
@@ -44,6 +66,8 @@ type BranchEntry = {
   id: string;
   parentId?: string | null;
   timestamp?: string;
+  customType?: unknown;
+  data?: unknown;
   summary?: unknown;
   firstKeptEntryId?: unknown;
   tokensBefore?: unknown;
@@ -51,11 +75,28 @@ type BranchEntry = {
   message?: AgentMessage;
 };
 
+type RequestModelIdentity = { provider: string; api: string; id: string };
+
+type CompatibilityDecision = {
+  checkpointId: string;
+  target: {
+    modelKey: RequestModelIdentity;
+    compactionCompatibilityClass: string | null;
+  };
+  compatible: boolean;
+};
+
+type ReplayDerivation =
+  | { kind: "valid"; invalidated: boolean }
+  | { kind: "broken"; reason: string };
+
 type ValidReplayState = {
   kind: "valid";
   entry: BranchEntry;
   entryIndex: number;
   modelKey: RemoteCompactionModelKey;
+  compactionCompatibilityClass: string | null;
+  checkpointKind: "legacy" | "native";
   replacementHistory: [CompactionItem];
   invalidated: boolean;
 };
@@ -126,16 +167,25 @@ function modelKey(model: Model<any>): RemoteCompactionModelKey | undefined {
   return modelKeyFromIdentity(model.provider, model.api, model.id);
 }
 
-function sameModelKey(
-  left: RemoteCompactionModelKey,
-  right: { provider: string; api: string; id: string },
-): boolean {
+function sameModelKey(left: RequestModelIdentity, right: RequestModelIdentity): boolean {
   return left.provider === right.provider && left.api === right.api && left.id === right.id;
 }
 
-function requestModelIdentity(
-  model: unknown,
-): { provider: string; api: string; id: string } | undefined {
+function compatibleWithCheckpoint(
+  state: Pick<ValidReplayState, "modelKey" | "compactionCompatibilityClass">,
+  targetIdentity: RequestModelIdentity,
+  targetClass: string | null | undefined,
+): boolean {
+  if (state.compactionCompatibilityClass !== null && isCompatibilityClass(targetClass)) {
+    return (
+      modelKeyFromIdentity(targetIdentity.provider, targetIdentity.api, targetIdentity.id) !==
+        undefined && state.compactionCompatibilityClass === targetClass
+    );
+  }
+  return sameModelKey(state.modelKey, targetIdentity);
+}
+
+function requestModelIdentity(model: unknown): RequestModelIdentity | undefined {
   if (
     !isRecord(model) ||
     typeof model.provider !== "string" ||
@@ -156,7 +206,19 @@ function isCompactionItem(value: unknown): value is CompactionItem {
   );
 }
 
-function decodeDetails(
+function isCompatibilityClass(value: unknown): value is string {
+  return typeof value === "string" && value.length > 0;
+}
+
+function resolveCompatibilityClass(
+  resolver: CompactionCompatibilityResolver,
+  modelId: string,
+): string | undefined {
+  const value = resolver(modelId);
+  return isCompatibilityClass(value) ? value : undefined;
+}
+
+function decodeLegacyDetails(
   value: unknown,
 ): Omit<ValidReplayState, "kind" | "entry" | "entryIndex" | "invalidated"> | undefined {
   if (!isRecord(value) || !hasExactKeys(value, ["remoteCompaction"])) return undefined;
@@ -185,19 +247,174 @@ function decodeDetails(
   }
   return {
     modelKey: key,
+    compactionCompatibilityClass: null,
+    checkpointKind: "legacy",
     replacementHistory: [remote.replacementHistory[0]],
   };
 }
 
-function assistantInvalidates(entry: BranchEntry, owner: RemoteCompactionModelKey): boolean {
-  const message = entry.message;
+function decodeNativeDetails(
+  value: unknown,
+): Omit<ValidReplayState, "kind" | "entry" | "entryIndex" | "invalidated"> | undefined {
+  if (!isRecord(value) || !hasExactKeys(value, ["nativeReplayCheckpoint"])) {
+    return undefined;
+  }
+  const checkpoint = value.nativeReplayCheckpoint;
+  if (
+    !isRecord(checkpoint) ||
+    !hasExactKeys(checkpoint, ["format", "producer", "replacementHistory"]) ||
+    checkpoint.format !== NATIVE_REPLAY_CHECKPOINT_FORMAT ||
+    !isRecord(checkpoint.producer) ||
+    !hasExactKeys(checkpoint.producer, ["modelKey", "compactionCompatibilityClass"]) ||
+    !isRecord(checkpoint.producer.modelKey) ||
+    !hasExactKeys(checkpoint.producer.modelKey, ["provider", "api", "id"])
+  ) {
+    return undefined;
+  }
+  const key = modelKeyFromIdentity(
+    checkpoint.producer.modelKey.provider,
+    checkpoint.producer.modelKey.api,
+    checkpoint.producer.modelKey.id,
+  );
+  const compatibilityClass = checkpoint.producer.compactionCompatibilityClass;
+  if (
+    !key ||
+    (compatibilityClass !== null && !isCompatibilityClass(compatibilityClass)) ||
+    !Array.isArray(checkpoint.replacementHistory) ||
+    checkpoint.replacementHistory.length !== 1 ||
+    !isCompactionItem(checkpoint.replacementHistory[0])
+  ) {
+    return undefined;
+  }
+  return {
+    modelKey: key,
+    compactionCompatibilityClass: compatibilityClass,
+    checkpointKind: "native",
+    replacementHistory: [checkpoint.replacementHistory[0]],
+  };
+}
+
+function decodeDetails(
+  value: unknown,
+): Omit<ValidReplayState, "kind" | "entry" | "entryIndex" | "invalidated"> | undefined {
+  return decodeNativeDetails(value) ?? decodeLegacyDetails(value);
+}
+
+function decodeCompatibilityDecision(value: unknown): CompatibilityDecision | undefined {
+  if (
+    !isRecord(value) ||
+    !hasExactKeys(value, ["checkpointId", "target", "compatible"]) ||
+    typeof value.checkpointId !== "string" ||
+    !value.checkpointId ||
+    typeof value.compatible !== "boolean" ||
+    !isRecord(value.target) ||
+    !hasExactKeys(value.target, ["modelKey", "compactionCompatibilityClass"]) ||
+    !isRecord(value.target.modelKey) ||
+    !hasExactKeys(value.target.modelKey, ["provider", "api", "id"])
+  ) {
+    return undefined;
+  }
+  const target = requestModelIdentity(value.target.modelKey);
+  const targetClass = value.target.compactionCompatibilityClass;
+  if (!target || (targetClass !== null && !isCompatibilityClass(targetClass))) return undefined;
+  return {
+    checkpointId: value.checkpointId,
+    target: {
+      modelKey: target,
+      compactionCompatibilityClass: targetClass,
+    },
+    compatible: value.compatible,
+  };
+}
+
+function successfulAssistant(entry: BranchEntry): boolean {
   return (
     entry.type === "message" &&
-    message?.role === "assistant" &&
-    message.stopReason !== "error" &&
-    message.stopReason !== "aborted" &&
-    (message.provider !== owner.provider || message.api !== owner.api || message.model !== owner.id)
+    entry.message?.role === "assistant" &&
+    entry.message.stopReason !== "error" &&
+    entry.message.stopReason !== "aborted"
   );
+}
+
+function assistantIdentity(entry: BranchEntry): RequestModelIdentity | undefined {
+  const message = entry.message;
+  if (entry.type !== "message" || message?.role !== "assistant") return undefined;
+  return requestModelIdentity({
+    provider: message.provider,
+    api: message.api,
+    id: message.model,
+  });
+}
+
+function assistantInvalidates(entry: BranchEntry, owner: RemoteCompactionModelKey): boolean {
+  if (!successfulAssistant(entry)) return false;
+  const identity = assistantIdentity(entry);
+  return !identity || !sameModelKey(owner, identity);
+}
+
+function deriveClassAwareReplay(
+  suffix: readonly BranchEntry[],
+  state: Pick<ValidReplayState, "entry" | "modelKey" | "compactionCompatibilityClass">,
+): ReplayDerivation {
+  let pending: CompatibilityDecision | undefined;
+  for (const entry of suffix) {
+    if (entry.type === "custom" && entry.customType === NATIVE_REPLAY_COMPATIBILITY_DECISION_TYPE) {
+      const decision = decodeCompatibilityDecision(entry.data);
+      if (!decision) {
+        return { kind: "broken", reason: "compatibility evidence is malformed" };
+      }
+      if (decision.checkpointId !== state.entry.id) {
+        return {
+          kind: "broken",
+          reason: "compatibility evidence belongs to a different checkpoint",
+        };
+      }
+      if (
+        decision.compatible !==
+        compatibleWithCheckpoint(
+          state,
+          decision.target.modelKey,
+          decision.target.compactionCompatibilityClass,
+        )
+      ) {
+        return {
+          kind: "broken",
+          reason: "compatibility evidence contains an inconsistent decision",
+        };
+      }
+      pending = decision;
+      continue;
+    }
+
+    const message = entry.message;
+    if (entry.type !== "message" || message?.role !== "assistant") continue;
+    const identity = assistantIdentity(entry);
+    if (message.stopReason === "error" || message.stopReason === "aborted") {
+      pending = undefined;
+      continue;
+    }
+    if (!identity) {
+      return {
+        kind: "broken",
+        reason: "a successful assistant turn has an invalid model identity",
+      };
+    }
+    if (!pending) {
+      return {
+        kind: "broken",
+        reason: "a successful assistant turn is missing compatibility evidence",
+      };
+    }
+    if (!sameModelKey(pending.target.modelKey, identity)) {
+      return {
+        kind: "broken",
+        reason: "compatibility evidence does not match its assistant turn",
+      };
+    }
+    if (!pending.compatible) return { kind: "valid", invalidated: true };
+    pending = undefined;
+  }
+  return { kind: "valid", invalidated: false };
 }
 
 function deriveActiveReplayState(branch: readonly BranchEntry[]): ActiveReplayState {
@@ -218,19 +435,32 @@ function deriveActiveReplayState(branch: readonly BranchEntry[]): ActiveReplaySt
   if (!decoded) {
     return {
       kind: "broken",
-      reason:
-        "the latest Remote compaction checkpoint has missing, legacy, or malformed v2 details",
+      reason: "the latest Remote compaction checkpoint has missing or malformed details",
     };
   }
+
+  const suffix = branch.slice(latestIndex + 1);
+  const derivation =
+    decoded.checkpointKind === "native" && decoded.compactionCompatibilityClass !== null
+      ? deriveClassAwareReplay(suffix, {
+          entry,
+          modelKey: decoded.modelKey,
+          compactionCompatibilityClass: decoded.compactionCompatibilityClass,
+        })
+      : {
+          kind: "valid" as const,
+          invalidated: suffix.some((candidate) =>
+            assistantInvalidates(candidate, decoded.modelKey),
+          ),
+        };
+  if (derivation.kind === "broken") return derivation;
 
   return {
     kind: "valid",
     entry,
     entryIndex: latestIndex,
     ...decoded,
-    invalidated: branch
-      .slice(latestIndex + 1)
-      .some((candidate) => assistantInvalidates(candidate, decoded.modelKey)),
+    invalidated: derivation.invalidated,
   };
 }
 
@@ -251,6 +481,20 @@ function hardStop(context: HookContext, reason: string): undefined {
   );
   context.abort();
   return undefined;
+}
+
+function appendCompatibilityDecision(
+  pi: ExtensionAPI,
+  context: HookContext,
+  decision: CompatibilityDecision,
+): boolean {
+  try {
+    pi.appendEntry(NATIVE_REPLAY_COMPATIBILITY_DECISION_TYPE, decision);
+    return true;
+  } catch {
+    hardStop(context, "request-time compatibility evidence could not be persisted");
+    return false;
+  }
 }
 
 function containsCheckpointMarker(value: unknown): boolean {
@@ -419,6 +663,7 @@ function successResult(
     preparation: { firstKeptEntryId: string; tokensBefore: number };
   },
   key: RemoteCompactionModelKey,
+  compactionCompatibilityClass: string | null,
   accepted: Extract<RemoteCompactionAttemptOutcome, { kind: "accepted" }>,
 ): {
   compaction: {
@@ -426,7 +671,7 @@ function successResult(
     firstKeptEntryId: string;
     tokensBefore: number;
     usage?: Usage;
-    details: RemoteCompactionDetails;
+    details: NativeReplayCheckpointDetails;
   };
 } {
   return {
@@ -436,9 +681,12 @@ function successResult(
       tokensBefore: event.preparation.tokensBefore,
       ...(accepted.usage ? { usage: accepted.usage } : {}),
       details: {
-        remoteCompaction: {
-          version: 2,
-          modelKey: key,
+        nativeReplayCheckpoint: {
+          format: NATIVE_REPLAY_CHECKPOINT_FORMAT,
+          producer: {
+            modelKey: key,
+            compactionCompatibilityClass,
+          },
           replacementHistory: [accepted.item],
         },
       },
@@ -446,7 +694,11 @@ function successResult(
   };
 }
 
-export function installRemoteCompaction(pi: ExtensionAPI, attempt: RemoteCompactionAttempt): void {
+export function installRemoteCompaction(
+  pi: ExtensionAPI,
+  attempt: RemoteCompactionAttempt,
+  resolveCompatibilityClassForModel: CompactionCompatibilityResolver = resolveCodexCompactionCompatibilityClass,
+): void {
   pi.on("session_before_compact", async (event, rawContext) => {
     const context = rawContext as unknown as HookContext;
     const model = context.model;
@@ -459,6 +711,10 @@ export function installRemoteCompaction(pi: ExtensionAPI, attempt: RemoteCompact
       return { cancel: true };
     }
 
+    const selectedCompatibilityClass = resolveCompatibilityClass(
+      resolveCompatibilityClassForModel,
+      key.id,
+    );
     const branchEntries = event.branchEntries as BranchEntry[];
     const state = deriveActiveReplayState(branchEntries);
     if (state.kind === "broken") {
@@ -473,7 +729,7 @@ export function installRemoteCompaction(pi: ExtensionAPI, attempt: RemoteCompact
         );
         return { cancel: true };
       }
-      if (!sameModelKey(state.modelKey, key)) {
+      if (!compatibleWithCheckpoint(state, key, selectedCompatibilityClass)) {
         reportWarning(
           context,
           "Remote compaction was cancelled because the selected model is incompatible with the active checkpoint.",
@@ -523,7 +779,7 @@ export function installRemoteCompaction(pi: ExtensionAPI, attempt: RemoteCompact
 
       if (event.signal.aborted) return { cancel: true };
       if (outcome.kind === "accepted") {
-        return successResult(event, key, outcome);
+        return successResult(event, key, selectedCompatibilityClass ?? null, outcome);
       }
       if (outcome.kind === "terminal" || attemptIndex === MAX_ATTEMPTS - 1) {
         reportError(
@@ -559,10 +815,55 @@ export function installRemoteCompaction(pi: ExtensionAPI, attempt: RemoteCompact
       );
     }
 
-    const selectedKey = requestModelIdentity(model);
-    if (!selectedKey)
+    const selectedIdentity = requestModelIdentity(model);
+    if (!selectedIdentity) {
       return hardStop(context, "the selected model has an invalid structured identity");
-    if (!sameModelKey(state.modelKey, selectedKey)) {
+    }
+    const selectedKey = modelKey(model);
+    if (!selectedKey) {
+      if (state.checkpointKind === "native" && state.compactionCompatibilityClass !== null) {
+        if (
+          !appendCompatibilityDecision(pi, context, {
+            checkpointId: state.entry.id,
+            target: {
+              modelKey: selectedIdentity,
+              compactionCompatibilityClass:
+                resolveCompatibilityClass(resolveCompatibilityClassForModel, selectedIdentity.id) ??
+                null,
+            },
+            compatible: false,
+          })
+        ) {
+          return undefined;
+        }
+      }
+      reportWarning(
+        context,
+        "The selected model is incompatible with the active Remote compaction checkpoint. Pre-checkpoint context is unavailable; a successful assistant turn will invalidate native replay for this branch.",
+      );
+      return undefined;
+    }
+
+    const targetClass = resolveCompatibilityClass(
+      resolveCompatibilityClassForModel,
+      selectedKey.id,
+    );
+    const compatible = compatibleWithCheckpoint(state, selectedKey, targetClass);
+    if (state.checkpointKind === "native" && state.compactionCompatibilityClass !== null) {
+      if (
+        !appendCompatibilityDecision(pi, context, {
+          checkpointId: state.entry.id,
+          target: {
+            modelKey: selectedKey,
+            compactionCompatibilityClass: targetClass ?? null,
+          },
+          compatible,
+        })
+      ) {
+        return undefined;
+      }
+    }
+    if (!compatible) {
       reportWarning(
         context,
         "The selected model is incompatible with the active Remote compaction checkpoint. Pre-checkpoint context is unavailable; a successful assistant turn will invalidate native replay for this branch.",

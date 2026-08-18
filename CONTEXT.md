@@ -25,7 +25,7 @@ The selected endpoint's runtime ability to accept a Remote compaction v2 request
 _Avoid_: Eligible model, compatible model
 
 **Compatible model**:
-A model with the same provider, API type, and model ID as the model that produced a compaction item. Only a compatible model can continue through native replay.
+An Eligible model whose resolved Compaction compatibility class equals the checkpoint producer's creation-time class, or whose exact Model key matches when either class is unavailable. Class equality may cross Pi providers and the two Eligible Responses API types.
 _Avoid_: Eligible model, supported model
 
 **Compaction item**:
@@ -57,12 +57,20 @@ The unique contiguous portion of an ordinary request's final Responses input tha
 _Avoid_: Checkpoint history, Historical replay span, Checkpoint region, Pre-compaction span (when referring to this exact provider-input region)
 
 **Compaction compatibility class**:
-An opaque provider-resolved identifier grouping model configurations that can share compaction history; OpenAI Codex calls this `comp_hash`. It may span model aliases and is distinct from a model key.
+An opaque provider-resolved identifier grouping model configurations that can share compaction history; OpenAI Codex calls this `comp_hash`. It is distinct from Model key, provider routing identity, and ordinary Responses item metadata compatibility.
 _Avoid_: Model family, model hash, Model key
 
 **Model key**:
-The provider, API type, and model ID considered together as this project's conservative native replay compatibility boundary when no Compaction compatibility class is available. Request-specific credentials and resolved endpoints are not part of this boundary.
+The provider, API type, and model ID considered together as this project's conservative Native replay compatibility boundary when either Compaction compatibility class is unavailable. Request-specific credentials and resolved endpoints are not part of this boundary.
 _Avoid_: Model ID, provider name, Compaction compatibility class
+
+**Native replay checkpoint record**:
+The durable local record that binds replacement history to its producer's Model key and creation-time Compaction compatibility class. It is distinct from the Remote compaction v2 wire protocol.
+_Avoid_: Remote compaction version, v3 details, checkpoint summary
+
+**Compatibility decision record**:
+Branch-local evidence of the selected target identity, resolved class, and compatibility decision for an Ordinary request from a class-aware checkpoint. Its following assistant outcome determines whether Native replay continuity remains valid.
+_Avoid_: Compatibility cache, invalidation tombstone, model-change event
 
 **Ordinary request**:
 A model request that continues the conversation without asking the endpoint to compact it.

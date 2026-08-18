@@ -8,6 +8,7 @@ import { createInterface } from "node:readline";
 import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
+import { resolveCodexCompactionCompatibilityClass } from "../../src/remote-compaction.ts";
 
 const selectedModel = process.env.PI_OPENAI_SERVER_COMPACTION_TEST_MODEL;
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
@@ -15,6 +16,8 @@ const extensionPath = join(repoRoot, "index.ts");
 const checkpointMarker =
   "[Remote Responses compaction checkpoint]\n\n" +
   "Detailed context before this checkpoint is retained in the native replay artifact and is available only to compatible Responses models.";
+const checkpointFormat = "native-replay-checkpoint/1";
+const compatibilityDecisionType = "native-replay-compatibility-decision/1";
 // Pi estimates text at four chars per token; this exceeds its default 20K retained suffix.
 const paddingBeyondDefaultRetainedSuffix = "remote-compaction-live-context ".repeat(5_000);
 
@@ -57,23 +60,27 @@ function assistantText(messages: unknown[]): string {
 function validateRemoteCompaction(
   value: unknown,
   expectedModelKey: RemoteCompactionModelKey,
+  expectedCompatibilityClass: string,
 ): JsonRecord {
   const details = asRecord(value, "compaction details");
-  assert.deepEqual(Object.keys(details), ["remoteCompaction"]);
-  const remote = asRecord(details.remoteCompaction, "details.remoteCompaction");
-  assert.deepEqual(Object.keys(remote).sort(), ["modelKey", "replacementHistory", "version"]);
-  assert.equal(remote.version, 2);
+  assert.deepEqual(Object.keys(details), ["nativeReplayCheckpoint"]);
+  const checkpoint = asRecord(details.nativeReplayCheckpoint, "details.nativeReplayCheckpoint");
+  assert.deepEqual(Object.keys(checkpoint).sort(), ["format", "producer", "replacementHistory"]);
+  assert.equal(checkpoint.format, checkpointFormat);
 
-  const modelKey = asRecord(remote.modelKey, "remoteCompaction.modelKey");
+  const producer = asRecord(checkpoint.producer, "nativeReplayCheckpoint.producer");
+  assert.deepEqual(Object.keys(producer).sort(), ["compactionCompatibilityClass", "modelKey"]);
+  assert.equal(producer.compactionCompatibilityClass, expectedCompatibilityClass);
+  const modelKey = asRecord(producer.modelKey, "nativeReplayCheckpoint.producer.modelKey");
   assert.deepEqual(Object.keys(modelKey).sort(), ["api", "id", "provider"]);
   assert.deepEqual(modelKey, expectedModelKey);
 
-  assert.ok(Array.isArray(remote.replacementHistory));
-  assert.equal(remote.replacementHistory.length, 1);
-  const item = asRecord(remote.replacementHistory[0], "replacementHistory[0]");
+  assert.ok(Array.isArray(checkpoint.replacementHistory));
+  assert.equal(checkpoint.replacementHistory.length, 1);
+  const item = asRecord(checkpoint.replacementHistory[0], "replacementHistory[0]");
   assert.equal(item.type, "compaction");
   assert.equal(typeof item.encrypted_content, "string");
-  return remote;
+  return checkpoint;
 }
 
 async function loadJsonl(path: string): Promise<JsonRecord[]> {
@@ -254,12 +261,21 @@ test(
     let sessionFile = "";
     let secondDetails: unknown;
     let expectedModelKey: RemoteCompactionModelKey;
+    let expectedCompatibilityClass: string;
 
     try {
       const client = new PiRpcClient(sessionDir);
       try {
         await client.waitIdle();
         expectedModelKey = await client.modelKey();
+        const selectedCompatibilityClass = resolveCodexCompactionCompatibilityClass(
+          expectedModelKey.id,
+        );
+        assert.ok(
+          selectedCompatibilityClass,
+          `live model has no cataloged compatibility class: ${expectedModelKey.id}`,
+        );
+        expectedCompatibilityClass = selectedCompatibilityClass;
         await client.prompt(
           `Remember this unpredictable first secret for later: ${firstSecret}. Reply only with MEMORIZED-FIRST.`,
         );
@@ -267,10 +283,14 @@ test(
 
         const first = await client.compact();
         assert.equal(first.summary, checkpointMarker);
-        const firstRemote = validateRemoteCompaction(first.details, expectedModelKey);
+        const firstCheckpoint = validateRemoteCompaction(
+          first.details,
+          expectedModelKey,
+          expectedCompatibilityClass,
+        );
         const firstVisible = JSON.stringify({
-          ...firstRemote,
-          replacementHistory: (firstRemote.replacementHistory as JsonRecord[]).map((item) => ({
+          ...firstCheckpoint,
+          replacementHistory: (firstCheckpoint.replacementHistory as JsonRecord[]).map((item) => ({
             ...item,
             encrypted_content: "<redacted>",
           })),
@@ -286,7 +306,7 @@ test(
         await client.prompt(`${paddingBeyondDefaultRetainedSuffix}\nReply only with READY-SECOND.`);
         const second = await client.compact();
         assert.equal(second.summary, checkpointMarker);
-        validateRemoteCompaction(second.details, expectedModelKey);
+        validateRemoteCompaction(second.details, expectedModelKey, expectedCompatibilityClass);
         secondDetails = second.details;
         sessionFile = await client.sessionFile();
 
@@ -297,7 +317,23 @@ test(
         assert.ok(sameProcessLatest);
         assert.equal(sameProcessLatest.summary, checkpointMarker);
         assert.deepEqual(sameProcessLatest.details, secondDetails);
-        validateRemoteCompaction(sameProcessLatest.details, expectedModelKey);
+        validateRemoteCompaction(
+          sameProcessLatest.details,
+          expectedModelKey,
+          expectedCompatibilityClass,
+        );
+        const firstCheckpointEntry = sameProcessEntries
+          .filter((entry) => entry.type === "compaction")
+          .at(-2);
+        assert.ok(firstCheckpointEntry);
+        const firstDecision = sameProcessEntries.find(
+          (entry) =>
+            entry.type === "custom" &&
+            entry.customType === compatibilityDecisionType &&
+            isRecord(entry.data) &&
+            entry.data.checkpointId === firstCheckpointEntry.id,
+        );
+        assert.ok(firstDecision, "same-process replay must persist compatibility evidence");
       } finally {
         await client.close();
       }
@@ -321,7 +357,20 @@ test(
       const latest = compactions.at(-1)!;
       assert.equal(latest.summary, checkpointMarker);
       assert.deepEqual(latest.details, secondDetails);
-      validateRemoteCompaction(latest.details, expectedModelKey);
+      validateRemoteCompaction(latest.details, expectedModelKey, expectedCompatibilityClass);
+      const latestDecision = entries.find(
+        (entry) =>
+          entry.type === "custom" &&
+          entry.customType === compatibilityDecisionType &&
+          isRecord(entry.data) &&
+          entry.data.checkpointId === latest.id,
+      );
+      assert.ok(latestDecision, "fresh-process replay must persist compatibility evidence");
+      const decisionData = asRecord(latestDecision.data, "compatibility decision data");
+      assert.equal(decisionData.compatible, true);
+      const target = asRecord(decisionData.target, "compatibility decision target");
+      assert.equal(target.compactionCompatibilityClass, expectedCompatibilityClass);
+      assert.deepEqual(target.modelKey, expectedModelKey);
 
       await rm(artifacts, { recursive: true, force: true });
     } catch (error) {
