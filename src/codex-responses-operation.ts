@@ -18,12 +18,13 @@ export const attemptCodexResponsesOperation: RemoteCompactionAttempt = async (re
     return remoteCompactionFailureOutcome("terminal", signal.reason, "request was aborted", signal);
   }
 
-  let capturedResponse: Response | undefined;
+  let rawOutcomePromise: ReturnType<typeof validateRemoteCompactionResponse> | undefined;
   let fetchFailure: unknown;
   const capturingFetch: typeof globalThis.fetch = async (input, init) => {
     try {
       const response = await globalThis.fetch(input, init);
-      capturedResponse = response.clone();
+      rawOutcomePromise = validateRemoteCompactionResponse(request, response.clone(), signal);
+      void rawOutcomePromise.catch(() => {});
       return response;
     } catch (error) {
       fetchFailure = error;
@@ -50,7 +51,7 @@ export const attemptCodexResponsesOperation: RemoteCompactionAttempt = async (re
   if (signal.aborted) {
     return remoteCompactionFailureOutcome("terminal", signal.reason, "request was aborted", signal);
   }
-  if (!capturedResponse) {
+  if (!rawOutcomePromise) {
     if (fetchFailure !== undefined) {
       return remoteCompactionFailureOutcome(
         "retryable",
@@ -68,7 +69,7 @@ export const attemptCodexResponsesOperation: RemoteCompactionAttempt = async (re
     );
   }
 
-  const rawOutcome = await validateRemoteCompactionResponse(request, capturedResponse, signal);
+  const rawOutcome = await rawOutcomePromise;
   if (rawOutcome.kind !== "accepted") return rawOutcome;
   if (completionFailure !== undefined) {
     return remoteCompactionFailureOutcome(

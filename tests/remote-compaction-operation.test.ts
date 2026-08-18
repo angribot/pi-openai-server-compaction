@@ -136,6 +136,38 @@ function openStreamResponse(chunks: string[]): Response {
   );
 }
 
+async function consumeProviderStreamThroughTerminal(response: Response): Promise<void> {
+  assert.ok(response.body);
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let wire = "";
+  try {
+    while (!wire.includes('"response.done"')) {
+      const chunk = await reader.read();
+      assert.equal(chunk.done, false, "provider stream ended before response.done");
+      wire += decoder.decode(chunk.value, { stream: true });
+    }
+    await reader.cancel();
+  } finally {
+    reader.releaseLock();
+  }
+}
+
+async function settleWithin<T>(promise: Promise<T>, timeoutMs: number): Promise<T> {
+  let timer: NodeJS.Timeout | undefined;
+  const timeout = new Promise<never>((_resolve, reject) => {
+    timer = setTimeout(
+      () => reject(new Error(`operation did not settle within ${timeoutMs}ms`)),
+      timeoutMs,
+    );
+  });
+  try {
+    return await Promise.race([promise, timeout]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
 function sse(event: unknown): string {
   return `data: ${JSON.stringify(event)}\r\n\r\n`;
 }
@@ -159,7 +191,7 @@ function assertOutcome(
   assert.equal(outcome.kind, kind, outcome.kind === "accepted" ? undefined : outcome.error.message);
 }
 
-test("runs built-in Codex through Pi while owning only the compaction payload", async () => {
+test("runs built-in Codex through Pi while owning the payload and consuming raw capture concurrently", async () => {
   const selectedModel = codexModel();
   const compactionRequest = request(selectedModel);
   const providerPayload = {
@@ -188,7 +220,7 @@ test("runs built-in Codex through Pi while owning only the compaction payload", 
     async (input, init) => {
       forwardedInput = input;
       forwardedInit = init;
-      return streamResponse([
+      return openStreamResponse([
         sse({
           type: "response.output_item.done",
           item: { type: "compaction", id: "cmp-codex", encrypted_content: "opaque-codex" },
@@ -197,25 +229,28 @@ test("runs built-in Codex through Pi while owning only the compaction payload", 
       ]);
     },
     async () => {
-      const outcome = await attemptCodexResponsesOperation(
-        compactionRequest,
-        codexContext(async (selected, _providerContext, options) => {
-          assert.equal(selected, compactionRequest.model);
-          operationOptions = options as Record<string, any>;
-          patchedPayload = await options?.onPayload?.(providerPayload, selected);
-          const response = await options?.fetch?.(
-            "https://provider-owned.example/codex/responses",
-            {
-              method: "POST",
-              headers: { "x-provider-owned": "yes" },
-              body: "provider-owned-body",
-              signal: options.signal,
-            },
-          );
-          assert.ok(response);
-          await response.text();
-          return providerCompletion();
-        }, signal),
+      const outcome = await settleWithin(
+        attemptCodexResponsesOperation(
+          compactionRequest,
+          codexContext(async (selected, _providerContext, options) => {
+            assert.equal(selected, compactionRequest.model);
+            operationOptions = options as Record<string, any>;
+            patchedPayload = await options?.onPayload?.(providerPayload, selected);
+            const response = await options?.fetch?.(
+              "https://provider-owned.example/codex/responses",
+              {
+                method: "POST",
+                headers: { "x-provider-owned": "yes" },
+                body: "provider-owned-body",
+                signal: options.signal,
+              },
+            );
+            assert.ok(response);
+            await consumeProviderStreamThroughTerminal(response);
+            return providerCompletion();
+          }, signal),
+        ),
+        1_000,
       );
       assert.equal(outcome.kind, "accepted");
       if (outcome.kind === "accepted") {
