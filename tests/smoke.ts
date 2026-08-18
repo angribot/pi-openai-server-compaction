@@ -125,6 +125,9 @@ const {
   remoteCompactionV2EndpointUrl,
   REMOTE_COMPACTION_CHECKPOINT_SUMMARY,
 } = await import(pathToFileURL(join(repoRoot, "src", "remote-compaction.ts")).href);
+const { convertResponsesMessages } = await import(
+  "@earendil-works/pi-ai/api/openai-responses-shared",
+);
 const {
   modelKey,
   supportsRemoteCompactionModel,
@@ -614,6 +617,86 @@ assert.equal(
   budgetRemoteCompactionInput(opaqueReplayParams),
   opaqueReplayInput,
   "opaque compaction items should use model-visible rather than encoded size estimates",
+);
+
+const responsesParityModel = {
+  provider: "openai",
+  api: "openai-responses",
+  id: "gpt-parity",
+  name: "Responses parity test model",
+  baseUrl: "https://api.openai.com/v1",
+  reasoning: false,
+  input: ["text"],
+  cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+  contextWindow: 1_000,
+  maxTokens: 100,
+};
+const longAssistantItemId = `msg_${"long-id-".repeat(12)}`;
+assert.ok(longAssistantItemId.length > 64, "parity fixture must exceed the Responses ID limit");
+const responsesParityMessage = {
+  role: "assistant",
+  provider: responsesParityModel.provider,
+  api: responsesParityModel.api,
+  model: responsesParityModel.id,
+  content: [
+    {
+      type: "text",
+      text: "PARITY_TEXT",
+      textSignature: JSON.stringify({
+        v: 1,
+        id: longAssistantItemId,
+        phase: "final_answer",
+      }),
+    },
+    {
+      type: "toolCall",
+      id: "call_parity|fc_parity",
+      name: "read",
+      namespace: "filesystem",
+      arguments: { path: "README.md" },
+    },
+  ],
+  stopReason: "toolUse",
+  timestamp: 1,
+};
+const piResponsesParityItems = convertResponsesMessages(
+  responsesParityModel as any,
+  { systemPrompt: "", messages: [responsesParityMessage] } as any,
+  new Set(["openai", "openai-codex", "opencode"]),
+  { includeSystemPrompt: false },
+);
+const extensionResponsesParityItems = messagesToResponseItems(
+  [responsesParityMessage] as any,
+  responsesParityModel as any,
+);
+const repeatedExtensionResponsesParityItems = messagesToResponseItems(
+  [responsesParityMessage] as any,
+  responsesParityModel as any,
+);
+type ResponsesParityItem = { type?: string; id?: unknown; [key: string]: unknown };
+const piAssistantParityItem = (piResponsesParityItems as ResponsesParityItem[])
+  .find((item) => item.type === "message");
+const extensionAssistantParityItem = (extensionResponsesParityItems as ResponsesParityItem[])
+  .find((item) => item.type === "message");
+assert.deepEqual(
+  extensionAssistantParityItem,
+  piAssistantParityItem,
+  "long assistant item IDs must use Pi 0.84's deterministic conversion",
+);
+assert.equal(
+  (repeatedExtensionResponsesParityItems as ResponsesParityItem[])
+    .find((item) => item.type === "message")?.id,
+  extensionAssistantParityItem?.id,
+  "repeated conversion must preserve deterministic assistant item IDs",
+);
+const piToolCallParityItem = (piResponsesParityItems as ResponsesParityItem[])
+  .find((item) => item.type === "function_call");
+const extensionToolCallParityItem = (extensionResponsesParityItems as ResponsesParityItem[])
+  .find((item) => item.type === "function_call");
+assert.deepEqual(
+  extensionToolCallParityItem,
+  piToolCallParityItem,
+  "ordinary tool-call fields must match Pi 0.84",
 );
 
 const foreignToolHistory = messagesToResponseItems(
@@ -1973,7 +2056,6 @@ try {
         id: "fc_read_1",
         call_id: "call_read_1",
         name: "read",
-        namespace: "filesystem",
         arguments: JSON.stringify({ path: "README.md" }),
       },
     );
