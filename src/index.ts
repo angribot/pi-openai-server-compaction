@@ -177,6 +177,7 @@ function getCompatibleNativeReplayTailMessages(params: {
     pendingMessages = [];
   }
 
+  compatibleMessages.push(...pendingMessages);
   return compatibleMessages;
 }
 

@@ -1878,6 +1878,26 @@ try {
               timestamp: 7,
             },
           },
+          {
+            type: "message",
+            id: "trailing-current-user",
+            parentId: "post-tool-assistant",
+            timestamp: "2026-08-07T01:00:05.000Z",
+            message: {
+              role: "user",
+              content: [{ type: "text", text: "TRAILING_CURRENT_USER" }],
+              timestamp: 8,
+            },
+          },
+          {
+            type: "custom_message",
+            id: "trailing-custom-context",
+            parentId: "trailing-current-user",
+            timestamp: "2026-08-07T01:00:06.000Z",
+            customType: "test-context",
+            content: "TRAILING_CUSTOM_CONTEXT",
+            display: false,
+          },
         ],
       },
       {
@@ -1889,7 +1909,8 @@ try {
       },
     );
     assert.equal(conversionResult?.compaction?.details?.remoteCompaction?.version, 2);
-    const conversionBody = JSON.parse(requestBodies[0]);
+    const conversionRequestBody = requestBodies[0];
+    const conversionBody = JSON.parse(conversionRequestBody);
     const convertedInput = conversionBody.input as Array<{
       encrypted_content?: string;
       id?: string;
@@ -1899,7 +1920,30 @@ try {
       convertedInput.find((item) => item.type === "compaction")?.encrypted_content,
       "PRIOR_REMOTE_COMPACTION",
     );
-    assert.doesNotMatch(requestBodies[0], /DROP_DIFFERENT_API/);
+    assert.doesNotMatch(conversionRequestBody, /DROP_DIFFERENT_API/);
+    const orderedMarkers = [
+      "COMMENTARY_BLOCK",
+      "FINAL_BLOCK",
+      "POST_TOOL_BLOCK",
+      "TRAILING_CURRENT_USER",
+      "TRAILING_CUSTOM_CONTEXT",
+    ];
+    for (const marker of orderedMarkers) {
+      assert.equal(conversionRequestBody.match(new RegExp(marker, "g"))?.length, 1);
+    }
+    for (let index = 1; index < orderedMarkers.length; index++) {
+      assert.ok(
+        conversionRequestBody.indexOf(orderedMarkers[index - 1]) <
+          conversionRequestBody.indexOf(orderedMarkers[index]),
+        `${orderedMarkers[index - 1]} must precede ${orderedMarkers[index]}`,
+      );
+    }
+    const replacementHistoryJson = JSON.stringify(
+      conversionResult?.compaction?.details?.remoteCompaction?.replacementHistory,
+    );
+    for (const marker of ["TRAILING_CURRENT_USER", "TRAILING_CUSTOM_CONTEXT"]) {
+      assert.equal(replacementHistoryJson.match(new RegExp(marker, "g"))?.length, 1);
+    }
     assert.deepEqual(
       convertedInput.filter((item) => item.id === "msg_commentary_1" || item.id === "msg_final_1"),
       [
