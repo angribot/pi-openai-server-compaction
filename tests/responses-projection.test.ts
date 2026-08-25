@@ -223,11 +223,38 @@ test("projects Pi built-in custom messages after public normalization", () => {
     },
   ];
 
-  const serialized = JSON.stringify(projectCompactableContext(messages, model()));
-  for (const text of ["CUSTOM-VISIBLE", "BASH-VISIBLE", "BRANCH-VISIBLE", "COMPACTION-VISIBLE"]) {
-    assert.equal(serialized.match(new RegExp(text, "g"))?.length, 1);
-  }
-  assert.doesNotMatch(serialized, /DISPLAY-ONLY|customType|fromId|tokensBefore/);
+  assert.deepEqual(projectCompactableContext(messages, model()), [
+    {
+      role: "user",
+      content: [{ type: "input_text", text: "CUSTOM-VISIBLE" }],
+    },
+    {
+      role: "user",
+      content: [{ type: "input_text", text: "Ran `printf output`\n```\nBASH-VISIBLE\n```" }],
+    },
+    {
+      role: "user",
+      content: [
+        {
+          type: "input_text",
+          text:
+            "The following is a summary of a branch that this conversation came back from:\n\n" +
+            "<summary>\nBRANCH-VISIBLE</summary>",
+        },
+      ],
+    },
+    {
+      role: "user",
+      content: [
+        {
+          type: "input_text",
+          text:
+            "The conversation history before this point was compacted into the following summary:\n\n" +
+            "<summary>\nCOMPACTION-VISIBLE\n</summary>",
+        },
+      ],
+    },
+  ]);
 });
 
 test("projects only active ordinary function tools in active order", () => {
@@ -324,7 +351,10 @@ test("projection identity is deterministic", () => {
       provider: "example-provider",
       api: "openai-responses",
       model: "gpt-test",
-      content: [{ type: "text", text: "unsigned" }],
+      content: [
+        { type: "text", text: "unsigned" },
+        { type: "text", text: "also unsigned" },
+      ],
       stopReason: "stop",
       usage: {
         input: 0,
@@ -339,8 +369,11 @@ test("projection identity is deterministic", () => {
   ];
 
   const first = projectCompactableContext(messages, model());
-  assert.deepEqual(projectCompactableContext(messages, model()), first);
-  assert.equal(first[0]?.id, "msg_pi_0");
+  const second = projectCompactableContext(messages, model());
+  assert.deepEqual(second, first);
+  assert.equal(typeof first[0]?.id, "string");
+  assert.equal(typeof first[1]?.id, "string");
+  assert.notEqual(first[0]?.id, first[1]?.id);
 });
 
 test("fails closed on unrepresentable model-visible context", () => {
