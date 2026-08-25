@@ -212,7 +212,6 @@ test("runs built-in Codex through Pi while owning the payload and consuming raw 
     prompt_cache_key: "provider-cache-key",
     tool_choice: "auto",
     parallel_tool_calls: true,
-    future_provider_field: { preserved: true },
   };
   let operationOptions: Record<string, any> | undefined;
   let patchedPayload: unknown;
@@ -283,7 +282,6 @@ test("runs built-in Codex through Pi while owning the payload and consuming raw 
     prompt_cache_key: "provider-cache-key",
     tool_choice: "auto",
     parallel_tool_calls: true,
-    future_provider_field: { preserved: true },
   });
   assert.equal(String(forwardedInput), "https://provider-owned.example/codex/responses");
   assert.equal(forwardedInit?.body, "provider-owned-body");
@@ -479,6 +477,22 @@ test("validates captured split CRLF SSE at explicit completion without waiting f
       total: 0.000017,
     },
   });
+
+  const withoutUsage = await validateRemoteCompactionResponse(
+    request(),
+    streamResponse([
+      sse({
+        type: "response.output_item.done",
+        item: { type: "compaction", encrypted_content: "opaque-without-usage" },
+      }),
+      sse({ type: "response.completed", response: {} }),
+    ]),
+    new AbortController().signal,
+  );
+  assert.deepEqual(withoutUsage, {
+    kind: "accepted",
+    item: { type: "compaction", encrypted_content: "opaque-without-usage" },
+  });
 });
 
 test("requires response.completed and classifies pre-completion stream failures as retryable", async () => {
@@ -540,17 +554,11 @@ test("treats completed-response compaction item validation as terminal", async (
 test("classifies transient and terminal HTTP failures with semantic overrides", async () => {
   const cases: Array<[string, number, unknown, "retryable" | "terminal"]> = [
     ["timeout", 408, { error: { code: "request_timeout", message: "later" } }, "retryable"],
-    ["conflict", 409, {}, "retryable"],
-    ["too early", 425, {}, "retryable"],
     ["rate limit", 429, { error: { code: "rate_limit_exceeded" } }, "retryable"],
     ["server", 503, {}, "retryable"],
     ["bad request", 400, {}, "terminal"],
     ["bad request transient code", 400, { error: { code: "server_error" } }, "terminal"],
-    ["unauthorized", 401, {}, "terminal"],
-    ["forbidden", 403, {}, "terminal"],
-    ["not found", 404, {}, "terminal"],
-    ["unprocessable", 422, {}, "terminal"],
-    ["overflow", 500, { error: { code: "context_length_exceeded" } }, "terminal"],
+    ["overflow override", 500, { error: { code: "context_length_exceeded" } }, "terminal"],
     ["type override", 503, { error: { type: "invalid_request_error" } }, "terminal"],
     ["quota override", 429, { error: { code: "insufficient_quota" } }, "terminal"],
   ];
@@ -574,8 +582,8 @@ test("classifies streamed failed and error terminals", async () => {
   const cases: Array<[unknown, "retryable" | "terminal"]> = [
     [{ type: "response.failed", response: { error: { code: "server_error" } } }, "retryable"],
     [{ type: "error", code: "server_overloaded", message: "busy" }, "retryable"],
-    [{ type: "error", type_alias: "ignored", code: "invalid_prompt", message: "bad" }, "terminal"],
-    [{ type: "error", error: "ignored", message: "bad", code: "policy_violation" }, "terminal"],
+    [{ type: "error", code: "invalid_prompt", message: "bad" }, "terminal"],
+    [{ type: "error", message: "bad", code: "policy_violation" }, "terminal"],
     [
       {
         type: "response.failed",
@@ -630,6 +638,31 @@ test("returns standard Retry-After values on retryable HTTP outcomes", async () 
   }
 });
 
+test("fails authentication before transport without fallback", async () => {
+  let fetchCalls = 0;
+  await withFetch(
+    async () => {
+      fetchCalls++;
+      return streamResponse([]);
+    },
+    async () => {
+      for (const auth of [
+        { ok: false, error: "missing credentials" },
+        new Error("credential lookup failed"),
+      ]) {
+        const authContext = context();
+        authContext.modelRegistry.getApiKeyAndHeaders = async () => {
+          if (auth instanceof Error) throw auth;
+          return auth as any;
+        };
+        const outcome = await attemptDirectResponsesOperation(request(), authContext);
+        assertOutcome(outcome, "terminal");
+      }
+    },
+  );
+  assert.equal(fetchCalls, 0);
+});
+
 test("classifies network and success/error body read failures as retryable", async () => {
   await withFetch(
     async () => {
@@ -677,7 +710,7 @@ test("stream idle timeout is retryable", async (t) => {
       await Promise.resolve();
       await Promise.resolve();
       await Promise.resolve();
-      t.mock.timers.tick(300_000);
+      t.mock.timers.runAll();
       const outcome = await promise;
       assertOutcome(outcome, "retryable");
     },

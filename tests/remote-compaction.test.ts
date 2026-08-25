@@ -143,6 +143,16 @@ function hook(fixture: ReturnType<typeof installed>, name: string) {
   return handler;
 }
 
+function assertSingleTerminalTrigger(request: { input: readonly unknown[] } | undefined): void {
+  assert.ok(request);
+  assert.deepEqual(request.input.at(-1), { type: "compaction_trigger" });
+  assert.equal(
+    request.input.filter((item) => (item as { type?: unknown })?.type === "compaction_trigger")
+      .length,
+    1,
+  );
+}
+
 const usage = {
   input: 10,
   output: 2,
@@ -286,6 +296,8 @@ test("owns one immutable three-attempt retry budget and cancels terminal failure
   assert.equal(fixture.requests[1], fixture.requests[2]);
   assert.ok(Object.isFrozen(fixture.requests[0]));
   assert.ok(Object.isFrozen(fixture.requests[0]?.input));
+  fixture.requests.forEach(assertSingleTerminalTrigger);
+  assert.deepEqual(fixture.appendedEntries, []);
 
   const exhausted = installed([retryable(), retryable(), retryable()]);
   assert.deepEqual(
@@ -296,6 +308,8 @@ test("owns one immutable three-attempt retry budget and cancels terminal failure
     { cancel: true },
   );
   assert.equal(exhausted.requests.length, 3);
+  exhausted.requests.forEach(assertSingleTerminalTrigger);
+  assert.deepEqual(exhausted.appendedEntries, []);
 
   const terminalFixture = installed([terminal("context_length_exceeded")]);
   assert.deepEqual(
@@ -307,6 +321,8 @@ test("owns one immutable three-attempt retry budget and cancels terminal failure
   );
   assert.equal(terminalFixture.requests.length, 1);
   assert.match(JSON.stringify(terminalFixture.requests[0]?.input), /RETRY-CONTEXT/);
+  assertSingleTerminalTrigger(terminalFixture.requests[0]);
+  assert.deepEqual(terminalFixture.appendedEntries, []);
 });
 
 test("cancels preparation and abort races without leaking partial acceptance", async () => {
@@ -325,6 +341,7 @@ test("cancels preparation and abort races without leaking partial acceptance", a
     { cancel: true },
   );
   assert.equal(malformed.requests.length, 0);
+  assert.deepEqual(malformed.appendedEntries, []);
 
   const branch = chainEntries([
     messageEntry("user", {
@@ -344,6 +361,7 @@ test("cancels preparation and abort races without leaking partial acceptance", a
     { cancel: true },
   );
   assert.equal(noAttempt.requests.length, 0);
+  assert.deepEqual(noAttempt.appendedEntries, []);
 
   const acceptedThenAborted = new AbortController();
   const acceptedFixture = createRecordingPi();
@@ -361,6 +379,7 @@ test("cancels preparation and abort races without leaking partial acceptance", a
     { cancel: true },
   );
   assert.equal(acceptedCalls, 1);
+  assert.deepEqual(acceptedFixture.appendedEntries, []);
 
   const duringDelay = new AbortController();
   const delayFixture = createRecordingPi();
@@ -378,6 +397,22 @@ test("cancels preparation and abort races without leaking partial acceptance", a
     { cancel: true },
   );
   assert.equal(delayCalls, 1);
+  assert.deepEqual(delayFixture.appendedEntries, []);
+
+  const thrownFixture = createRecordingPi();
+  installRemoteCompaction(thrownFixture.pi, async () => {
+    throw new Error("unexpected adapter failure");
+  });
+  const thrownContext = createHookContext({ branch });
+  assert.deepEqual(
+    await thrownFixture.handlers.get("session_before_compact")?.(
+      compactionEvent(branch),
+      thrownContext.context,
+    ),
+    { cancel: true },
+  );
+  assert.deepEqual(thrownFixture.appendedEntries, []);
+  assert.equal(thrownContext.notifications.at(-1)?.level, "error");
 });
 
 function replayPayload(...suffix: unknown[]): Record<string, unknown> {
@@ -398,6 +433,23 @@ function replayPayload(...suffix: unknown[]): Record<string, unknown> {
       ...suffix,
     ],
   };
+}
+
+function assertReplayHardStop(branch: TestBranchEntry[], payload: unknown, name: string): void {
+  const originalPayload = structuredClone(payload);
+  const fixture = installed();
+  const observed = createHookContext({ branch });
+  assert.equal(
+    hook(fixture, "before_provider_request")(
+      { type: "before_provider_request", payload },
+      observed.context,
+    ),
+    undefined,
+    name,
+  );
+  assert.equal(observed.abortCalls.count, 1, name);
+  assert.equal(observed.notifications.at(-1)?.level, "error", name);
+  assert.deepEqual(payload, originalPayload, name);
 }
 
 test("replays equal Compaction compatibility classes across providers and eligible APIs", () => {
@@ -789,15 +841,18 @@ test("fails closed on missing, malformed, or mismatched class-aware evidence", a
     });
     const fixture = installed();
     const observed = createHookContext({ branch, model: producer });
+    const payload = replayPayload();
+    const originalPayload = structuredClone(payload);
     assert.equal(
       hook(fixture, "before_provider_request")(
-        { type: "before_provider_request", payload: replayPayload() },
+        { type: "before_provider_request", payload },
         observed.context,
       ),
       undefined,
       name,
     );
     assert.equal(observed.abortCalls.count, 1, name);
+    assert.deepEqual(payload, originalPayload, name);
     assert.deepEqual(
       await hook(fixture, "session_before_compact")(compactionEvent(branch), observed.context),
       { cancel: true },
@@ -832,6 +887,7 @@ test("repeated compaction accepts a Compatible model and records its current cla
     result.compaction.details,
     nativeReplayDetails(secondCompactionItem, target, "2911"),
   );
+  assert.equal("usage" in result.compaction, false);
 });
 
 test("hard-stops malformed, stateless, missing, and ambiguous native replay", async () => {
@@ -855,18 +911,7 @@ test("hard-stops malformed, stateless, missing, and ambiguous native replay", as
   ];
 
   for (const [name, payload] of cases) {
-    const fixture = installed();
-    const observed = createHookContext({ branch });
-    assert.equal(
-      hook(fixture, "before_provider_request")(
-        { type: "before_provider_request", payload },
-        observed.context,
-      ),
-      undefined,
-      name,
-    );
-    assert.equal(observed.abortCalls.count, 1, name);
-    assert.equal(observed.notifications.at(-1)?.level, "error", name);
+    assertReplayHardStop(branch, payload, name);
   }
 
   const oldValid = checkpointBranch({ suffix: [] });
@@ -890,16 +935,10 @@ test("hard-stops malformed, stateless, missing, and ambiguous native replay", as
       },
     },
   ]);
+  assertReplayHardStop(broken, { input: [] }, "malformed latest checkpoint");
+
   const brokenFixture = installed();
   const brokenContext = createHookContext({ branch: broken });
-  assert.equal(
-    hook(brokenFixture, "before_provider_request")(
-      { type: "before_provider_request", payload: { input: [] } },
-      brokenContext.context,
-    ),
-    undefined,
-  );
-  assert.equal(brokenContext.abortCalls.count, 1);
   assert.deepEqual(
     await hook(brokenFixture, "session_before_compact")(
       compactionEvent(broken),

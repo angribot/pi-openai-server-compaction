@@ -2,7 +2,7 @@
 
 A Pi extension for OpenAI Responses Remote compaction with native replay.
 
-The extension targets Pi `0.84.2`. Eligible models are either any provider using the exact, case-sensitive `openai-responses` API type, or Pi's built-in `openai-codex` provider using the exact `openai-codex-responses` API type. Eligibility permits a Remote compaction attempt; actual endpoint capability is discovered from the result.
+The extension targets Pi `0.84.3`. Eligible models are either any provider using the exact, case-sensitive `openai-responses` API type, or Pi's built-in `openai-codex` provider using the exact `openai-codex-responses` API type. Eligibility permits a Remote compaction attempt; actual endpoint capability is discovered from the result.
 
 > **Status:** experimental. Install project-local first and keep rollback easy.
 
@@ -11,7 +11,7 @@ The extension targets Pi `0.84.2`. Eligible models are either any provider using
 ## Requirements
 
 - Node `>=22`
-- Pi `0.84.2` as the implementation baseline
+- Pi `0.84.3` as the implementation baseline
 - a selected model using exact API type `openai-responses`, or Pi's built-in `openai-codex` provider using `openai-codex-responses`
 - working Pi-managed credentials for that model
 - a Responses endpoint that accepts the Remote compaction v2 trigger and can replay the returned compaction item
@@ -148,11 +148,11 @@ Every eligible terminal failure returns `{ cancel: true }`, preventing Pi text-c
 
 The extension does not register or override providers. Ordinary requests remain owned by the selected provider transport; this extension only persists request-time compatibility evidence and patches Native replay in `before_provider_request`. Equal-class service acceptance across routes is a runtime assumption: a target rejection follows the normal fail-closed path and does not trigger artifact stripping or a portable fallback.
 
-The Remote compaction operation uses one of two narrow SSE adapters because Pi `0.84.2` does not expose a provider-aware raw Responses operation that proves explicit completion while preserving unknown output items such as `compaction`. Exact `openai-responses` models use direct HTTP/SSE with Pi-resolved routing and authentication. Built-in Codex uses Pi's public provider operation plus a per-call cloned-response capture, retaining Pi's OAuth refresh, account headers, endpoint construction, compression, and request envelope. No handwritten Codex transport or fallback request is used, and ordinary Codex requests remain free to use Pi's configured WebSocket or SSE transport.
+The Remote compaction operation uses one of two narrow SSE adapters because Pi `0.84.3` does not expose a provider-aware raw Responses operation that proves explicit completion while preserving unknown output items such as `compaction`. Exact `openai-responses` models use direct HTTP/SSE with Pi-resolved routing and authentication. Built-in Codex uses Pi's public provider operation plus a per-call cloned-response capture, retaining Pi's OAuth refresh, account headers, endpoint construction, compression, and request envelope. No handwritten Codex transport or fallback request is used, and ordinary Codex requests remain free to use Pi's configured WebSocket or SSE transport.
 
 Other extensions' request mutations and provider-aware raw-operation composition remain outside this package's current contract.
 
-The local Responses projection adapter covers Pi `0.84.2` ordinary semantics for supported persisted messages, images and placeholders, assistant text identity and phase, same-model signed reasoning, ordinary function calls/results and missing-output normalization, built-in custom-message normalization, and active ordinary function tools. Compaction compatibility classes broaden only opaque compaction-item replay; signed or encrypted reasoning, tool-call IDs, thought signatures, and provider namespace metadata retain their existing exact-identity rules. Detectable model-visible context that cannot be represented faithfully cancels before transport. Grammar custom-tool metadata, constrained sampling, deferred tool search, provider distinctions already erased by Pi, and ephemeral provider-payload mutations are outside the supported contract.
+The local Responses projection adapter covers Pi `0.84.3` ordinary semantics for supported persisted messages, images and placeholders, assistant text identity and phase, same-model signed reasoning, ordinary function calls/results and missing-output normalization, built-in custom-message normalization, and active ordinary function tools. Compaction compatibility classes broaden only opaque compaction-item replay; signed or encrypted reasoning, tool-call IDs, thought signatures, and provider namespace metadata retain their existing exact-identity rules. Detectable model-visible context that cannot be represented faithfully cancels before transport. Grammar custom-tool metadata, constrained sampling, deferred tool search, provider distinctions already erased by Pi, and ephemeral provider-payload mutations are outside the supported contract.
 
 Architecture decisions:
 
@@ -177,7 +177,7 @@ Its four focused files are:
 - `tests/remote-compaction-operation.test.ts` — direct and Pi-mediated one-attempt SSE operations, payload ownership, raw completion, validation, failure classification, usage, and abort;
 - `tests/remote-compaction.test.ts` — protocol retry, cancellation, checkpoint formats, request-time compatibility evidence, branch reconstruction, Native replay, invalidation, and repeated compaction.
 
-The credentialed paid live scenario requires Pi CLI `0.84.2`, an explicit Eligible model whose ID is present in the catalog above, working Pi-managed credentials and network, endpoint Remote compaction capability, and permission to incur two compactions plus continuation calls:
+The credentialed paid live scenario requires Pi CLI `0.84.3`, an explicit Eligible model whose ID is present in the catalog above, working Pi-managed credentials and network, endpoint Remote compaction capability, and permission to incur two compactions plus continuation calls:
 
 ```bash
 pi --version
@@ -202,7 +202,7 @@ It covers one linear first compaction, same-process replay and Compatibility dec
 | ----------------------------------- | --------------------------------------------------------------------------------- |
 | `src/index.ts`                      | composition root selecting and installing the production operation                |
 | `src/remote-compaction.ts`          | two-hook Remote compaction protocol, persistence, retry, invalidation, and replay |
-| `src/responses-projection.ts`       | narrow Pi `0.84.2` ordinary Responses projection adapter                          |
+| `src/responses-projection.ts`       | narrow Pi `0.84.3` ordinary Responses projection adapter                          |
 | `src/direct-responses-operation.ts` | one-attempt direct HTTP/SSE capability-gap adapter                                |
 | `src/codex-responses-operation.ts`  | one-attempt Pi-mediated Codex SSE capture adapter                                 |
 | `tests/`                            | four offline contract files plus one credentialed live scenario                   |
