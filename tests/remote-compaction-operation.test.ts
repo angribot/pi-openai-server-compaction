@@ -188,7 +188,11 @@ function assertOutcome(
   outcome: RemoteCompactionAttemptOutcome,
   kind: RemoteCompactionAttemptOutcome["kind"],
 ): void {
-  assert.equal(outcome.kind, kind, outcome.kind === "accepted" ? undefined : outcome.error.message);
+  if (outcome.kind === "accepted") {
+    assert.equal(outcome.kind, kind);
+    return;
+  }
+  assert.equal(outcome.kind, kind, outcome.error.message);
 }
 
 test("runs built-in Codex through Pi while owning the payload and consuming raw capture concurrently", async () => {
