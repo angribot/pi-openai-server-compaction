@@ -35,11 +35,11 @@
     "test:live": "node --experimental-strip-types --test ./tests/live/*-live.test.ts"
   },
   "devDependencies": {
-    "@earendil-works/pi-agent-core": "0.84.2",
-    "@earendil-works/pi-ai": "0.84.2",
-    "@earendil-works/pi-coding-agent": "0.84.2",
-    "@types/node": "^24.10.0",
-    "typescript": "^5.9.3"
+    "@earendil-works/pi-agent-core": "0.84.3",
+    "@earendil-works/pi-ai": "0.84.3",
+    "@earendil-works/pi-coding-agent": "0.84.3",
+    "@types/node": "^26.3.0",
+    "typescript": "^7.0.2"
   },
   "peerDependencies": {
     "@earendil-works/pi-agent-core": "*",
