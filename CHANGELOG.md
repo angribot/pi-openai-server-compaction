@@ -4,6 +4,9 @@ This changelog intentionally starts at **0.1.0**.
 
 ## Unreleased
 
+## 0.9.0 - 2026-08-25
+
+- require Pi 0.84.3 as the implementation and live-acceptance baseline
 - use source-backed Codex `comp_hash` classes for Native replay and repeated Remote compaction across compatible model IDs, Pi providers, and the two Eligible Responses APIs, with exact Model key fallback for unknown classes
 - persist self-describing Native replay checkpoint records plus branch-local request-time Compatibility decision records so reloads, branches, failures, and later catalog revisions cannot reinterpret historical continuity; v0.8.0 checkpoint records remain exact-key legacy state
 - accept explicit raw `response.done` completion events alongside `response.completed` for Remote compaction v2
