@@ -212,4 +212,4 @@ It covers one linear first compaction, same-process replay and Compatibility dec
 
 ## License
 
-MIT. See `LICENSE.md`.
+MIT. See `LICENSE`.
