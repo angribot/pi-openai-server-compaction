@@ -1157,13 +1157,17 @@ test("hard-stops malformed, stateless, missing, and ambiguous native replay", as
       firstKeptEntryId: "checkpoint",
       tokensBefore: 200,
       details: {
-        remoteCompaction: {
-          version: 2,
-          provider: "openai-responses-compaction",
-          implementation: "responses_compaction_v2",
-          modelKey: "example-provider:openai-responses:gpt-test",
+        nativeReplayCheckpoint: {
+          format: "native-replay-checkpoint/1",
+          producer: {
+            modelKey: {
+              provider: "example-provider",
+              api: "openai-responses",
+              id: "gpt-test",
+            },
+            compactionCompatibilityClass: null,
+          },
           replacementHistory: [firstCompactionItem, { role: "user", content: [] }],
-          usage,
         },
       },
     },
@@ -1179,6 +1183,7 @@ test("hard-stops malformed, stateless, missing, and ambiguous native replay", as
     ),
     { cancel: true },
   );
+  assert.equal(brokenFixture.requests.length, 0);
 });
 
 test("does not resurrect an older checkpoint past a later ordinary compaction", () => {
