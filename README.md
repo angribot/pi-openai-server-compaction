@@ -6,7 +6,7 @@ The extension targets Pi `0.84.3`. Eligible models are either any provider using
 
 > **Status:** experimental. Install project-local first and keep rollback easy.
 
-> **Persisted-session compatibility:** new checkpoints use a self-describing Native replay checkpoint record and preserve the producer's creation-time Compaction compatibility class. The structured `remoteCompaction.version: 2` records written by v0.8.0 remain readable with their original exact Model key semantics; they are not upgraded to class-based replay. Pre-refactor Remote compaction checkpoints—including Remote compaction v1 and v0.7.0 v2 details with a string model key, old tags, duplicated usage, or explicit-item replacement history—remain unreadable and fail closed. Before upgrading an affected older session, start a new session or return to a point before its Remote compaction checkpoint. No in-place migration is provided.
+> **Persisted-session compatibility:** only self-describing `nativeReplayCheckpoint` records with format `native-replay-checkpoint/1` are supported, preserving the producer's creation-time Compaction compatibility class or explicit `null`. Legacy `remoteCompaction` records, including the structured version 2 records written by v0.8.0 and all earlier formats, are no longer readable. If the active branch's latest compaction is a legacy checkpoint, ordinary requests abort and Remote compaction on an Eligible model is cancelled. Start a new session or return to a point before that checkpoint. No in-place migration or text fallback is provided.
 
 ## Requirements
 
@@ -90,20 +90,6 @@ The matching `CompactionEntry.details` written by this release contains exactly:
 
 The class is the opaque value resolved when the compaction item is created; explicit `null` means the producer was not cataloged. It is never recalculated for an old checkpoint. Replacement history contains only the newly accepted opaque compaction item. It does not contain retained user or assistant messages, the marker, a trigger, endpoint or routing data, response IDs, implementation tags, or duplicated usage. A persisted `openai-codex-responses` key is valid only with provider `openai-codex`.
 
-The extension also reads the v0.8.0 legacy shape:
-
-```ts
-{
-  remoteCompaction: {
-    version: 2,
-    modelKey: { provider, api, id },
-    replacementHistory: [compactionItem],
-  },
-}
-```
-
-Legacy records retain exact Model key compatibility. They do not acquire a class from the current catalog.
-
 Only the active branch's latest `CompactionEntry` can define replay state. The extension reconstructs that state from the branch on every hook; it keeps no replay cache, request-shape cache, invalidation tombstone, or lifecycle synchronization listener. A later ordinary compaction supersedes an older checkpoint. A fixed marker with missing, unknown-format, or malformed details is a broken checkpoint and fails closed.
 
 For a checkpoint with a non-null class, every ordinary request appends a branch-local custom entry with `customType: "native-replay-compatibility-decision/1"` before transport. Its data identifies the owning checkpoint and records the selected target identity, the target's resolved class or `null`, and the compatibility result. Custom entries are excluded from model context. On reload, decisions are paired with following persisted assistant outcomes: a newer decision supersedes an abandoned pending request, error and aborted outcomes consume their decision without invalidating replay, and a successful incompatible outcome permanently invalidates that checkpoint on the branch. A successful outcome without valid matching evidence makes the checkpoint broken and fails closed.
@@ -125,7 +111,7 @@ For a compatible ordinary request, the extension:
 
 A malformed active state, invalidated branch, non-array input, or missing/ambiguous span stops the ordinary request through `ctx.abort()` and emits an explicit error. It does not throw from the hook and allow Pi to continue with the old payload.
 
-Selecting an incompatible model leaves its ordinary payload and transport untouched and emits a compatibility warning. For a class-aware checkpoint, the request-time incompatible decision is persisted before transport. Selection, an abandoned request, a failed request, or an aborted assistant turn does not itself invalidate replay. A persisted successful assistant turn governed by an incompatible decision does invalidate the branch, including text and tool-calling turns. For legacy or class-absent checkpoints, successful exact-identity mismatch retains the same invalidation behavior. After invalidation, compatible replay stops and further Remote compaction is cancelled; the extension never drops the incompatible turn or constructs a best-effort mixed-model suffix.
+Selecting an incompatible model leaves its ordinary payload and transport untouched and emits a compatibility warning. For a class-aware checkpoint, the request-time incompatible decision is persisted before transport. Selection, an abandoned request, a failed request, or an aborted assistant turn does not itself invalidate replay. A persisted successful assistant turn governed by an incompatible decision does invalidate the branch, including text and tool-calling turns. For checkpoints with an explicit `null` class, a successful exact-identity mismatch invalidates the branch. After invalidation, compatible replay stops and further Remote compaction is cancelled; the extension never drops the incompatible turn or constructs a best-effort mixed-model suffix.
 
 ## Repeated Remote compaction
 
@@ -190,8 +176,8 @@ It covers one linear first compaction, same-process replay and Compatibility dec
 ## Troubleshooting
 
 - Use `pi --no-extensions` to bypass all extensions while recovering a session.
-- Inspect the active branch's latest compaction entry in the session JSONL, especially `summary` and `details.nativeReplayCheckpoint`; for v0.8.0 legacy records, inspect `details.remoteCompaction`.
-- If a checkpoint predates this refactor, start a new session or return before that checkpoint; there is no migration reader.
+- Inspect the active branch's latest compaction entry in the session JSONL, especially `summary` and `details.nativeReplayCheckpoint`.
+- If that checkpoint uses `details.remoteCompaction` or another unsupported format, start a new session or return before that checkpoint; there is no migration reader.
 - If Native replay reports a missing or ambiguous span, do not continue from the incomplete payload. Recover through a new session or a complete pre-checkpoint branch point.
 - If Native replay reports malformed or missing compatibility evidence, recover through a branch point before the affected class-aware checkpoint; the extension will not reinterpret the assistant turn from the current catalog.
 - If an endpoint rejects an equal-class compaction item, treat that route as unavailable for this session; the extension does not retry without the item or create a portable summary.

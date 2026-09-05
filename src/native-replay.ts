@@ -83,7 +83,6 @@ type ValidReplayState = {
   entryIndex: number;
   modelKey: RemoteCompactionModelKey;
   compactionCompatibilityClass: string | null;
-  checkpointKind: "legacy" | "native";
   replacementHistory: [CompactionItem];
   invalidated: boolean;
 };
@@ -217,41 +216,6 @@ function resolveCompatibilityClass(
   return isCompatibilityClass(value) ? value : undefined;
 }
 
-function decodeLegacyDetails(
-  value: unknown,
-): Omit<ValidReplayState, "kind" | "entry" | "entryIndex" | "invalidated"> | undefined {
-  if (!isRecord(value) || !hasExactKeys(value, ["remoteCompaction"])) return undefined;
-  const remote = value.remoteCompaction;
-  if (
-    !isRecord(remote) ||
-    !hasExactKeys(remote, ["version", "modelKey", "replacementHistory"]) ||
-    remote.version !== 2 ||
-    !isRecord(remote.modelKey) ||
-    !hasExactKeys(remote.modelKey, ["provider", "api", "id"])
-  ) {
-    return undefined;
-  }
-  const key = modelKeyFromIdentity(
-    remote.modelKey.provider,
-    remote.modelKey.api,
-    remote.modelKey.id,
-  );
-  if (
-    !key ||
-    !Array.isArray(remote.replacementHistory) ||
-    remote.replacementHistory.length !== 1 ||
-    !isCompactionItem(remote.replacementHistory[0])
-  ) {
-    return undefined;
-  }
-  return {
-    modelKey: key,
-    compactionCompatibilityClass: null,
-    checkpointKind: "legacy",
-    replacementHistory: [remote.replacementHistory[0]],
-  };
-}
-
 function decodeNativeDetails(
   value: unknown,
 ): Omit<ValidReplayState, "kind" | "entry" | "entryIndex" | "invalidated"> | undefined {
@@ -288,15 +252,8 @@ function decodeNativeDetails(
   return {
     modelKey: key,
     compactionCompatibilityClass: compatibilityClass,
-    checkpointKind: "native",
     replacementHistory: [checkpoint.replacementHistory[0]],
   };
-}
-
-function decodeDetails(
-  value: unknown,
-): Omit<ValidReplayState, "kind" | "entry" | "entryIndex" | "invalidated"> | undefined {
-  return decodeNativeDetails(value) ?? decodeLegacyDetails(value);
 }
 
 function decodeCompatibilityDecision(value: unknown): CompatibilityDecision | undefined {
@@ -430,7 +387,7 @@ function deriveActiveReplayState(branch: readonly BranchEntry[]): ActiveReplaySt
   if (!entry) return { kind: "none" };
   if (entry.summary !== REMOTE_COMPACTION_CHECKPOINT_MARKER) return { kind: "none" };
 
-  const decoded = decodeDetails(entry.details);
+  const decoded = decodeNativeDetails(entry.details);
   if (!decoded) {
     return {
       kind: "broken",
@@ -461,9 +418,9 @@ function deriveActiveReplayState(branch: readonly BranchEntry[]): ActiveReplaySt
 }
 
 function requiresCompatibilityEvidence(
-  state: Pick<ValidReplayState, "checkpointKind" | "compactionCompatibilityClass">,
+  state: Pick<ValidReplayState, "compactionCompatibilityClass">,
 ): boolean {
-  return state.checkpointKind === "native" && state.compactionCompatibilityClass !== null;
+  return state.compactionCompatibilityClass !== null;
 }
 
 export function prepareCompactionReplay(

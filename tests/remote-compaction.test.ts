@@ -89,7 +89,7 @@ function checkpointBranch(
       summary: options.summary ?? REMOTE_COMPACTION_CHECKPOINT_MARKER,
       firstKeptEntryId: "retained",
       tokensBefore: 100,
-      details: options.details === undefined ? legacyRemoteDetails() : options.details,
+      details: options.details === undefined ? nativeReplayDetails() : options.details,
     },
     ...(options.suffix ?? [
       messageEntry("post", {
@@ -578,7 +578,7 @@ test("replays equal Compaction compatibility classes across providers and eligib
   ]);
 });
 
-test("prefers Compaction compatibility class before exact Model key fallback and keeps legacy semantics", () => {
+test("prefers Compaction compatibility class before exact Model key fallback", () => {
   const producer = responsesModel({ id: "gpt-5.6-sol" });
   const classAwareBranch = checkpointBranch({
     details: nativeReplayDetails(firstCompactionItem, producer, "3000"),
@@ -620,22 +620,23 @@ test("prefers Compaction compatibility class before exact Model key fallback and
   );
   assert.equal((exactFixture.appendedEntries[0]?.data as any).compatible, true);
 
-  const legacyBranch = checkpointBranch({
-    details: legacyRemoteDetails(firstCompactionItem, producer),
+  const classAbsentBranch = checkpointBranch({
+    details: nativeReplayDetails(firstCompactionItem, producer, null),
     suffix: [],
   });
-  const legacyTarget = responsesModel({ id: "gpt-5.6-luna" });
-  const legacyFixture = installed();
-  const legacy = createHookContext({ branch: legacyBranch, model: legacyTarget });
+  const classAbsentTarget = responsesModel({ id: "gpt-5.6-luna" });
+  const classAbsentFixture = installed();
+  const classAbsent = createHookContext({ branch: classAbsentBranch, model: classAbsentTarget });
   assert.equal(
-    hook(legacyFixture, "before_provider_request")(
+    hook(classAbsentFixture, "before_provider_request")(
       { type: "before_provider_request", payload: replayPayload() },
-      legacy.context,
+      classAbsent.context,
     ),
     undefined,
   );
-  assert.equal(legacy.notifications.at(-1)?.level, "warning");
-  assert.deepEqual(legacyFixture.appendedEntries, []);
+  assert.equal(classAbsent.abortCalls.count, 0);
+  assert.equal(classAbsent.notifications.at(-1)?.level, "warning");
+  assert.deepEqual(classAbsentFixture.appendedEntries, []);
 
   const uncataloged = responsesModel({ id: "future-model" });
   const uncatalogedBranch = checkpointBranch({
@@ -661,7 +662,7 @@ test("reconstructs latest built-in Codex Remote compaction v2 state and replaces
     id: "gpt-codex",
   });
   const branch = checkpointBranch({
-    details: legacyRemoteDetails(firstCompactionItem, selectedModel),
+    details: nativeReplayDetails(firstCompactionItem, selectedModel),
   });
   const fixture = installed();
   const { context, abortCalls } = createHookContext({
@@ -1096,6 +1097,30 @@ test("fails closed on missing, malformed, or mismatched class-aware evidence", a
       name,
     );
   }
+});
+
+test("rejects v0.8.0 legacy checkpoints for ordinary requests and Remote compaction", async () => {
+  const branch = checkpointBranch({ details: legacyRemoteDetails(), suffix: [] });
+  const fixture = installed();
+  const observed = createHookContext({ branch });
+  const payload = replayPayload();
+  const originalPayload = structuredClone(payload);
+  assert.equal(
+    hook(fixture, "before_provider_request")(
+      { type: "before_provider_request", payload },
+      observed.context,
+    ),
+    undefined,
+  );
+  assert.equal(observed.abortCalls.count, 1);
+  assert.equal(observed.notifications.at(-1)?.level, "error");
+  assert.deepEqual(payload, originalPayload);
+  assert.deepEqual(fixture.appendedEntries, []);
+  assert.deepEqual(
+    await hook(fixture, "session_before_compact")(compactionEvent(branch), observed.context),
+    { cancel: true },
+  );
+  assert.equal(fixture.requests.length, 0);
 });
 
 test("hard-stops malformed, stateless, missing, and ambiguous native replay", async () => {
