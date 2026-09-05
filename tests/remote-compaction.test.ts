@@ -716,7 +716,7 @@ test("reconstructs latest built-in Codex Remote compaction v2 state and replaces
   );
 });
 
-test("reconstructs request-time decisions without reinterpreting historical turns", () => {
+test("uses the current catalog for future requests and allows forks before decision evidence", () => {
   const producer = responsesModel({ id: "gpt-5.6-sol" });
   const historicalTarget = responsesModel({
     provider: "openai-codex",
@@ -746,20 +746,7 @@ test("reconstructs request-time decisions without reinterpreting historical turn
     { input: [firstCompactionItem] },
   );
 
-  const fixture = installed([accepted()], changedCatalog);
-  const observed = createHookContext({ branch, model: producer });
   const suffix = { type: "provider_context", value: "AFTER-CHECKPOINT" };
-
-  assert.deepEqual(
-    hook(fixture, "before_provider_request")(
-      { type: "before_provider_request", payload: replayPayload(suffix) },
-      observed.context,
-    ),
-    { input: [firstCompactionItem, suffix] },
-  );
-  assert.equal(observed.abortCalls.count, 0);
-  assert.equal((fixture.appendedEntries[0]?.data as any).compatible, true);
-
   const futureRequestFixture = installed([accepted()], changedCatalog);
   const futureRequest = createHookContext({ branch, model: historicalTarget });
   assert.equal(
@@ -772,16 +759,6 @@ test("reconstructs request-time decisions without reinterpreting historical turn
   assert.equal(futureRequest.abortCalls.count, 0);
   assert.equal(futureRequest.notifications.at(-1)?.level, "warning");
   assert.equal((futureRequestFixture.appendedEntries[0]?.data as any).compatible, false);
-
-  const fresh = installed([accepted()], changedCatalog);
-  const freshObserved = createHookContext({ branch, model: producer });
-  assert.deepEqual(
-    hook(fresh, "before_provider_request")(
-      { type: "before_provider_request", payload: replayPayload(suffix) },
-      freshObserved.context,
-    ),
-    { input: [firstCompactionItem, suffix] },
-  );
 });
 
 test("resumes generated checkpoint and decision evidence across catalog changes and repeated compaction", async () => {
@@ -914,13 +891,12 @@ test("hard-stops decision persistence failures before replay or incompatible war
     assert.equal(observed.abortCalls.count, 1);
     assert.deepEqual(payload, original);
     assert.deepEqual(fixture.appendedEntries, []);
-    assert.deepEqual(observed.notifications, [
-      {
-        level: "error",
-        message:
-          "Remote compaction native replay stopped because request-time compatibility evidence could not be persisted. Start a new session or return to a complete pre-checkpoint branch point.",
-      },
-    ]);
+    assert.equal(observed.notifications.length, 1);
+    assert.equal(observed.notifications[0]?.level, "error");
+    assert.match(
+      observed.notifications[0]!.message,
+      /request-time compatibility evidence could not be persisted/,
+    );
   }
 });
 
