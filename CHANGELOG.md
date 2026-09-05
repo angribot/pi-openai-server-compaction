@@ -4,6 +4,8 @@ This changelog intentionally starts at **0.1.0**.
 
 ## Unreleased
 
+- upgrade the development and documentation baseline from Pi 0.84.3 to Pi 0.85.1
+
 ## 0.10.1 - 2026-09-05
 
 - simplify the internal Remote compaction request contract and clarify payload field ownership without changing wire behavior or persisted formats

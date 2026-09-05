@@ -37,7 +37,7 @@ The ordered, Pi-persisted, compaction-aware context of the active linear session
 _Avoid_: Final provider payload, last observed request, effective context
 
 **Unrepresentable compactable context**:
-Compactable context containing model-visible semantics that cannot be faithfully reconstructed as Responses input through Pi 0.84.3 public APIs. Its presence cancels Remote compaction rather than permitting silent omission, approximation, or partial replacement.
+Compactable context containing model-visible semantics that cannot be faithfully reconstructed as Responses input through Pi 0.85.1 public APIs. Its presence cancels Remote compaction rather than permitting silent omission, approximation, or partial replacement.
 _Avoid_: Unsupported Pi context, unsupported context, unconvertible context
 
 **Replacement history**:
