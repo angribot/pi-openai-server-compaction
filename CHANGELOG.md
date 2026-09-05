@@ -4,6 +4,8 @@ This changelog intentionally starts at **0.1.0**.
 
 ## Unreleased
 
+## 0.10.0 - 2026-09-05
+
 - remove support for v0.8.0 legacy `remoteCompaction` checkpoint records; affected active branches now abort ordinary requests and cancel Remote compaction on Eligible models, requiring a new session or a return before the checkpoint, with no migration or text fallback
 - enforce tool-free Remote compaction requests in both adapters, stripping inherited `tools` while preserving Pi's Codex control fields and historical tool-call input
 
