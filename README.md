@@ -202,7 +202,8 @@ It covers one linear first compaction, same-process replay and Compatibility dec
 | Path                                | Purpose                                                                           |
 | ----------------------------------- | --------------------------------------------------------------------------------- |
 | `src/index.ts`                      | composition root selecting and installing the production operation                |
-| `src/remote-compaction.ts`          | two-hook Remote compaction protocol, persistence, retry, invalidation, and replay |
+| `src/remote-compaction.ts`          | Pi hook orchestration, persistence effects, retry, and Responses span replacement |
+| `src/native-replay.ts`              | checkpoint records, compatibility evidence, and branch continuity derivation      |
 | `src/responses-projection.ts`       | narrow Pi `0.84.3` ordinary Responses projection adapter                          |
 | `src/direct-responses-operation.ts` | one-attempt direct HTTP/SSE capability-gap adapter                                |
 | `src/codex-responses-operation.ts`  | one-attempt Pi-mediated Codex SSE capture adapter                                 |
