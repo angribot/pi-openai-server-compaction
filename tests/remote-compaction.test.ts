@@ -271,6 +271,38 @@ test("attempts only Eligible models and publishes one atomic first compaction", 
   assert.equal(recorded.requests.length, 2);
 });
 
+test("captures the producer class before an asynchronous compaction attempt completes", async () => {
+  const producer = responsesModel({ id: "gpt-5.6-sol" });
+  let currentClass = "creation-class";
+  let complete!: (outcome: ReturnType<typeof accepted>) => void;
+  const pending = new Promise<ReturnType<typeof accepted>>((resolve) => {
+    complete = resolve;
+  });
+  const fixture = createRecordingPi();
+  installRemoteCompaction(
+    fixture.pi,
+    () => pending,
+    () => currentClass,
+  );
+  const branch = chainEntries([
+    messageEntry("user", {
+      role: "user",
+      content: [{ type: "text", text: "CONTEXT" }],
+      timestamp: 1,
+    }),
+  ]);
+  const result = fixture.handlers.get("session_before_compact")!(
+    compactionEvent(branch),
+    createHookContext({ branch, model: producer }).context,
+  );
+  currentClass = "changed-during-attempt";
+  complete(accepted());
+  assert.deepEqual(
+    ((await result) as any).compaction.details,
+    nativeReplayDetails(firstCompactionItem, producer, "creation-class"),
+  );
+});
+
 test("owns one immutable three-attempt retry budget and cancels terminal failures", async () => {
   const branch = chainEntries([
     messageEntry("user", {
@@ -751,6 +783,192 @@ test("reconstructs request-time decisions without reinterpreting historical turn
   );
 });
 
+test("resumes generated checkpoint and decision evidence across catalog changes and repeated compaction", async () => {
+  const producer = responsesModel({ id: "gpt-5.6-sol" });
+  const historicalTarget = responsesModel({
+    provider: "openai-codex",
+    api: "openai-codex-responses",
+    id: "gpt-5.6-luna",
+  });
+  const initial = chainEntries([
+    messageEntry("retained", {
+      role: "user",
+      content: [{ type: "text", text: "RETAINED" }],
+      timestamp: 1,
+    }),
+  ]);
+  const original = installed();
+  const generated = (await hook(original, "session_before_compact")(
+    compactionEvent(initial),
+    createHookContext({ branch: initial, model: producer }).context,
+  )) as any;
+  assert.deepEqual(
+    generated.compaction.details,
+    nativeReplayDetails(firstCompactionItem, producer, "3000"),
+  );
+  const checkpoint = chainEntries([
+    ...initial,
+    { type: "compaction", id: "generated-checkpoint", ...generated.compaction },
+  ]);
+  const ordinary = createHookContext({ branch: checkpoint, model: historicalTarget });
+  assert.deepEqual(
+    hook(original, "before_provider_request")(
+      { type: "before_provider_request", payload: replayPayload() },
+      ordinary.context,
+    ),
+    { input: [firstCompactionItem] },
+  );
+  assert.equal(original.appendedEntries.length, 1);
+  const decision = original.appendedEntries[0]!;
+  assert.deepEqual(decision, {
+    customType: NATIVE_REPLAY_COMPATIBILITY_DECISION_TYPE,
+    data: {
+      checkpointId: "generated-checkpoint",
+      target: {
+        modelKey: { provider: "openai-codex", api: "openai-codex-responses", id: "gpt-5.6-luna" },
+        compactionCompatibilityClass: "3000",
+      },
+      compatible: true,
+    },
+  });
+  const branch = chainEntries([
+    ...checkpoint,
+    { type: "custom", id: "actual-decision", ...structuredClone(decision) },
+    messageEntry("assistant", assistantMessage("HISTORICAL-ANSWER", historicalTarget)),
+  ]);
+  const repeatedTarget = responsesModel({ provider: "other-route", id: "gpt-5.6-terra" });
+  const changedCatalog: CompactionCompatibilityResolver = (id) =>
+    id === historicalTarget.id
+      ? "future-class"
+      : id === producer.id || id === repeatedTarget.id
+        ? "3000"
+        : undefined;
+  const fresh = installed([accepted(secondCompactionItem)], changedCatalog);
+  const observed = createHookContext({ branch, model: producer });
+  const suffix = {
+    role: "assistant",
+    content: [{ type: "output_text", text: "HISTORICAL-ANSWER" }],
+  };
+  assert.deepEqual(
+    hook(fresh, "before_provider_request")(
+      { type: "before_provider_request", payload: replayPayload(suffix) },
+      observed.context,
+    ),
+    { input: [firstCompactionItem, suffix] },
+  );
+  const repeated = (await hook(fresh, "session_before_compact")(
+    compactionEvent(branch),
+    createHookContext({ branch, model: repeatedTarget }).context,
+  )) as any;
+  assert.equal(fresh.requests.length, 1);
+  assert.deepEqual(fresh.requests[0]?.input[0], firstCompactionItem);
+  assertSingleTerminalTrigger(fresh.requests[0]);
+  assert.match(JSON.stringify(fresh.requests[0]?.input), /HISTORICAL-ANSWER/);
+  assert.doesNotMatch(
+    JSON.stringify(fresh.requests[0]?.input),
+    /RETAINED|native-replay-compatibility-decision/,
+  );
+  assert.deepEqual(
+    repeated.compaction.details,
+    nativeReplayDetails(secondCompactionItem, repeatedTarget, "3000"),
+  );
+  assert.equal("usage" in repeated.compaction, false);
+  assert.equal(observed.abortCalls.count, 0);
+  assert.deepEqual(observed.notifications, []);
+});
+
+test("hard-stops decision persistence failures before replay or incompatible warnings", () => {
+  const producer = responsesModel({ id: "gpt-5.6-sol" });
+  const targets = [
+    responsesModel({ id: "gpt-5.6-luna" }),
+    responsesModel({ id: "gpt-5.5" }),
+    responsesModel({
+      provider: "third-party-codex",
+      api: "openai-codex-responses",
+      id: "gpt-5.6-luna",
+    }),
+  ];
+  for (const target of targets) {
+    const fixture = installed();
+    let appendCalls = 0;
+    fixture.pi.appendEntry = () => {
+      appendCalls++;
+      throw new Error("disk full");
+    };
+    const branch = checkpointBranch({
+      details: nativeReplayDetails(firstCompactionItem, producer, "3000"),
+      suffix: [],
+    });
+    const observed = createHookContext({ branch, model: target });
+    const payload = replayPayload();
+    const original = structuredClone(payload);
+    assert.equal(
+      hook(fixture, "before_provider_request")(
+        { type: "before_provider_request", payload },
+        observed.context,
+      ),
+      undefined,
+    );
+    assert.equal(appendCalls, 1);
+    assert.equal(observed.abortCalls.count, 1);
+    assert.deepEqual(payload, original);
+    assert.deepEqual(fixture.appendedEntries, []);
+    assert.deepEqual(observed.notifications, [
+      {
+        level: "error",
+        message:
+          "Remote compaction native replay stopped because request-time compatibility evidence could not be persisted. Start a new session or return to a complete pre-checkpoint branch point.",
+      },
+    ]);
+  }
+});
+
+test("persists compatible evidence before rejecting the replay replacement span", () => {
+  const producer = responsesModel({ id: "gpt-5.6-sol" });
+  const branch = checkpointBranch({
+    details: nativeReplayDetails(firstCompactionItem, producer, "3000"),
+    suffix: [],
+  });
+  const fixture = installed();
+  const observed = createHookContext({ branch, model: producer });
+  const payload = {
+    input: [{ role: "user", content: [{ type: "input_text", text: "MISSING-SPAN" }] }],
+  };
+  const original = structuredClone(payload);
+  observed.context.abort = () => {
+    observed.abortCalls.count++;
+    assert.equal(fixture.appendedEntries.length, 1);
+  };
+  assert.equal(
+    hook(fixture, "before_provider_request")(
+      { type: "before_provider_request", payload },
+      observed.context,
+    ),
+    undefined,
+  );
+  assert.equal(observed.abortCalls.count, 1);
+  assert.deepEqual(payload, original);
+  assert.deepEqual(fixture.appendedEntries, [
+    {
+      customType: NATIVE_REPLAY_COMPATIBILITY_DECISION_TYPE,
+      data: {
+        checkpointId: "checkpoint",
+        target: {
+          modelKey: { provider: "example-provider", api: "openai-responses", id: "gpt-5.6-sol" },
+          compactionCompatibilityClass: "3000",
+        },
+        compatible: true,
+      },
+    },
+  ]);
+  assert.equal(observed.notifications.length, 1);
+  assert.equal(observed.notifications[0]?.level, "error");
+  assert.match(
+    observed.notifications[0]!.message,
+    /replay replacement span was missing or ambiguous/,
+  );
+});
+
 test("consumes Compatibility decision records according to persisted assistant outcomes", async () => {
   const producer = responsesModel({ id: "gpt-5.6-sol" });
   const incompatible = responsesModel({ id: "gpt-5.5" });
@@ -878,35 +1096,6 @@ test("fails closed on missing, malformed, or mismatched class-aware evidence", a
       name,
     );
   }
-});
-
-test("repeated compaction accepts a Compatible model and records its current class", async () => {
-  const producer = responsesModel({ id: "gpt-5.4" });
-  const target = responsesModel({ provider: "other-route", id: "gpt-5.5" });
-  const branch = checkpointBranch({
-    details: nativeReplayDetails(firstCompactionItem, producer, "2911"),
-    suffix: [
-      messageEntry("suffix-user", {
-        role: "user",
-        content: [{ type: "text", text: "CLASS-SUFFIX" }],
-        timestamp: 4,
-      }),
-    ],
-  });
-  const fixture = installed([accepted(secondCompactionItem)]);
-  const result = (await hook(fixture, "session_before_compact")(
-    compactionEvent(branch),
-    createHookContext({ branch, model: target }).context,
-  )) as any;
-
-  assert.deepEqual(fixture.requests[0]?.input[0], firstCompactionItem);
-  assert.match(JSON.stringify(fixture.requests[0]?.input), /CLASS-SUFFIX/);
-  assert.deepEqual(fixture.requests[0]?.input.at(-1), { type: "compaction_trigger" });
-  assert.deepEqual(
-    result.compaction.details,
-    nativeReplayDetails(secondCompactionItem, target, "2911"),
-  );
-  assert.equal("usage" in result.compaction, false);
 });
 
 test("hard-stops malformed, stateless, missing, and ambiguous native replay", async () => {
