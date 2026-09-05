@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
-import type { ToolInfo } from "@earendil-works/pi-coding-agent";
 import {
   installRemoteCompaction,
   NATIVE_REPLAY_COMPATIBILITY_DECISION_TYPE,
@@ -162,24 +161,12 @@ const usage = {
   cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
 };
 
-test("attempts only Eligible models and publishes one atomic first compaction", async () => {
-  const tools = [
-    {
-      name: "read",
-      description: "Read a file",
-      parameters: { type: "object", properties: { path: { type: "string" } } },
-    },
-    {
-      name: "inactive",
-      description: "Inactive",
-      parameters: { type: "object" },
-    },
-  ] as unknown as ToolInfo[];
+test("attempts only Eligible models and publishes one atomic first compaction without reading tools", async () => {
   const recorded = recordingAttempt([
     accepted(firstCompactionItem, usage),
     accepted(firstCompactionItem, usage),
   ]);
-  const fixture = createRecordingPi({ tools, activeTools: ["read"] });
+  const fixture = createRecordingPi();
   installRemoteCompaction(fixture.pi, recorded.attempt);
   const branch = chainEntries([
     messageEntry("user", {
@@ -206,7 +193,6 @@ test("attempts only Eligible models and publishes one atomic first compaction", 
       { type: "compaction_trigger" },
     ],
     instructions: "SYSTEM-PROMPT\n\nAdditional compaction instructions:\nCUSTOM-GUIDANCE",
-    store: false,
   });
   assert.notEqual(recorded.requests[0]?.model, context.model);
   assert.deepEqual(result, {

@@ -11,7 +11,6 @@ export type RemoteCompactionRequest = Readonly<{
   model: Model<any>;
   input: readonly ResponsesItem[];
   instructions: string;
-  store: false;
 }>;
 
 export function remoteCompactionPayload(
