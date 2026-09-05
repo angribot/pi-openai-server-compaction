@@ -4,6 +4,8 @@ This changelog intentionally starts at **0.1.0**.
 
 ## Unreleased
 
+## 0.9.2 - 2026-09-05
+
 - omit Pi tools from Remote compaction requests so OpenAI schema validation cannot reject unsupported regex lookaround in the `tasks` tool
 
 ## 0.9.1 - 2026-09-05
