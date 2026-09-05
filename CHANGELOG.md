@@ -4,6 +4,11 @@ This changelog intentionally starts at **0.1.0**.
 
 ## Unreleased
 
+## 0.10.1 - 2026-09-05
+
+- simplify the internal Remote compaction request contract and clarify payload field ownership without changing wire behavior or persisted formats
+- restore malformed current-format checkpoint coverage and consolidate Native replay lifecycle tests
+
 ## 0.10.0 - 2026-09-05
 
 - remove support for v0.8.0 legacy `remoteCompaction` checkpoint records; affected active branches now abort ordinary requests and cancel Remote compaction on Eligible models, requiring a new session or a return before the checkpoint, with no migration or text fallback
