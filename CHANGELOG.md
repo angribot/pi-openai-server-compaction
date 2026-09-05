@@ -4,6 +4,8 @@ This changelog intentionally starts at **0.1.0**.
 
 ## Unreleased
 
+- omit Pi tools from Remote compaction requests so OpenAI schema validation cannot reject unsupported regex lookaround in the `tasks` tool
+
 ## 0.9.1 - 2026-09-05
 
 - recognize `gpt-6-astra`, `gpt-daybreak-blue-latest`, `gpt-daybreak-red-latest`, and `codex-auto-review` as Codex `3000` compaction-compatible models for Native replay and repeated Remote compaction

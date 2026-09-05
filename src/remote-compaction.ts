@@ -9,7 +9,6 @@ import type {
   RemoteCompactionRequest,
 } from "./remote-compaction-operation.ts";
 import {
-  projectActiveFunctionTools,
   projectCompactableContext,
   type ResponsesItem,
 } from "./responses-projection.ts";
@@ -652,12 +651,13 @@ function buildRequest(
     );
     projected = projectCompactableContext(session.messages, model);
   }
-  const tools = projectActiveFunctionTools(pi.getAllTools(), pi.getActiveTools());
+  // Remote compaction is a Responses protocol operation, not a model turn.
+  // Do not send Pi's active tools: some built-in tool schemas use regex
+  // lookaround, which OpenAI's Responses schema validator rejects.
   return immutableRequest({
     model,
     input: [...projected, { type: "compaction_trigger" }],
     instructions: combineInstructions(context.getSystemPrompt(), event.customInstructions),
-    ...(tools.length > 0 ? { tools } : {}),
     store: false,
   });
 }
