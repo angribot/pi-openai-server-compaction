@@ -4,6 +4,8 @@ This changelog intentionally starts at **0.1.0**.
 
 ## Unreleased
 
+- recognize `gpt-6-astra`, `gpt-daybreak-blue-latest`, `gpt-daybreak-red-latest`, and `codex-auto-review` as Codex `3000` compaction-compatible models for Native replay and repeated Remote compaction
+
 ## 0.9.0 - 2026-08-25
 
 - require Pi 0.84.3 as the implementation and live-acceptance baseline

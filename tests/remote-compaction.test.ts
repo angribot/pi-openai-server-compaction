@@ -452,6 +452,33 @@ function assertReplayHardStop(branch: TestBranchEntry[], payload: unknown, name:
   assert.deepEqual(payload, originalPayload, name);
 }
 
+for (const id of [
+  "gpt-6-astra",
+  "gpt-daybreak-blue-latest",
+  "gpt-daybreak-red-latest",
+  "codex-auto-review",
+]) {
+  test(`replays the shared Codex compaction class for ${id}`, () => {
+    const producer = responsesModel({ id: "gpt-5.6-sol" });
+    const target = responsesModel({ id });
+    const branch = checkpointBranch({
+      details: nativeReplayDetails(firstCompactionItem, producer, "3000"),
+      suffix: [],
+    });
+    const fixture = installed();
+    const observed = createHookContext({ branch, model: target });
+
+    assert.deepEqual(
+      hook(fixture, "before_provider_request")(
+        { type: "before_provider_request", payload: replayPayload() },
+        observed.context,
+      ),
+      { input: [firstCompactionItem] },
+    );
+    assert.equal(observed.abortCalls.count, 0);
+  });
+}
+
 test("replays equal Compaction compatibility classes across providers and eligible APIs", () => {
   const producer = responsesModel({ id: "gpt-5.6-sol" });
   const target = responsesModel({
