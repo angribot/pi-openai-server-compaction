@@ -4,6 +4,8 @@ This changelog intentionally starts at **0.1.0**.
 
 ## Unreleased
 
+- enforce tool-free Remote compaction requests in both adapters, stripping inherited `tools` while preserving Pi's Codex control fields and historical tool-call input
+
 ## 0.9.2 - 2026-09-05
 
 - omit Pi tools from Remote compaction requests so OpenAI schema validation cannot reject unsupported regex lookaround in the `tasks` tool

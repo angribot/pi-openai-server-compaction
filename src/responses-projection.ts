@@ -1,15 +1,7 @@
 import { convertToLlm, type AgentMessage } from "@earendil-works/pi-agent-core";
 import type { Message, Model } from "@earendil-works/pi-ai";
-import type { ToolInfo } from "@earendil-works/pi-coding-agent";
 
 export type ResponsesItem = Record<string, unknown> & { type?: string };
-
-export type ResponsesFunctionTool = {
-  type: "function";
-  name: string;
-  description: string;
-  parameters: unknown;
-};
 
 export class UnrepresentableCompactableContextError extends Error {
   constructor(message: string, options?: ErrorOptions) {
@@ -471,23 +463,4 @@ export function projectCompactableContext(
     fail("Pi message normalization failed", error);
   }
   return projectNormalizedMessages(normalizeMessages(normalized, model), model);
-}
-
-export function projectActiveFunctionTools(
-  allTools: readonly ToolInfo[],
-  activeToolNames: readonly string[],
-): ResponsesFunctionTool[] {
-  const byName = new Map(allTools.map((tool) => [tool.name, tool]));
-  const activeTools: ResponsesFunctionTool[] = [];
-  for (const name of activeToolNames) {
-    const tool = byName.get(name);
-    if (!tool) continue;
-    activeTools.push({
-      type: "function",
-      name: tool.name,
-      description: tool.description,
-      parameters: tool.parameters,
-    });
-  }
-  return activeTools;
 }

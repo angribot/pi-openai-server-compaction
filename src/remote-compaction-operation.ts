@@ -1,6 +1,6 @@
 import { calculateCost, type Model, type Usage } from "@earendil-works/pi-ai";
 import type { ModelRegistry } from "@earendil-works/pi-coding-agent";
-import type { ResponsesFunctionTool, ResponsesItem } from "./responses-projection.ts";
+import type { ResponsesItem } from "./responses-projection.ts";
 
 export type CompactionItem = ResponsesItem & {
   type: "compaction";
@@ -11,7 +11,6 @@ export type RemoteCompactionRequest = Readonly<{
   model: Model<any>;
   input: readonly ResponsesItem[];
   instructions: string;
-  tools?: readonly ResponsesFunctionTool[];
   store: false;
 }>;
 
@@ -31,8 +30,8 @@ export function remoteCompactionPayload(
     store: false,
     stream: true,
   };
-  if (request.tools && request.tools.length > 0) payload.tools = request.tools;
-  else delete payload.tools;
+  // Active tool schemas are not part of Remote compaction, including inherited ones.
+  delete payload.tools;
   delete payload.messages;
   delete payload.previous_response_id;
   return payload;
