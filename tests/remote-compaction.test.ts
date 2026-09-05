@@ -206,14 +206,6 @@ test("attempts only Eligible models and publishes one atomic first compaction", 
       { type: "compaction_trigger" },
     ],
     instructions: "SYSTEM-PROMPT\n\nAdditional compaction instructions:\nCUSTOM-GUIDANCE",
-    tools: [
-      {
-        type: "function",
-        name: "read",
-        description: "Read a file",
-        parameters: { type: "object", properties: { path: { type: "string" } } },
-      },
-    ],
     store: false,
   });
   assert.notEqual(recorded.requests[0]?.model, context.model);
