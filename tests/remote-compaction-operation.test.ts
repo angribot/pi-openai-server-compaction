@@ -44,14 +44,6 @@ function request(selectedModel = model()): RemoteCompactionRequest {
       { type: "compaction_trigger" },
     ],
     instructions: "system instructions",
-    tools: [
-      {
-        type: "function",
-        name: "read",
-        description: "Read a file",
-        parameters: { type: "object" },
-      },
-    ],
     store: false,
   };
 }
@@ -195,7 +187,7 @@ function assertOutcome(
   assert.equal(outcome.kind, kind, outcome.error.message);
 }
 
-test("runs built-in Codex through Pi while owning the payload and consuming raw capture concurrently", async () => {
+test("runs built-in Codex without tool declarations while preserving Pi controls and raw capture", async () => {
   const selectedModel = codexModel();
   const compactionRequest = request(selectedModel);
   const providerPayload = {
@@ -244,7 +236,7 @@ test("runs built-in Codex through Pi while owning the payload and consuming raw 
               {
                 method: "POST",
                 headers: { "x-provider-owned": "yes" },
-                body: "provider-owned-body",
+                body: JSON.stringify(patchedPayload),
                 signal: options.signal,
               },
             );
@@ -274,7 +266,6 @@ test("runs built-in Codex through Pi while owning the payload and consuming raw 
     model: "gpt-codex",
     input: compactionRequest.input,
     instructions: "system instructions",
-    tools: compactionRequest.tools,
     store: false,
     stream: true,
     text: { verbosity: "low" },
@@ -284,7 +275,8 @@ test("runs built-in Codex through Pi while owning the payload and consuming raw 
     parallel_tool_calls: true,
   });
   assert.equal(String(forwardedInput), "https://provider-owned.example/codex/responses");
-  assert.equal(forwardedInit?.body, "provider-owned-body");
+  assert.deepEqual(JSON.parse(String(forwardedInit?.body)), patchedPayload);
+  assert.equal(Object.hasOwn(JSON.parse(String(forwardedInit?.body)), "tools"), false);
   assert.equal(new Headers(forwardedInit?.headers).get("x-provider-owned"), "yes");
 });
 
@@ -416,14 +408,6 @@ test("resolves routing and header precedence and sends the minimal HTTP/SSE body
       { type: "compaction_trigger" },
     ],
     instructions: "system instructions",
-    tools: [
-      {
-        type: "function",
-        name: "read",
-        description: "Read a file",
-        parameters: { type: "object" },
-      },
-    ],
     store: false,
     stream: true,
   });

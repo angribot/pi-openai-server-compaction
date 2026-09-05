@@ -8,10 +8,7 @@ import type {
   RemoteCompactionAttemptOutcome,
   RemoteCompactionRequest,
 } from "./remote-compaction-operation.ts";
-import {
-  projectCompactableContext,
-  type ResponsesItem,
-} from "./responses-projection.ts";
+import { projectCompactableContext, type ResponsesItem } from "./responses-projection.ts";
 
 export const REMOTE_COMPACTION_CHECKPOINT_MARKER =
   "[Remote Responses compaction checkpoint]\n\n" +
@@ -630,7 +627,6 @@ function suffixMessages(branch: readonly BranchEntry[], state: ValidReplayState)
 }
 
 function buildRequest(
-  pi: ExtensionAPI,
   event: {
     branchEntries: BranchEntry[];
     customInstructions?: string;
@@ -745,7 +741,6 @@ export function installRemoteCompaction(
     let request: RemoteCompactionRequest;
     try {
       request = buildRequest(
-        pi,
         {
           branchEntries,
           customInstructions: event.customInstructions,

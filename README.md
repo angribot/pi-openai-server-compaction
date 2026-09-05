@@ -48,11 +48,12 @@ On `session_before_compact`, an eligible model receives one immutable logical re
 - the selected model;
 - Pi's persisted, compaction-aware active linear-session compactable context projected into ordinary Responses input;
 - the effective system instructions plus supplied custom compaction instructions;
-- currently active ordinary function tools, when present;
 - `store: false`; and
 - exactly one terminal, payload-free `{ "type": "compaction_trigger" }`.
 
-The direct `openai-responses` adapter adds `stream: true` as a transport detail and otherwise sends only that minimal request. For built-in Codex, the extension runs Pi's public provider operation with the current session ID, forced SSE, and provider retries disabled. Pi continues to own Codex authentication, account headers, endpoint routing, compression, and envelope fields such as `text`, `include`, `prompt_cache_key`, `tool_choice`, and `parallel_tool_calls`; the extension replaces only the model, projected input, instructions, active tools, `store`, and `stream` protocol invariants and removes competing `messages` and `previous_response_id` fields. The extension performs no local token estimation, truncation, retained-history budgeting, tool-output rewriting, or other context fitting. Endpoint context overflow is terminal.
+The request never includes active tool declarations (`tools`), including any inherited from the provider envelope. Historical function calls and their outputs remain part of the projected input.
+
+The direct `openai-responses` adapter adds `stream: true` as a transport detail and otherwise sends only that minimal request. For built-in Codex, the extension runs Pi's public provider operation with the current session ID, forced SSE, and provider retries disabled. Pi continues to own Codex authentication, account headers, endpoint routing, compression, and envelope fields such as `text`, `include`, `prompt_cache_key`, `tool_choice`, and `parallel_tool_calls`; the extension replaces only the model, projected input, instructions, `store`, and `stream` protocol invariants and removes `tools` and competing `messages` and `previous_response_id` fields. The extension performs no local token estimation, truncation, retained-history budgeting, tool-output rewriting, or other context fitting. Endpoint context overflow is terminal.
 
 Success requires an explicit raw `response.completed` or `response.done` event, Pi's Codex provider completion when applicable, and exactly one output item with `type: "compaction"` and string `encrypted_content`. Empty ciphertext is valid, an item `id` is optional, unknown item fields are preserved, and unrelated output items are ignored. Parseable usage is returned only through Pi's standard compaction usage field.
 
@@ -152,7 +153,7 @@ The Remote compaction operation uses one of two narrow SSE adapters because Pi `
 
 Other extensions' request mutations and provider-aware raw-operation composition remain outside this package's current contract.
 
-The local Responses projection adapter covers Pi `0.84.3` ordinary semantics for supported persisted messages, images and placeholders, assistant text identity and phase, same-model signed reasoning, ordinary function calls/results and missing-output normalization, built-in custom-message normalization, and active ordinary function tools. Compaction compatibility classes broaden only opaque compaction-item replay; signed or encrypted reasoning, tool-call IDs, thought signatures, and provider namespace metadata retain their existing exact-identity rules. Detectable model-visible context that cannot be represented faithfully cancels before transport. Grammar custom-tool metadata, constrained sampling, deferred tool search, provider distinctions already erased by Pi, and ephemeral provider-payload mutations are outside the supported contract.
+The local Responses projection adapter covers Pi `0.84.3` ordinary semantics for supported persisted messages, images and placeholders, assistant text identity and phase, same-model signed reasoning, ordinary function calls/results and missing-output normalization, and built-in custom-message normalization. Compaction compatibility classes broaden only opaque compaction-item replay; signed or encrypted reasoning, tool-call IDs, thought signatures, and provider namespace metadata retain their existing exact-identity rules. Detectable model-visible context that cannot be represented faithfully cancels before transport. Grammar custom-tool metadata, constrained sampling, deferred tool search, provider distinctions already erased by Pi, and ephemeral provider-payload mutations are outside the supported contract.
 
 Architecture decisions:
 

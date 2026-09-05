@@ -2,9 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import type { Model } from "@earendil-works/pi-ai";
-import type { ToolInfo } from "@earendil-works/pi-coding-agent";
 import {
-  projectActiveFunctionTools,
   projectCompactableContext,
   UnrepresentableCompactableContextError,
 } from "../src/responses-projection.ts";
@@ -253,40 +251,6 @@ test("projects Pi built-in custom messages after public normalization", () => {
             "<summary>\nCOMPACTION-VISIBLE\n</summary>",
         },
       ],
-    },
-  ]);
-});
-
-test("projects only active ordinary function tools in active order", () => {
-  const tools = [
-    {
-      name: "read",
-      description: "Read a file",
-      parameters: {
-        type: "object",
-        properties: { path: { type: "string" } },
-        required: ["path"],
-      },
-    },
-    {
-      name: "search",
-      description: "Search text",
-      parameters: {
-        type: "object",
-        properties: { query: { type: "string" } },
-      },
-    },
-  ] as unknown as ToolInfo[];
-
-  assert.deepEqual(projectActiveFunctionTools(tools, ["search"]), [
-    {
-      type: "function",
-      name: "search",
-      description: "Search text",
-      parameters: {
-        type: "object",
-        properties: { query: { type: "string" } },
-      },
     },
   ]);
 });
