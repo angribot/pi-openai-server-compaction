@@ -2,106 +2,41 @@ import { isDeepStrictEqual } from "node:util";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import type { Model, Usage } from "@earendil-works/pi-ai";
 import { buildSessionContext, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import {
+  prepareCompactionReplay,
+  prepareNativeReplay,
+  remoteCompactionOperationKind,
+  REMOTE_COMPACTION_CHECKPOINT_MARKER,
+  resolveCodexCompactionCompatibilityClass,
+  type BranchEntry,
+  type CompactionCompatibilityResolver,
+  type NativeReplayCheckpointDetails,
+  type ReplayCheckpoint,
+  type ReplayEvidenceRecord,
+} from "./native-replay.ts";
 import type {
-  CompactionItem,
   RemoteCompactionAttempt,
   RemoteCompactionAttemptOutcome,
   RemoteCompactionRequest,
 } from "./remote-compaction-operation.ts";
 import { projectCompactableContext, type ResponsesItem } from "./responses-projection.ts";
 
-export const REMOTE_COMPACTION_CHECKPOINT_MARKER =
-  "[Remote Responses compaction checkpoint]\n\n" +
-  "Detailed context before this checkpoint is retained in the native replay artifact and is available only to compatible Responses models.";
+export {
+  NATIVE_REPLAY_CHECKPOINT_FORMAT,
+  NATIVE_REPLAY_COMPATIBILITY_DECISION_TYPE,
+  REMOTE_COMPACTION_CHECKPOINT_MARKER,
+  remoteCompactionOperationKind,
+  resolveCodexCompactionCompatibilityClass,
+  type CompactionCompatibilityResolver,
+  type NativeReplayCheckpointDetails,
+  type RemoteCompactionApi,
+  type RemoteCompactionModelKey,
+  type RemoteCompactionOperationKind,
+} from "./native-replay.ts";
 
 const MAX_ATTEMPTS = 3;
 const MAX_RETRY_DELAY_MS = 60_000;
 const BASE_RETRY_DELAY_MS = 200;
-
-export type RemoteCompactionApi = "openai-responses" | "openai-codex-responses";
-export type RemoteCompactionOperationKind = "direct-responses" | "pi-codex-responses";
-
-export type RemoteCompactionModelKey = {
-  provider: string;
-  api: RemoteCompactionApi;
-  id: string;
-};
-
-export type CompactionCompatibilityResolver = (modelId: string) => string | undefined;
-
-export const NATIVE_REPLAY_CHECKPOINT_FORMAT = "native-replay-checkpoint/1";
-export const NATIVE_REPLAY_COMPATIBILITY_DECISION_TYPE = "native-replay-compatibility-decision/1";
-
-const CODEX_COMPACTION_COMPATIBILITY_CLASSES: Readonly<Record<string, string>> = Object.freeze({
-  // OpenAI Codex catalog at 459a79eb85400af759e9220c7bafb4429ae07516.
-  "gpt-5.4": "2911",
-  "gpt-5.4-mini": "2911",
-  "gpt-5.5": "2911",
-  "gpt-5.6-sol": "3000",
-  "gpt-5.6-terra": "3000",
-  "gpt-5.6-luna": "3000",
-  "gpt-6-astra": "3000",
-  "gpt-daybreak-blue-latest": "3000",
-  "gpt-daybreak-red-latest": "3000",
-  "codex-auto-review": "3000",
-});
-
-export const resolveCodexCompactionCompatibilityClass: CompactionCompatibilityResolver = (
-  modelId,
-) => CODEX_COMPACTION_COMPATIBILITY_CLASSES[modelId];
-
-export type NativeReplayCheckpointDetails = {
-  nativeReplayCheckpoint: {
-    format: typeof NATIVE_REPLAY_CHECKPOINT_FORMAT;
-    producer: {
-      modelKey: RemoteCompactionModelKey;
-      compactionCompatibilityClass: string | null;
-    };
-    replacementHistory: [CompactionItem];
-  };
-};
-
-type BranchEntry = {
-  type: string;
-  id: string;
-  parentId?: string | null;
-  timestamp?: string;
-  customType?: unknown;
-  data?: unknown;
-  summary?: unknown;
-  firstKeptEntryId?: unknown;
-  tokensBefore?: unknown;
-  details?: unknown;
-  message?: AgentMessage;
-};
-
-type RequestModelIdentity = { provider: string; api: string; id: string };
-
-type CompatibilityDecision = {
-  checkpointId: string;
-  target: {
-    modelKey: RequestModelIdentity;
-    compactionCompatibilityClass: string | null;
-  };
-  compatible: boolean;
-};
-
-type ReplayDerivation =
-  | { kind: "valid"; invalidated: boolean }
-  | { kind: "broken"; reason: string };
-
-type ValidReplayState = {
-  kind: "valid";
-  entry: BranchEntry;
-  entryIndex: number;
-  modelKey: RemoteCompactionModelKey;
-  compactionCompatibilityClass: string | null;
-  checkpointKind: "legacy" | "native";
-  replacementHistory: [CompactionItem];
-  invalidated: boolean;
-};
-
-type ActiveReplayState = { kind: "none" } | { kind: "broken"; reason: string } | ValidReplayState;
 
 type HookContext = {
   model?: Model<any>;
@@ -115,353 +50,6 @@ type HookContext = {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-function hasExactKeys(value: Record<string, unknown>, keys: readonly string[]): boolean {
-  const actual = Object.keys(value).sort();
-  const expected = [...keys].sort();
-  return actual.length === expected.length && actual.every((key, index) => key === expected[index]);
-}
-
-function operationKindForIdentity(
-  provider: unknown,
-  api: unknown,
-): RemoteCompactionOperationKind | undefined {
-  if (api === "openai-responses") return "direct-responses";
-  if (provider === "openai-codex" && api === "openai-codex-responses") {
-    return "pi-codex-responses";
-  }
-  return undefined;
-}
-
-export function remoteCompactionOperationKind(
-  model: unknown,
-): RemoteCompactionOperationKind | undefined {
-  return isRecord(model) ? operationKindForIdentity(model.provider, model.api) : undefined;
-}
-
-function isEligibleModel(model: unknown): model is Model<any> {
-  return remoteCompactionOperationKind(model) !== undefined;
-}
-
-function modelKeyFromIdentity(
-  provider: unknown,
-  api: unknown,
-  id: unknown,
-): RemoteCompactionModelKey | undefined {
-  if (typeof provider !== "string" || !provider.trim() || typeof id !== "string" || !id.trim()) {
-    return undefined;
-  }
-
-  const operationKind = operationKindForIdentity(provider, api);
-  if (operationKind === "direct-responses") {
-    return { provider, api: "openai-responses", id };
-  }
-  if (operationKind === "pi-codex-responses") {
-    return { provider: "openai-codex", api: "openai-codex-responses", id };
-  }
-  return undefined;
-}
-
-function modelKey(model: Model<any>): RemoteCompactionModelKey | undefined {
-  return modelKeyFromIdentity(model.provider, model.api, model.id);
-}
-
-function sameModelKey(left: RequestModelIdentity, right: RequestModelIdentity): boolean {
-  return left.provider === right.provider && left.api === right.api && left.id === right.id;
-}
-
-function compatibleWithCheckpoint(
-  state: Pick<ValidReplayState, "modelKey" | "compactionCompatibilityClass">,
-  targetIdentity: RequestModelIdentity,
-  targetClass: string | null | undefined,
-): boolean {
-  if (state.compactionCompatibilityClass !== null && isCompatibilityClass(targetClass)) {
-    return (
-      modelKeyFromIdentity(targetIdentity.provider, targetIdentity.api, targetIdentity.id) !==
-        undefined && state.compactionCompatibilityClass === targetClass
-    );
-  }
-  return sameModelKey(state.modelKey, targetIdentity);
-}
-
-function requestModelIdentity(model: unknown): RequestModelIdentity | undefined {
-  if (
-    !isRecord(model) ||
-    typeof model.provider !== "string" ||
-    !model.provider.trim() ||
-    typeof model.api !== "string" ||
-    !model.api ||
-    typeof model.id !== "string" ||
-    !model.id.trim()
-  ) {
-    return undefined;
-  }
-  return { provider: model.provider, api: model.api, id: model.id };
-}
-
-function isCompactionItem(value: unknown): value is CompactionItem {
-  return (
-    isRecord(value) && value.type === "compaction" && typeof value.encrypted_content === "string"
-  );
-}
-
-function isCompatibilityClass(value: unknown): value is string {
-  return typeof value === "string" && value.length > 0;
-}
-
-function resolveCompatibilityClass(
-  resolver: CompactionCompatibilityResolver,
-  modelId: string,
-): string | undefined {
-  const value = resolver(modelId);
-  return isCompatibilityClass(value) ? value : undefined;
-}
-
-function decodeLegacyDetails(
-  value: unknown,
-): Omit<ValidReplayState, "kind" | "entry" | "entryIndex" | "invalidated"> | undefined {
-  if (!isRecord(value) || !hasExactKeys(value, ["remoteCompaction"])) return undefined;
-  const remote = value.remoteCompaction;
-  if (
-    !isRecord(remote) ||
-    !hasExactKeys(remote, ["version", "modelKey", "replacementHistory"]) ||
-    remote.version !== 2 ||
-    !isRecord(remote.modelKey) ||
-    !hasExactKeys(remote.modelKey, ["provider", "api", "id"])
-  ) {
-    return undefined;
-  }
-  const key = modelKeyFromIdentity(
-    remote.modelKey.provider,
-    remote.modelKey.api,
-    remote.modelKey.id,
-  );
-  if (
-    !key ||
-    !Array.isArray(remote.replacementHistory) ||
-    remote.replacementHistory.length !== 1 ||
-    !isCompactionItem(remote.replacementHistory[0])
-  ) {
-    return undefined;
-  }
-  return {
-    modelKey: key,
-    compactionCompatibilityClass: null,
-    checkpointKind: "legacy",
-    replacementHistory: [remote.replacementHistory[0]],
-  };
-}
-
-function decodeNativeDetails(
-  value: unknown,
-): Omit<ValidReplayState, "kind" | "entry" | "entryIndex" | "invalidated"> | undefined {
-  if (!isRecord(value) || !hasExactKeys(value, ["nativeReplayCheckpoint"])) {
-    return undefined;
-  }
-  const checkpoint = value.nativeReplayCheckpoint;
-  if (
-    !isRecord(checkpoint) ||
-    !hasExactKeys(checkpoint, ["format", "producer", "replacementHistory"]) ||
-    checkpoint.format !== NATIVE_REPLAY_CHECKPOINT_FORMAT ||
-    !isRecord(checkpoint.producer) ||
-    !hasExactKeys(checkpoint.producer, ["modelKey", "compactionCompatibilityClass"]) ||
-    !isRecord(checkpoint.producer.modelKey) ||
-    !hasExactKeys(checkpoint.producer.modelKey, ["provider", "api", "id"])
-  ) {
-    return undefined;
-  }
-  const key = modelKeyFromIdentity(
-    checkpoint.producer.modelKey.provider,
-    checkpoint.producer.modelKey.api,
-    checkpoint.producer.modelKey.id,
-  );
-  const compatibilityClass = checkpoint.producer.compactionCompatibilityClass;
-  if (
-    !key ||
-    (compatibilityClass !== null && !isCompatibilityClass(compatibilityClass)) ||
-    !Array.isArray(checkpoint.replacementHistory) ||
-    checkpoint.replacementHistory.length !== 1 ||
-    !isCompactionItem(checkpoint.replacementHistory[0])
-  ) {
-    return undefined;
-  }
-  return {
-    modelKey: key,
-    compactionCompatibilityClass: compatibilityClass,
-    checkpointKind: "native",
-    replacementHistory: [checkpoint.replacementHistory[0]],
-  };
-}
-
-function decodeDetails(
-  value: unknown,
-): Omit<ValidReplayState, "kind" | "entry" | "entryIndex" | "invalidated"> | undefined {
-  return decodeNativeDetails(value) ?? decodeLegacyDetails(value);
-}
-
-function decodeCompatibilityDecision(value: unknown): CompatibilityDecision | undefined {
-  if (
-    !isRecord(value) ||
-    !hasExactKeys(value, ["checkpointId", "target", "compatible"]) ||
-    typeof value.checkpointId !== "string" ||
-    !value.checkpointId ||
-    typeof value.compatible !== "boolean" ||
-    !isRecord(value.target) ||
-    !hasExactKeys(value.target, ["modelKey", "compactionCompatibilityClass"]) ||
-    !isRecord(value.target.modelKey) ||
-    !hasExactKeys(value.target.modelKey, ["provider", "api", "id"])
-  ) {
-    return undefined;
-  }
-  const target = requestModelIdentity(value.target.modelKey);
-  const targetClass = value.target.compactionCompatibilityClass;
-  if (!target || (targetClass !== null && !isCompatibilityClass(targetClass))) return undefined;
-  return {
-    checkpointId: value.checkpointId,
-    target: {
-      modelKey: target,
-      compactionCompatibilityClass: targetClass,
-    },
-    compatible: value.compatible,
-  };
-}
-
-function successfulAssistant(entry: BranchEntry): boolean {
-  return (
-    entry.type === "message" &&
-    entry.message?.role === "assistant" &&
-    entry.message.stopReason !== "error" &&
-    entry.message.stopReason !== "aborted"
-  );
-}
-
-function assistantIdentity(entry: BranchEntry): RequestModelIdentity | undefined {
-  const message = entry.message;
-  if (entry.type !== "message" || message?.role !== "assistant") return undefined;
-  return requestModelIdentity({
-    provider: message.provider,
-    api: message.api,
-    id: message.model,
-  });
-}
-
-function assistantInvalidates(entry: BranchEntry, owner: RemoteCompactionModelKey): boolean {
-  if (!successfulAssistant(entry)) return false;
-  const identity = assistantIdentity(entry);
-  return !identity || !sameModelKey(owner, identity);
-}
-
-function deriveClassAwareReplay(
-  suffix: readonly BranchEntry[],
-  state: Pick<ValidReplayState, "entry" | "modelKey" | "compactionCompatibilityClass">,
-): ReplayDerivation {
-  let pending: CompatibilityDecision | undefined;
-  for (const entry of suffix) {
-    if (entry.type === "custom" && entry.customType === NATIVE_REPLAY_COMPATIBILITY_DECISION_TYPE) {
-      const decision = decodeCompatibilityDecision(entry.data);
-      if (!decision) {
-        return { kind: "broken", reason: "compatibility evidence is malformed" };
-      }
-      if (decision.checkpointId !== state.entry.id) {
-        return {
-          kind: "broken",
-          reason: "compatibility evidence belongs to a different checkpoint",
-        };
-      }
-      if (
-        decision.compatible !==
-        compatibleWithCheckpoint(
-          state,
-          decision.target.modelKey,
-          decision.target.compactionCompatibilityClass,
-        )
-      ) {
-        return {
-          kind: "broken",
-          reason: "compatibility evidence contains an inconsistent decision",
-        };
-      }
-      pending = decision;
-      continue;
-    }
-
-    const message = entry.message;
-    if (entry.type !== "message" || message?.role !== "assistant") continue;
-    const identity = assistantIdentity(entry);
-    if (message.stopReason === "error" || message.stopReason === "aborted") {
-      pending = undefined;
-      continue;
-    }
-    if (!identity) {
-      return {
-        kind: "broken",
-        reason: "a successful assistant turn has an invalid model identity",
-      };
-    }
-    if (!pending) {
-      return {
-        kind: "broken",
-        reason: "a successful assistant turn is missing compatibility evidence",
-      };
-    }
-    if (!sameModelKey(pending.target.modelKey, identity)) {
-      return {
-        kind: "broken",
-        reason: "compatibility evidence does not match its assistant turn",
-      };
-    }
-    if (!pending.compatible) return { kind: "valid", invalidated: true };
-    pending = undefined;
-  }
-  return { kind: "valid", invalidated: false };
-}
-
-function deriveActiveReplayState(branch: readonly BranchEntry[]): ActiveReplayState {
-  let latestIndex = -1;
-  for (let index = branch.length - 1; index >= 0; index--) {
-    if (branch[index]?.type === "compaction") {
-      latestIndex = index;
-      break;
-    }
-  }
-  if (latestIndex < 0) return { kind: "none" };
-
-  const entry = branch[latestIndex];
-  if (!entry) return { kind: "none" };
-  if (entry.summary !== REMOTE_COMPACTION_CHECKPOINT_MARKER) return { kind: "none" };
-
-  const decoded = decodeDetails(entry.details);
-  if (!decoded) {
-    return {
-      kind: "broken",
-      reason: "the latest Remote compaction checkpoint has missing or malformed details",
-    };
-  }
-
-  const suffix = branch.slice(latestIndex + 1);
-  const derivation =
-    decoded.checkpointKind === "native" && decoded.compactionCompatibilityClass !== null
-      ? deriveClassAwareReplay(suffix, {
-          entry,
-          modelKey: decoded.modelKey,
-          compactionCompatibilityClass: decoded.compactionCompatibilityClass,
-        })
-      : {
-          kind: "valid" as const,
-          invalidated: suffix.some((candidate) =>
-            assistantInvalidates(candidate, decoded.modelKey),
-          ),
-        };
-  if (derivation.kind === "broken") return derivation;
-
-  return {
-    kind: "valid",
-    entry,
-    entryIndex: latestIndex,
-    ...decoded,
-    invalidated: derivation.invalidated,
-  };
 }
 
 function reportError(context: HookContext, message: string): void {
@@ -486,10 +74,10 @@ function hardStop(context: HookContext, reason: string): undefined {
 function appendCompatibilityDecision(
   pi: ExtensionAPI,
   context: HookContext,
-  decision: CompatibilityDecision,
+  evidence: ReplayEvidenceRecord,
 ): boolean {
   try {
-    pi.appendEntry(NATIVE_REPLAY_COMPATIBILITY_DECISION_TYPE, decision);
+    pi.appendEntry(evidence.customType, evidence.data);
     return true;
   } catch {
     hardStop(context, "request-time compatibility evidence could not be persisted");
@@ -505,7 +93,7 @@ function containsCheckpointMarker(value: unknown): boolean {
 
 function checkpointSpan(
   branch: readonly BranchEntry[],
-  state: ValidReplayState,
+  state: ReplayCheckpoint,
   model: Model<any>,
 ): ResponsesItem[] | undefined {
   if (
@@ -619,7 +207,7 @@ async function abortableDelay(delayMs: number, signal: AbortSignal): Promise<voi
   });
 }
 
-function suffixMessages(branch: readonly BranchEntry[], state: ValidReplayState): AgentMessage[] {
+function suffixMessages(branch: readonly BranchEntry[], state: ReplayCheckpoint): AgentMessage[] {
   if (state.entryIndex >= branch.length - 1) return [];
   return buildSessionContext(
     branch.slice(state.entryIndex + 1) as Parameters<typeof buildSessionContext>[0],
@@ -633,10 +221,10 @@ function buildRequest(
   },
   context: HookContext,
   model: Model<any>,
-  state: ActiveReplayState,
+  state: ReplayCheckpoint | undefined,
 ): RemoteCompactionRequest {
   let projected: ResponsesItem[];
-  if (state.kind === "valid") {
+  if (state) {
     projected = [
       ...state.replacementHistory,
       ...projectCompactableContext(suffixMessages(event.branchEntries, state), model),
@@ -662,8 +250,7 @@ function successResult(
   event: {
     preparation: { firstKeptEntryId: string; tokensBefore: number };
   },
-  key: RemoteCompactionModelKey,
-  compactionCompatibilityClass: string | null,
+  details: NativeReplayCheckpointDetails,
   accepted: Extract<RemoteCompactionAttemptOutcome, { kind: "accepted" }>,
 ): {
   compaction: {
@@ -680,16 +267,7 @@ function successResult(
       firstKeptEntryId: event.preparation.firstKeptEntryId,
       tokensBefore: event.preparation.tokensBefore,
       ...(accepted.usage ? { usage: accepted.usage } : {}),
-      details: {
-        nativeReplayCheckpoint: {
-          format: NATIVE_REPLAY_CHECKPOINT_FORMAT,
-          producer: {
-            modelKey: key,
-            compactionCompatibilityClass,
-          },
-          replacementHistory: [accepted.item],
-        },
-      },
+      details,
     },
   };
 }
@@ -702,40 +280,36 @@ export function installRemoteCompaction(
   pi.on("session_before_compact", async (event, rawContext) => {
     const context = rawContext as unknown as HookContext;
     const model = context.model;
-    if (!isEligibleModel(model)) return undefined;
+    if (!model || remoteCompactionOperationKind(model) === undefined) return undefined;
     if (event.signal.aborted) return { cancel: true };
 
-    const key = modelKey(model);
-    if (!key) {
+    const branchEntries = event.branchEntries as BranchEntry[];
+    const preparation = prepareCompactionReplay(
+      branchEntries,
+      model,
+      resolveCompatibilityClassForModel,
+    );
+    if (preparation.kind === "invalid-model") {
       reportError(context, "Remote compaction requires a non-empty structured model identity.");
       return { cancel: true };
     }
-
-    const selectedCompatibilityClass = resolveCompatibilityClass(
-      resolveCompatibilityClassForModel,
-      key.id,
-    );
-    const branchEntries = event.branchEntries as BranchEntry[];
-    const state = deriveActiveReplayState(branchEntries);
-    if (state.kind === "broken") {
-      reportError(context, `Remote compaction was cancelled because ${state.reason}.`);
+    if (preparation.kind === "broken") {
+      reportError(context, `Remote compaction was cancelled because ${preparation.reason}.`);
       return { cancel: true };
     }
-    if (state.kind === "valid") {
-      if (state.invalidated) {
-        reportError(
-          context,
-          "Remote compaction was cancelled because a persisted incompatible assistant turn invalidated native replay.",
-        );
-        return { cancel: true };
-      }
-      if (!compatibleWithCheckpoint(state, key, selectedCompatibilityClass)) {
-        reportWarning(
-          context,
-          "Remote compaction was cancelled because the selected model is incompatible with the active checkpoint.",
-        );
-        return { cancel: true };
-      }
+    if (preparation.kind === "invalidated") {
+      reportError(
+        context,
+        "Remote compaction was cancelled because a persisted incompatible assistant turn invalidated native replay.",
+      );
+      return { cancel: true };
+    }
+    if (preparation.kind === "incompatible") {
+      reportWarning(
+        context,
+        "Remote compaction was cancelled because the selected model is incompatible with the active checkpoint.",
+      );
+      return { cancel: true };
     }
 
     let request: RemoteCompactionRequest;
@@ -747,7 +321,7 @@ export function installRemoteCompaction(
         },
         context,
         model,
-        state,
+        preparation.replay,
       );
     } catch (error) {
       if (!event.signal.aborted) {
@@ -778,7 +352,7 @@ export function installRemoteCompaction(
 
       if (event.signal.aborted) return { cancel: true };
       if (outcome.kind === "accepted") {
-        return successResult(event, key, selectedCompatibilityClass ?? null, outcome);
+        return successResult(event, preparation.createCheckpointDetails(outcome.item), outcome);
       }
       if (outcome.kind === "terminal" || attemptIndex === MAX_ATTEMPTS - 1) {
         reportError(
@@ -804,65 +378,22 @@ export function installRemoteCompaction(
     if (!model) return undefined;
 
     const branch = context.sessionManager.getBranch();
-    const state = deriveActiveReplayState(branch);
-    if (state.kind === "none") return undefined;
-    if (state.kind === "broken") return hardStop(context, state.reason);
-    if (state.invalidated) {
+    const preparation = prepareNativeReplay(branch, model, resolveCompatibilityClassForModel);
+    if (preparation.kind === "none") return undefined;
+    if (preparation.kind === "broken") return hardStop(context, preparation.reason);
+    if (preparation.kind === "invalidated") {
       return hardStop(
         context,
         "a persisted incompatible assistant turn invalidated the checkpoint",
       );
     }
-
-    const selectedIdentity = requestModelIdentity(model);
-    if (!selectedIdentity) {
+    if (preparation.kind === "invalid-model") {
       return hardStop(context, "the selected model has an invalid structured identity");
     }
-    const selectedKey = modelKey(model);
-    if (!selectedKey) {
-      if (state.checkpointKind === "native" && state.compactionCompatibilityClass !== null) {
-        if (
-          !appendCompatibilityDecision(pi, context, {
-            checkpointId: state.entry.id,
-            target: {
-              modelKey: selectedIdentity,
-              compactionCompatibilityClass:
-                resolveCompatibilityClass(resolveCompatibilityClassForModel, selectedIdentity.id) ??
-                null,
-            },
-            compatible: false,
-          })
-        ) {
-          return undefined;
-        }
-      }
-      reportWarning(
-        context,
-        "The selected model is incompatible with the active Remote compaction checkpoint. Pre-checkpoint context is unavailable; a successful assistant turn will invalidate native replay for this branch.",
-      );
+    if (preparation.evidence && !appendCompatibilityDecision(pi, context, preparation.evidence)) {
       return undefined;
     }
-
-    const targetClass = resolveCompatibilityClass(
-      resolveCompatibilityClassForModel,
-      selectedKey.id,
-    );
-    const compatible = compatibleWithCheckpoint(state, selectedKey, targetClass);
-    if (state.checkpointKind === "native" && state.compactionCompatibilityClass !== null) {
-      if (
-        !appendCompatibilityDecision(pi, context, {
-          checkpointId: state.entry.id,
-          target: {
-            modelKey: selectedKey,
-            compactionCompatibilityClass: targetClass ?? null,
-          },
-          compatible,
-        })
-      ) {
-        return undefined;
-      }
-    }
-    if (!compatible) {
+    if (preparation.kind === "incompatible") {
       reportWarning(
         context,
         "The selected model is incompatible with the active Remote compaction checkpoint. Pre-checkpoint context is unavailable; a successful assistant turn will invalidate native replay for this branch.",
@@ -876,6 +407,7 @@ export function installRemoteCompaction(
         "the ordinary request does not contain a full-array Responses input",
       );
     }
+    const state = preparation.replay;
     const expected = checkpointSpan(branch, state, model);
     if (!expected) {
       return hardStop(
