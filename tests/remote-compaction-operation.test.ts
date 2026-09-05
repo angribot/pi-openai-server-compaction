@@ -44,7 +44,6 @@ function request(selectedModel = model()): RemoteCompactionRequest {
       { type: "compaction_trigger" },
     ],
     instructions: "system instructions",
-    store: false,
   };
 }
 

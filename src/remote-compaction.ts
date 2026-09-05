@@ -242,7 +242,6 @@ function buildRequest(
     model,
     input: [...projected, { type: "compaction_trigger" }],
     instructions: combineInstructions(context.getSystemPrompt(), event.customInstructions),
-    store: false,
   });
 }
 

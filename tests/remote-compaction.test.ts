@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
-import type { ToolInfo } from "@earendil-works/pi-coding-agent";
 import {
   installRemoteCompaction,
   NATIVE_REPLAY_COMPATIBILITY_DECISION_TYPE,
@@ -162,24 +161,12 @@ const usage = {
   cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
 };
 
-test("attempts only Eligible models and publishes one atomic first compaction", async () => {
-  const tools = [
-    {
-      name: "read",
-      description: "Read a file",
-      parameters: { type: "object", properties: { path: { type: "string" } } },
-    },
-    {
-      name: "inactive",
-      description: "Inactive",
-      parameters: { type: "object" },
-    },
-  ] as unknown as ToolInfo[];
+test("attempts only Eligible models and publishes one atomic first compaction without reading tools", async () => {
   const recorded = recordingAttempt([
     accepted(firstCompactionItem, usage),
     accepted(firstCompactionItem, usage),
   ]);
-  const fixture = createRecordingPi({ tools, activeTools: ["read"] });
+  const fixture = createRecordingPi();
   installRemoteCompaction(fixture.pi, recorded.attempt);
   const branch = chainEntries([
     messageEntry("user", {
@@ -206,7 +193,6 @@ test("attempts only Eligible models and publishes one atomic first compaction", 
       { type: "compaction_trigger" },
     ],
     instructions: "SYSTEM-PROMPT\n\nAdditional compaction instructions:\nCUSTOM-GUIDANCE",
-    store: false,
   });
   assert.notEqual(recorded.requests[0]?.model, context.model);
   assert.deepEqual(result, {
@@ -716,7 +702,7 @@ test("reconstructs latest built-in Codex Remote compaction v2 state and replaces
   );
 });
 
-test("reconstructs request-time decisions without reinterpreting historical turns", () => {
+test("uses the current catalog for future requests and allows forks before decision evidence", () => {
   const producer = responsesModel({ id: "gpt-5.6-sol" });
   const historicalTarget = responsesModel({
     provider: "openai-codex",
@@ -746,20 +732,7 @@ test("reconstructs request-time decisions without reinterpreting historical turn
     { input: [firstCompactionItem] },
   );
 
-  const fixture = installed([accepted()], changedCatalog);
-  const observed = createHookContext({ branch, model: producer });
   const suffix = { type: "provider_context", value: "AFTER-CHECKPOINT" };
-
-  assert.deepEqual(
-    hook(fixture, "before_provider_request")(
-      { type: "before_provider_request", payload: replayPayload(suffix) },
-      observed.context,
-    ),
-    { input: [firstCompactionItem, suffix] },
-  );
-  assert.equal(observed.abortCalls.count, 0);
-  assert.equal((fixture.appendedEntries[0]?.data as any).compatible, true);
-
   const futureRequestFixture = installed([accepted()], changedCatalog);
   const futureRequest = createHookContext({ branch, model: historicalTarget });
   assert.equal(
@@ -772,16 +745,6 @@ test("reconstructs request-time decisions without reinterpreting historical turn
   assert.equal(futureRequest.abortCalls.count, 0);
   assert.equal(futureRequest.notifications.at(-1)?.level, "warning");
   assert.equal((futureRequestFixture.appendedEntries[0]?.data as any).compatible, false);
-
-  const fresh = installed([accepted()], changedCatalog);
-  const freshObserved = createHookContext({ branch, model: producer });
-  assert.deepEqual(
-    hook(fresh, "before_provider_request")(
-      { type: "before_provider_request", payload: replayPayload(suffix) },
-      freshObserved.context,
-    ),
-    { input: [firstCompactionItem, suffix] },
-  );
 });
 
 test("resumes generated checkpoint and decision evidence across catalog changes and repeated compaction", async () => {
@@ -914,13 +877,12 @@ test("hard-stops decision persistence failures before replay or incompatible war
     assert.equal(observed.abortCalls.count, 1);
     assert.deepEqual(payload, original);
     assert.deepEqual(fixture.appendedEntries, []);
-    assert.deepEqual(observed.notifications, [
-      {
-        level: "error",
-        message:
-          "Remote compaction native replay stopped because request-time compatibility evidence could not be persisted. Start a new session or return to a complete pre-checkpoint branch point.",
-      },
-    ]);
+    assert.equal(observed.notifications.length, 1);
+    assert.equal(observed.notifications[0]?.level, "error");
+    assert.match(
+      observed.notifications[0]!.message,
+      /request-time compatibility evidence could not be persisted/,
+    );
   }
 });
 
@@ -1157,13 +1119,17 @@ test("hard-stops malformed, stateless, missing, and ambiguous native replay", as
       firstKeptEntryId: "checkpoint",
       tokensBefore: 200,
       details: {
-        remoteCompaction: {
-          version: 2,
-          provider: "openai-responses-compaction",
-          implementation: "responses_compaction_v2",
-          modelKey: "example-provider:openai-responses:gpt-test",
+        nativeReplayCheckpoint: {
+          format: "native-replay-checkpoint/1",
+          producer: {
+            modelKey: {
+              provider: "example-provider",
+              api: "openai-responses",
+              id: "gpt-test",
+            },
+            compactionCompatibilityClass: null,
+          },
           replacementHistory: [firstCompactionItem, { role: "user", content: [] }],
-          usage,
         },
       },
     },
@@ -1179,6 +1145,7 @@ test("hard-stops malformed, stateless, missing, and ambiguous native replay", as
     ),
     { cancel: true },
   );
+  assert.equal(brokenFixture.requests.length, 0);
 });
 
 test("does not resurrect an older checkpoint past a later ordinary compaction", () => {

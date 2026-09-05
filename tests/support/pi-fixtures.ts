@@ -1,6 +1,6 @@
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import type { Model } from "@earendil-works/pi-ai";
-import type { ExtensionAPI, ToolInfo } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 export type Hook = (event: any, context: any) => unknown;
 
@@ -87,12 +87,7 @@ export function messageEntry(
   return { type: "message", id, message };
 }
 
-export function createRecordingPi(
-  options: {
-    tools?: ToolInfo[];
-    activeTools?: string[];
-  } = {},
-): {
+export function createRecordingPi(): {
   pi: ExtensionAPI;
   handlers: Map<string, Hook>;
   appendedEntries: Array<{ customType: string; data: unknown }>;
@@ -111,10 +106,10 @@ export function createRecordingPi(
       appendedEntries.push({ customType, data });
     },
     getAllTools() {
-      return options.tools ?? [];
+      throw new Error("Remote compaction must not read tool declarations");
     },
     getActiveTools() {
-      return options.activeTools ?? [];
+      throw new Error("Remote compaction must not read active tools");
     },
   } as unknown as ExtensionAPI;
   return { pi, handlers, appendedEntries };
