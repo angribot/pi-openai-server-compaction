@@ -37,13 +37,17 @@ export const NATIVE_REPLAY_CHECKPOINT_FORMAT = "native-replay-checkpoint/1";
 export const NATIVE_REPLAY_COMPATIBILITY_DECISION_TYPE = "native-replay-compatibility-decision/1";
 
 const CODEX_COMPACTION_COMPATIBILITY_CLASSES: Readonly<Record<string, string>> = Object.freeze({
-  // OpenAI Codex catalog at 9b9b614b02ba04df55479284749c5cbbed695c24.
+  // OpenAI Codex catalog at 459a79eb85400af759e9220c7bafb4429ae07516.
   "gpt-5.4": "2911",
   "gpt-5.4-mini": "2911",
   "gpt-5.5": "2911",
   "gpt-5.6-sol": "3000",
   "gpt-5.6-terra": "3000",
   "gpt-5.6-luna": "3000",
+  "gpt-6-astra": "3000",
+  "gpt-daybreak-blue-latest": "3000",
+  "gpt-daybreak-red-latest": "3000",
+  "codex-auto-review": "3000",
 });
 
 export const resolveCodexCompactionCompatibilityClass: CompactionCompatibilityResolver = (
