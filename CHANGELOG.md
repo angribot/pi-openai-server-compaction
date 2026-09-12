@@ -4,6 +4,7 @@ This changelog intentionally starts at **0.1.0**.
 
 ## Unreleased
 
+- classify `misalignment_policy_violation` failures from streamed or HTTP responses as terminal, cancelling Remote compaction after one attempt instead of retrying a policy-rejected request
 - upgrade the development and documentation baseline from Pi 0.84.3 to Pi 0.85.1
 
 ## 0.10.1 - 2026-09-05
