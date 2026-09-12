@@ -34,14 +34,6 @@ export function responsesModel(overrides: Partial<Model<any>> = {}): Model<any> 
   };
 }
 
-export function userMessage(text: string, timestamp = 1): AgentMessage {
-  return {
-    role: "user",
-    content: [{ type: "text", text }],
-    timestamp,
-  };
-}
-
 export function assistantMessage(
   text: string,
   selectedModel = responsesModel(),

@@ -445,7 +445,12 @@ function replayPayload(...suffix: unknown[]): Record<string, unknown> {
   };
 }
 
-function assertReplayHardStop(branch: TestBranchEntry[], payload: unknown, name: string): void {
+function assertReplayHardStop(
+  branch: TestBranchEntry[],
+  payload: unknown,
+  name: string,
+  expectedError?: RegExp,
+): void {
   const originalPayload = structuredClone(payload);
   const fixture = installed();
   const observed = createHookContext({ branch });
@@ -458,7 +463,11 @@ function assertReplayHardStop(branch: TestBranchEntry[], payload: unknown, name:
     name,
   );
   assert.equal(observed.abortCalls.count, 1, name);
+  assert.equal(observed.notifications.length, 1, name);
   assert.equal(observed.notifications.at(-1)?.level, "error", name);
+  if (expectedError) {
+    assert.match(observed.notifications.at(-1)!.message, expectedError, name);
+  }
   assert.deepEqual(payload, originalPayload, name);
 }
 
@@ -639,6 +648,42 @@ test("prefers Compaction compatibility class before exact Model key fallback", (
     { input: [firstCompactionItem] },
   );
   assert.deepEqual(uncatalogedFixture.appendedEntries, []);
+});
+
+test("cancels Remote compaction with a warning for a valid checkpoint in a different known compatibility class", async () => {
+  const producer = responsesModel({ id: "gpt-5.6-sol" });
+  const incompatible = responsesModel({ id: "gpt-5.5" });
+  const branch = checkpointBranch({
+    details: nativeReplayDetails(firstCompactionItem, producer, "3000"),
+    suffix: [],
+  });
+
+  const replayableFixture = installed();
+  const replayable = createHookContext({ branch, model: producer });
+  assert.deepEqual(
+    hook(replayableFixture, "before_provider_request")(
+      { type: "before_provider_request", payload: replayPayload() },
+      replayable.context,
+    ),
+    { input: [firstCompactionItem] },
+  );
+  assert.equal(replayable.abortCalls.count, 0);
+
+  const fixture = installed([accepted()]);
+  const observed = createHookContext({ branch, model: incompatible });
+  assert.deepEqual(
+    await hook(fixture, "session_before_compact")(compactionEvent(branch), observed.context),
+    { cancel: true },
+  );
+  assert.equal(fixture.requests.length, 0);
+  assert.deepEqual(fixture.appendedEntries, []);
+  assert.equal(observed.abortCalls.count, 0);
+  assert.equal(observed.notifications.length, 1);
+  assert.equal(observed.notifications[0]?.level, "warning");
+  assert.match(
+    observed.notifications[0]!.message,
+    /cancelled because the selected model is incompatible with the active checkpoint/,
+  );
 });
 
 test("reconstructs latest built-in Codex Remote compaction v2 state and replaces one unique full-array replay span", () => {
@@ -932,6 +977,50 @@ test("persists compatible evidence before rejecting the replay replacement span"
   );
 });
 
+test("hard-stops an ordinary request when the replay replacement span cannot be reconstructed", () => {
+  const replayable = checkpointBranch({ suffix: [] });
+  const replayableFixture = installed();
+  const replayableContext = createHookContext({ branch: replayable });
+  assert.deepEqual(
+    hook(replayableFixture, "before_provider_request")(
+      { type: "before_provider_request", payload: replayPayload() },
+      replayableContext.context,
+    ),
+    { input: [firstCompactionItem] },
+  );
+  assert.equal(replayableContext.abortCalls.count, 0);
+
+  const missingBoundary = checkpointBranch({ suffix: [] });
+  missingBoundary.at(-1)!.firstKeptEntryId = "missing-retained";
+  assertReplayHardStop(
+    missingBoundary,
+    replayPayload(),
+    "missing retained-entry boundary",
+    /replay replacement span could not be reconstructed/,
+  );
+
+  const unrepresentableRetained = chainEntries([
+    messageEntry("retained", {
+      role: "futureRole",
+      content: "VISIBLE-BUT-UNREPRESENTABLE",
+    } as unknown as AgentMessage),
+    {
+      type: "compaction",
+      id: "checkpoint",
+      summary: REMOTE_COMPACTION_CHECKPOINT_MARKER,
+      firstKeptEntryId: "retained",
+      tokensBefore: 100,
+      details: nativeReplayDetails(),
+    },
+  ]);
+  assertReplayHardStop(
+    unrepresentableRetained,
+    replayPayload(),
+    "unrepresentable retained context",
+    /replay replacement span could not be reconstructed/,
+  );
+});
+
 test("consumes Compatibility decision records according to persisted assistant outcomes", async () => {
   const producer = responsesModel({ id: "gpt-5.6-sol" });
   const incompatible = responsesModel({ id: "gpt-5.5" });
@@ -1220,21 +1309,9 @@ test("uses structured case-sensitive compatibility and invalidates only persiste
     });
     const fixture = installed();
     const observed = createHookContext({ branch: nonInvalidating });
-    const marker = {
-      role: "user",
-      content: [
-        {
-          type: "input_text",
-          text:
-            "The conversation history before this point was compacted into the following summary:\n\n" +
-            `<summary>\n${REMOTE_COMPACTION_CHECKPOINT_MARKER}\n</summary>`,
-        },
-      ],
-    };
-    const retained = { role: "user", content: [{ type: "input_text", text: "RETAINED" }] };
     assert.deepEqual(
       hook(fixture, "before_provider_request")(
-        { type: "before_provider_request", payload: { input: [marker, retained] } },
+        { type: "before_provider_request", payload: replayPayload() },
         observed.context,
       ),
       { input: [firstCompactionItem] },

@@ -112,6 +112,48 @@ function ordinarySequence(): AgentMessage[] {
   ];
 }
 
+function foreignToolCallSequence(options: {
+  provider: string;
+  api: string;
+  model: string;
+  toolCallId: string;
+}): AgentMessage[] {
+  return [
+    {
+      role: "assistant",
+      provider: options.provider,
+      api: options.api,
+      model: options.model,
+      content: [
+        {
+          type: "toolCall",
+          id: options.toolCallId,
+          name: "read",
+          arguments: { path: "README.md" },
+        },
+      ],
+      stopReason: "toolUse",
+      usage: {
+        input: 0,
+        output: 0,
+        cacheRead: 0,
+        cacheWrite: 0,
+        totalTokens: 0,
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+      },
+      timestamp: 1,
+    },
+    {
+      role: "toolResult",
+      toolCallId: options.toolCallId,
+      toolName: "read",
+      content: [{ type: "text", text: "file text" }],
+      isError: false,
+      timestamp: 2,
+    },
+  ];
+}
+
 test("projects the supported ordinary Responses message subset", () => {
   assert.deepEqual(projectCompactableContext(ordinarySequence(), model()), [
     {
@@ -306,6 +348,76 @@ test("omits a foreign Responses item identity when the call has no item-id segme
       output: "result",
     },
   ]);
+});
+
+// Golden IDs are Pi 0.85.1 wire values captured from that release's
+// `convertResponsesMessages` (`openai-responses-shared.js` using `shortHash` from
+// `utils/hash.js`), not recomputed from this module. A Pi upgrade that changes the
+// foreign item-id hash must update these literals explicitly for compatibility review.
+test("hashes a foreign openai-codex tool-call item id for an openai Responses target", () => {
+  const target = model();
+  target.provider = "openai";
+  target.api = "openai-responses";
+  target.id = "gpt-5";
+
+  assert.deepEqual(
+    projectCompactableContext(
+      foreignToolCallSequence({
+        provider: "openai-codex",
+        api: "openai-codex-responses",
+        model: "gpt-5-codex",
+        toolCallId: "call_abc123|fc_xyz789",
+      }),
+      target,
+    ),
+    [
+      {
+        type: "function_call",
+        id: "fc_15cph2o8v0vo5", // shortHash("fc_xyz789")
+        call_id: "call_abc123",
+        name: "read",
+        arguments: '{"path":"README.md"}',
+      },
+      {
+        type: "function_call_output",
+        call_id: "call_abc123",
+        output: "file text",
+      },
+    ],
+  );
+});
+
+test("hashes a foreign openai Responses tool-call item id for an openai-codex target", () => {
+  const target = model();
+  target.provider = "openai-codex";
+  target.api = "openai-codex-responses";
+  target.id = "gpt-5-codex";
+
+  assert.deepEqual(
+    projectCompactableContext(
+      foreignToolCallSequence({
+        provider: "openai",
+        api: "openai-responses",
+        model: "gpt-5",
+        toolCallId: "call_openai_1|fc_openai_item_1",
+      }),
+      target,
+    ),
+    [
+      {
+        type: "function_call",
+        id: "fc_1wuhmxpzi7ern", // shortHash("fc_openai_item_1")
+        call_id: "call_openai_1",
+        name: "read",
+        arguments: '{"path":"README.md"}',
+      },
+      {
+        type: "function_call_output",
+        call_id: "call_openai_1",
+        output: "file text",
+      },
+    ],
+  );
 });
 
 test("projection identity is deterministic", () => {
