@@ -595,6 +595,67 @@ test("classifies streamed failed and error terminals", async () => {
   }
 });
 
+test("treats misalignment policy violations as terminal SSE failures", async () => {
+  const cases: unknown[] = [
+    { type: "error", code: "misalignment_policy_violation", message: "blocked" },
+    {
+      type: "response.failed",
+      response: {
+        error: { type: "invalid_request_error", code: "misalignment_policy_violation" },
+      },
+    },
+  ];
+
+  for (const event of cases) {
+    await withFetch(
+      async () => streamResponse([sse(event)]),
+      async () => {
+        const outcome = await attemptDirectResponsesOperation(request(), context());
+        assertOutcome(outcome, "terminal");
+      },
+    );
+  }
+});
+
+test("treats misalignment policy violations as terminal HTTP failures regardless of status", async () => {
+  for (const status of [400, 429, 503]) {
+    await withFetch(
+      async () =>
+        new Response(
+          JSON.stringify({ error: { code: "misalignment_policy_violation", message: "blocked" } }),
+          { status, headers: { "content-type": "application/json" } },
+        ),
+      async () => {
+        const outcome = await attemptDirectResponsesOperation(request(), context());
+        assertOutcome(outcome, "terminal");
+      },
+    );
+  }
+});
+
+test("keeps unrecognized SSE failures retryable and unrecognized HTTP failures terminal", async () => {
+  await withFetch(
+    async () =>
+      streamResponse([sse({ type: "error", code: "unrecognized_failure", message: "unknown" })]),
+    async () => {
+      const outcome = await attemptDirectResponsesOperation(request(), context());
+      assertOutcome(outcome, "retryable");
+    },
+  );
+
+  await withFetch(
+    async () =>
+      new Response(JSON.stringify({ error: { code: "unrecognized_failure" } }), {
+        status: 400,
+        headers: { "content-type": "application/json" },
+      }),
+    async () => {
+      const outcome = await attemptDirectResponsesOperation(request(), context());
+      assertOutcome(outcome, "terminal");
+    },
+  );
+});
+
 test("returns standard Retry-After values on retryable HTTP outcomes", async () => {
   const future = new Date(Date.now() + 60_000).toUTCString();
   const cases: Array<[string, number | undefined]> = [

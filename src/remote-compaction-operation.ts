@@ -74,6 +74,7 @@ const TERMINAL_ERROR_CODES = new Set([
   "invalid_prompt",
   "invalid_request",
   "invalid_request_error",
+  "misalignment_policy_violation",
   "operation_not_supported",
   "policy_violation",
   "unsupported_operation",
@@ -170,7 +171,6 @@ function parseErrorPayload(text: string): unknown {
 function classifyFailure(failure: unknown): "retryable" | "terminal" {
   const semantics = errorSemantics(failure);
   if (semantics.some((semantic) => TERMINAL_ERROR_CODES.has(semantic))) return "terminal";
-  if (semantics.some((semantic) => TRANSIENT_ERROR_CODES.has(semantic))) return "retryable";
   return "retryable";
 }
 
