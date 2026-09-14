@@ -478,6 +478,54 @@ test("validates captured split CRLF SSE at explicit completion without waiting f
   });
 });
 
+test("accepts one compaction item among many unrelated streamed events", async () => {
+  const item = {
+    type: "compaction",
+    id: "cmp_many",
+    encrypted_content: "opaque-many",
+    unknown_field: { nested: [1, 2, 3] },
+  };
+  const unrelated = Array.from({ length: 400 }, (_, index) => {
+    switch (index % 4) {
+      case 0:
+        return sse({ type: "response.output_text.delta", delta: `chunk-${index}` });
+      case 1:
+        return sse({
+          type: "response.output_item.done",
+          item: { type: "message", id: `msg-${index}`, role: "assistant", content: [] },
+        });
+      case 2:
+        return sse({
+          type: "response.output_item.added",
+          item: { type: "reasoning", id: `rs-${index}` },
+        });
+      default:
+        return sse({ type: "response.unknown", index });
+    }
+  });
+
+  const outcome = await validateRemoteCompactionResponse(
+    request(),
+    streamResponse([
+      ...unrelated,
+      sse({ type: "response.output_item.done", item }),
+      sse({
+        type: "response.completed",
+        response: {
+          output: [{ type: "compaction", encrypted_content: "ignored-terminal-output" }],
+          usage: { input_tokens: 20, output_tokens: 5, total_tokens: 25 },
+        },
+      }),
+    ]),
+    new AbortController().signal,
+  );
+
+  assert.equal(outcome.kind, "accepted");
+  if (outcome.kind !== "accepted") return;
+  assert.deepEqual(outcome.item, item);
+  assert.equal(outcome.usage?.totalTokens, 25);
+});
+
 test("requires response.completed and classifies pre-completion stream failures as retryable", async () => {
   const cases: Array<[string, string[]]> = [
     ["done sentinel", ["data: [DONE]\n\n"]],
