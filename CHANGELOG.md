@@ -4,6 +4,8 @@ This changelog intentionally starts at **0.1.0**.
 
 ## Unreleased
 
+- reduce memory retained during Remote compaction by no longer accumulating parsed SSE event history, without changing response validation behavior
+
 ## 0.11.0 - 2026-09-12
 
 - classify `misalignment_policy_violation` failures from streamed or HTTP responses as terminal, cancelling Remote compaction after one attempt instead of retrying a policy-rejected request
