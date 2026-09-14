@@ -258,14 +258,31 @@ function isTerminalEvent(event: unknown): boolean {
   );
 }
 
+type CompactionCollection = {
+  count: number;
+  candidate: Record<string, unknown> | undefined;
+};
+
+function collectCompactionItem(collection: CompactionCollection, event: unknown): void {
+  if (
+    isRecord(event) &&
+    event.type === "response.output_item.done" &&
+    isRecord(event.item) &&
+    event.item.type === "compaction"
+  ) {
+    collection.count += 1;
+    collection.candidate ??= event.item;
+  }
+}
+
 async function readUntilTerminal(
   response: Response,
   signal: AbortSignal,
-): Promise<{ events: unknown[]; terminal: unknown | undefined }> {
+): Promise<{ compaction: CompactionCollection; terminal: unknown | undefined }> {
   if (!response.body) throw outcomeError("response body was empty");
   const reader = response.body.getReader();
   const decoder = new TextDecoder();
-  const events: unknown[] = [];
+  const compaction: CompactionCollection = { count: 0, candidate: undefined };
   let buffer = "";
   let skipLeadingLineFeed = false;
 
@@ -290,7 +307,7 @@ async function readUntilTerminal(
       const event = parseSseBlock(buffer.slice(0, boundary));
       buffer = buffer.slice(boundary + 2);
       if (event !== undefined) {
-        events.push(event);
+        collectCompactionItem(compaction, event);
         if (isTerminalEvent(event)) return event;
       }
       boundary = buffer.indexOf("\n\n");
@@ -306,12 +323,12 @@ async function readUntilTerminal(
       const terminalEvent = drain();
       if (terminalEvent !== undefined) {
         await reader.cancel().catch(() => {});
-        return { events, terminal: terminalEvent };
+        return { compaction, terminal: terminalEvent };
       }
     }
     append(decoder.decode(), true);
     const terminalEvent = drain();
-    return { events, terminal: terminalEvent };
+    return { compaction, terminal: terminalEvent };
   } finally {
     reader.releaseLock();
   }
@@ -340,26 +357,15 @@ function parseUsage(model: Model<any>, value: unknown): Usage | undefined {
 
 function completedResult(
   request: RemoteCompactionRequest,
-  events: readonly unknown[],
+  compaction: CompactionCollection,
   completedEvent: Record<string, unknown>,
   signal: AbortSignal,
 ): RemoteCompactionAttemptOutcome {
   const response = isRecord(completedEvent.response) ? completedEvent.response : {};
-  const compactionItems = events.flatMap((event) => {
-    if (
-      !isRecord(event) ||
-      event.type !== "response.output_item.done" ||
-      !isRecord(event.item) ||
-      event.item.type !== "compaction"
-    ) {
-      return [];
-    }
-    return [event.item];
-  });
-  if (compactionItems.length !== 1) {
-    return terminal(`completed response contained ${compactionItems.length} compaction items`);
+  if (compaction.count !== 1) {
+    return terminal(`completed response contained ${compaction.count} compaction items`);
   }
-  const [item] = compactionItems;
+  const item = compaction.candidate;
   if (!item || typeof item.encrypted_content !== "string") {
     return terminal("completed response contained an invalid compaction item");
   }
@@ -400,7 +406,7 @@ export async function validateRemoteCompactionResponse(
     );
   }
 
-  let streamed: { events: unknown[]; terminal: unknown | undefined };
+  let streamed: { compaction: CompactionCollection; terminal: unknown | undefined };
   try {
     streamed = await readUntilTerminal(response, signal);
     throwIfAborted(signal);
@@ -416,7 +422,7 @@ export async function validateRemoteCompactionResponse(
   }
   const event = streamed.terminal;
   if (event.type === "response.done" || event.type === "response.completed") {
-    const outcome = completedResult(request, streamed.events, event, signal);
+    const outcome = completedResult(request, streamed.compaction, event, signal);
     if (signal.aborted) return { kind: "terminal", error: abortError(signal) };
     return outcome;
   }
