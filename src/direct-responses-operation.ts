@@ -6,56 +6,39 @@ import {
   type RemoteCompactionAttempt,
 } from "./remote-compaction-operation.ts";
 
-function deleteHeader(headers: Record<string, string>, name: string): void {
-  const expected = name.toLowerCase();
-  for (const current of Object.keys(headers)) {
-    if (current.toLowerCase() === expected) delete headers[current];
-  }
-}
-
-function setHeader(headers: Record<string, string>, name: string, value: string): void {
-  deleteHeader(headers, name);
-  headers[name] = value;
-}
-
 function applyHeaders(
-  headers: Record<string, string>,
+  headers: Headers,
   values: Record<string, string | null> | undefined,
   deleted: Set<string>,
 ): void {
   for (const [name, value] of Object.entries(values ?? {})) {
     const normalized = name.toLowerCase();
-    deleteHeader(headers, name);
     if (value === null) {
+      headers.delete(name);
       deleted.add(normalized);
     } else {
-      headers[name] = value;
+      headers.set(name, value);
       deleted.delete(normalized);
     }
   }
-}
-
-function hasHeader(headers: Record<string, string>, name: string): boolean {
-  const expected = name.toLowerCase();
-  return Object.keys(headers).some((current) => current.toLowerCase() === expected);
 }
 
 function buildHeaders(
   model: Model<any>,
   apiKey: string | undefined,
   authHeaders: ProviderHeaders | undefined,
-): Record<string, string> {
-  const headers: Record<string, string> = {};
+): Headers {
+  const headers = new Headers();
   const deleted = new Set<string>();
-  if (apiKey) setHeader(headers, "Authorization", `Bearer ${apiKey}`);
+  if (apiKey) headers.set("Authorization", `Bearer ${apiKey}`);
   applyHeaders(headers, model.headers, deleted);
   applyHeaders(headers, authHeaders, deleted);
 
-  if (!deleted.has("accept") && !hasHeader(headers, "accept")) {
-    setHeader(headers, "Accept", "text/event-stream");
+  if (!deleted.has("accept") && !headers.has("accept")) {
+    headers.set("Accept", "text/event-stream");
   }
-  if (!deleted.has("content-type") && !hasHeader(headers, "content-type")) {
-    setHeader(headers, "Content-Type", "application/json");
+  if (!deleted.has("content-type") && !headers.has("content-type")) {
+    headers.set("Content-Type", "application/json");
   }
   return headers;
 }

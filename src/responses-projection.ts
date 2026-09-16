@@ -381,7 +381,7 @@ function projectNormalizedMessages(
               ? `msg_pi_${messageIndex}`
               : `msg_pi_${messageIndex}_${textBlockIndex}`;
           textBlockIndex++;
-          let id = signature?.id ?? fallbackId;
+          let id = signature?.id || fallbackId;
           if (id.length > 64) id = `msg_${shortHash(id)}`;
           output.push({
             type: "message",

@@ -420,6 +420,21 @@ test("hashes a foreign openai Responses tool-call item id for an openai-codex ta
   );
 });
 
+test("uses a deterministic fallback for an empty versioned text identity", () => {
+  const messages = ordinarySequence();
+  const assistant = messages[1];
+  assert.equal(assistant.role, "assistant");
+  if (assistant.role !== "assistant") return;
+  assistant.content = [{ type: "text", text: "answer", textSignature: '{"v":1,"id":""}' }];
+  assert.deepEqual(projectCompactableContext(messages.slice(0, 2), model())[1], {
+    type: "message",
+    role: "assistant",
+    content: [{ type: "output_text", text: "answer", annotations: [] }],
+    status: "completed",
+    id: "msg_pi_1",
+  });
+});
+
 test("projection identity is deterministic", () => {
   const messages: AgentMessage[] = [
     {
@@ -450,6 +465,197 @@ test("projection identity is deterministic", () => {
   assert.equal(typeof first[0]?.id, "string");
   assert.equal(typeof first[1]?.id, "string");
   assert.notEqual(first[0]?.id, first[1]?.id);
+});
+
+test("preserves signed reasoning only for its exact model and converts foreign thinking to text", () => {
+  const messages = ordinarySequence().slice(0, 2);
+  const assistant = messages[1];
+  if (assistant.role !== "assistant") throw new Error("expected assistant fixture");
+  assistant.content = [
+    {
+      type: "thinking",
+      thinking: "visible reasoning",
+      thinkingSignature: JSON.stringify(signedReasoning),
+    },
+    {
+      type: "text",
+      text: "answer",
+      textSignature: '{"v":1,"id":"msg_source","phase":"final_answer"}',
+    },
+  ];
+  assert.deepEqual(projectCompactableContext(messages, model()).slice(1), [
+    signedReasoning,
+    {
+      type: "message",
+      role: "assistant",
+      content: [{ type: "output_text", text: "answer", annotations: [] }],
+      status: "completed",
+      id: "msg_source",
+      phase: "final_answer",
+    },
+  ]);
+  const foreign = { ...model(), id: "another-model" };
+  assert.deepEqual(projectCompactableContext(messages, foreign).slice(1), [
+    {
+      type: "message",
+      role: "assistant",
+      content: [{ type: "output_text", text: "visible reasoning", annotations: [] }],
+      status: "completed",
+      id: "msg_pi_1",
+    },
+    {
+      type: "message",
+      role: "assistant",
+      content: [{ type: "output_text", text: "answer", annotations: [] }],
+      status: "completed",
+      id: "msg_pi_1_1",
+    },
+  ]);
+});
+
+test("ignores malformed failed partial turns while completing earlier missing tool results", () => {
+  const messages = ordinarySequence();
+  const partial = structuredClone(messages[3]);
+  if (partial.role !== "assistant") throw new Error("expected assistant fixture");
+  partial.stopReason = "aborted";
+  partial.content = [{ type: "thinking", thinking: "", thinkingSignature: "not-json" }];
+  messages.push(partial, { role: "user", content: "continue", timestamp: 5 });
+  assert.deepEqual(projectCompactableContext(messages, model()).slice(-2), [
+    { type: "function_call_output", call_id: "call_2", output: "No result provided" },
+    { role: "user", content: [{ type: "input_text", text: "continue" }] },
+  ]);
+});
+
+test("rejects foreign tool identities that collide after Pi normalization", () => {
+  const messages = foreignToolCallSequence({
+    provider: "foreign",
+    api: "other-api",
+    model: "other-model",
+    toolCallId: "call a",
+  });
+  const assistant = messages[0];
+  if (assistant.role !== "assistant") throw new Error("expected assistant fixture");
+  assistant.content.push({ type: "toolCall", id: "call?a", name: "read", arguments: {} });
+  assert.throws(
+    () => projectCompactableContext(messages, model()),
+    UnrepresentableCompactableContextError,
+  );
+});
+
+test("rejects tool calls whose normalized call identity is empty", () => {
+  for (const toolCallId of ["???", "???|fc_item"]) {
+    const messages = foreignToolCallSequence({
+      provider: "foreign",
+      api: "other-api",
+      model: "other-model",
+      toolCallId,
+    });
+    assert.throws(
+      () => projectCompactableContext(messages, { ...model(), provider: "openai" }),
+      UnrepresentableCompactableContextError,
+    );
+  }
+});
+
+test("accepts already-normalized foreign tool results", () => {
+  const messages = foreignToolCallSequence({
+    provider: "foreign",
+    api: "other-api",
+    model: "other-model",
+    toolCallId: "a b",
+  });
+  const result = messages[1];
+  if (result.role !== "toolResult") throw new Error("expected result fixture");
+  result.toolCallId = "a_b";
+  assert.deepEqual(projectCompactableContext(messages, model()), [
+    { type: "function_call", call_id: "a_b", name: "read", arguments: '{"path":"README.md"}' },
+    { type: "function_call_output", call_id: "a_b", output: "file text" },
+  ]);
+});
+
+test("rejects results mispaired by a prior foreign ID normalization", () => {
+  const foreign = foreignToolCallSequence({
+    provider: "foreign",
+    api: "other-api",
+    model: "other-model",
+    toolCallId: "a b",
+  });
+  const sameModel = foreignToolCallSequence({
+    provider: model().provider,
+    api: model().api,
+    model: model().id,
+    toolCallId: "a b",
+  });
+  assert.throws(
+    () => projectCompactableContext([...foreign, ...sameModel], model()),
+    UnrepresentableCompactableContextError,
+  );
+});
+
+test("retains fail-closed checks beyond Pi's ordinary conversion", () => {
+  const mutations: Array<[string, (messages: AgentMessage[]) => void]> = [
+    [
+      "duplicate call",
+      (messages) => {
+        const assistant = messages[1];
+        if (assistant.role === "assistant")
+          assistant.content.push(structuredClone(assistant.content[2]));
+      },
+    ],
+    [
+      "duplicate result",
+      (messages) => {
+        messages.splice(3, 0, structuredClone(messages[2]));
+      },
+    ],
+    [
+      "mismatched tool name",
+      (messages) => {
+        const result = messages[2];
+        if (result.role === "toolResult") result.toolName = "another-tool";
+      },
+    ],
+    [
+      "invalid reasoning item",
+      (messages) => {
+        const assistant = messages[1];
+        if (assistant.role === "assistant")
+          assistant.content[0] = {
+            type: "thinking",
+            thinking: "",
+            thinkingSignature: '{"type":"message"}',
+          };
+      },
+    ],
+    [
+      "invalid reasoning JSON",
+      (messages) => {
+        const assistant = messages[1];
+        if (assistant.role === "assistant")
+          assistant.content[0] = { type: "thinking", thinking: "", thinkingSignature: "not-json" };
+      },
+    ],
+    [
+      "unserializable arguments",
+      (messages) => {
+        const assistant = messages[1];
+        if (assistant.role === "assistant" && assistant.content[2].type === "toolCall") {
+          const circular: Record<string, unknown> = {};
+          circular.self = circular;
+          assistant.content[2].arguments = circular;
+        }
+      },
+    ],
+  ];
+  for (const [name, mutate] of mutations) {
+    const messages = ordinarySequence();
+    mutate(messages);
+    assert.throws(
+      () => projectCompactableContext(messages, model()),
+      UnrepresentableCompactableContextError,
+      name,
+    );
+  }
 });
 
 test("fails closed on unrepresentable model-visible context", () => {
