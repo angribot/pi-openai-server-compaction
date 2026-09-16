@@ -20,7 +20,7 @@ The extension does not infer Remote compaction capability from model names or en
 
 ## Remote compaction contract
 
-On `session_before_compact`, an eligible model receives one immutable logical request containing only:
+On `session_before_compact`, an eligible model receives one read-only logical request containing only:
 
 - the selected model;
 - Pi's persisted, compaction-aware active linear-session compactable context projected into ordinary Responses input;
@@ -68,7 +68,7 @@ The class is the opaque value resolved when the compaction item is created; expl
 
 Only the active branch's latest `CompactionEntry` can define replay state. The extension reconstructs that state from the branch on every hook; it keeps no replay cache, request-shape cache, invalidation tombstone, or lifecycle synchronization listener. A later ordinary compaction supersedes an older checkpoint. A fixed marker with missing, unknown-format, or malformed details is a broken checkpoint and fails closed.
 
-For a checkpoint with a non-null class, every ordinary request appends a branch-local custom entry with `customType: "native-replay-compatibility-decision/1"` before transport. Its data identifies the owning checkpoint and records the selected target identity, the target's resolved class or `null`, and the compatibility result. Custom entries are excluded from model context. If that write fails, the extension warns and continues. On reload, decisions are paired with following persisted assistant outcomes: a newer decision supersedes an abandoned pending request, error and aborted outcomes consume their decision without invalidating replay, and a successful outcome governed by an incompatible decision permanently invalidates that checkpoint on the branch. Malformed, foreign, or internally inconsistent decision records are ignored rather than treated as fatal. When no trustworthy decision applies to a successful assistant turn, compatibility is re-derived from the persisted assistant identity under the checkpoint's creation-time class; a turn that cannot be proven compatible, or whose identity is invalid, invalidates replay. Only missing, unknown-format, or malformed checkpoint details make the checkpoint broken and fail closed.
+For a checkpoint with a non-null class, compatibility is re-derived from the persisted suffix on every reconstruction. Each successful assistant turn after the checkpoint must match the checkpoint's creation-time class, or the exact Model key when class resolution is unavailable; a turn that is incompatible, has an invalid identity, or cannot be resolved to the checkpoint's class invalidates continuity. Error and aborted turns are skipped. No compatibility evidence is persisted at request time, so the derivation uses the current catalog and a later catalog revision can reinterpret an existing history. Only missing, unknown-format, or malformed checkpoint details make the checkpoint broken and fail closed.
 
 ## Native replay
 
@@ -87,7 +87,7 @@ For a compatible ordinary request, the extension:
 
 A malformed active state, invalidated branch, non-array input, or missing/ambiguous span stops the ordinary request through `ctx.abort()` and emits an explicit error. It does not throw from the hook and allow Pi to continue with the old payload.
 
-Selecting an incompatible model leaves its ordinary payload and transport untouched and emits a compatibility warning. For a class-aware checkpoint, the request-time incompatible decision is persisted before transport. Selection, an abandoned request, a failed request, or an aborted assistant turn does not itself invalidate replay. A persisted successful assistant turn governed by an incompatible decision does invalidate the branch, including text and tool-calling turns; a successful turn that cannot be proven compatible by re-derivation invalidates it as well. For checkpoints with an explicit `null` class, a successful exact-identity mismatch invalidates the branch. After invalidation, compatible replay stops and further Remote compaction is cancelled; the extension never drops the incompatible turn or constructs a best-effort mixed-model suffix.
+Selecting an incompatible model leaves its ordinary payload and transport untouched and emits a compatibility warning. Selection, an abandoned request, a failed request, or an aborted assistant turn does not itself invalidate replay, because continuity is judged only from persisted successful assistant turns. A persisted successful assistant turn that is incompatible with the checkpoint's creation-time class invalidates the branch, including text and tool-calling turns; a successful turn whose identity is invalid or cannot be resolved to the checkpoint's class invalidates it as well. For checkpoints with an explicit `null` class, a successful exact-identity mismatch invalidates the branch. After invalidation, compatible replay stops and further Remote compaction is cancelled; the extension never drops the incompatible turn or constructs a best-effort mixed-model suffix.
 
 ## Repeated Remote compaction
 
@@ -101,7 +101,7 @@ It excludes the checkpoint marker, Pi-retained pre-compaction entries, previous 
 
 ## Retry and failure behavior
 
-`src/direct-responses-operation.ts` and `src/codex-responses-operation.ts` each perform one attempt. The Codex adapter also sets Pi's provider retry count to zero. `src/remote-compaction.ts` owns the only retry loop: one initial attempt plus at most two retries, always with the same deeply immutable logical request.
+`src/direct-responses-operation.ts` and `src/codex-responses-operation.ts` each perform one attempt. The Codex adapter also sets Pi's provider retry count to zero. `src/remote-compaction.ts` owns the only retry loop: one initial attempt plus at most two retries, always with the same read-only logical request.
 
 Transient network, read, idle-timeout, premature-EOF, malformed pre-completion stream, incomplete-response, rate-limit, overload, and retryable HTTP failures may retry. Caller abort, authentication or projection failure, clearly non-transient HTTP failures, invalid request or prompt, unsupported operation, context overflow, quota or policy failure, completed-response item validation failure, and retry exhaustion are terminal. A terminal semantic error overrides an otherwise retryable HTTP status. Standard `Retry-After` is preferred; fallback backoff is finite, capped, jittered, and abort-aware.
 
@@ -109,15 +109,15 @@ Every eligible terminal failure returns `{ cancel: true }`, preventing Pi text-c
 
 ## Transport boundary and limitations
 
-The extension does not register or override providers. Ordinary requests remain owned by the selected provider transport; this extension only persists request-time compatibility evidence and patches Native replay in `before_provider_request`. Equal-class service acceptance across routes is a runtime assumption: a target rejection follows the normal fail-closed path and does not trigger artifact stripping or a portable fallback.
+The extension does not register or override providers. Ordinary requests remain owned by the selected provider transport; this extension only patches Native replay in `before_provider_request`. Equal-class service acceptance across routes is a runtime assumption: a target rejection follows the normal fail-closed path and does not trigger artifact stripping or a portable fallback.
 
 The Remote compaction operation uses one of two narrow SSE adapters because Pi `0.85.1` does not expose a provider-aware raw Responses operation that proves explicit completion while preserving unknown output items such as `compaction`. Exact `openai-responses` models use direct HTTP/SSE with Pi-resolved routing and authentication. Built-in Codex uses Pi's public provider operation plus a per-call cloned-response capture, retaining Pi's OAuth refresh, account headers, endpoint construction, compression, and request envelope. No handwritten Codex transport or fallback request is used, and ordinary Codex requests remain free to use Pi's configured WebSocket or SSE transport.
 
 Other extensions' request mutations and provider-aware raw-operation composition remain outside this package's current contract.
 
-The projection remains local because Pi `0.85.1`'s production extension loader rewrites `pi-ai` subpath imports through its root compatibility alias, preventing direct reuse of the exported Responses converter. No module-resolution workaround is installed; the production-loader test and golden wire-value tests guard this compatibility limitation.
+The projection remains local because Pi `0.85.1`'s production extension loader rewrites `pi-ai` subpath imports through its root compatibility alias, preventing direct reuse of the exported Responses converter. No module-resolution workaround is installed.
 
-The local Responses projection adapter covers Pi `0.85.1` ordinary semantics for supported persisted messages, images and placeholders, assistant text identity and phase, same-model signed reasoning, ordinary function calls/results and missing-output normalization, and built-in custom-message normalization. Compaction compatibility classes broaden only opaque compaction-item replay; signed or encrypted reasoning, tool-call IDs, thought signatures, and provider namespace metadata retain their existing exact-identity rules. Detectable model-visible context that cannot be represented faithfully cancels before transport. Grammar custom-tool metadata, constrained sampling, deferred tool search, provider distinctions already erased by Pi, and ephemeral provider-payload mutations are outside the supported contract.
+The local Responses projection adapter covers Pi `0.85.1` ordinary semantics for supported persisted messages, images and placeholders, assistant text identity and phase, same-model signed reasoning, ordinary function calls/results and missing-output normalization, and built-in custom-message normalization. Compaction compatibility classes broaden only opaque compaction-item replay; signed or encrypted reasoning, tool-call IDs, thought signatures, and provider namespace metadata retain their existing exact-identity rules. Because the adapter mirrors Pi instead of adding validation Pi lacks, unrecognized model-visible content is converted or ignored exactly as Pi would; a conversion that throws cancels the Remote compaction attempt. Grammar custom-tool metadata, constrained sampling, deferred tool search, provider distinctions already erased by Pi, and ephemeral provider-payload mutations are outside the supported contract.
 
 Architecture decisions:
 
@@ -126,6 +126,7 @@ Architecture decisions:
 - [ADR 0003: Keep provider transport independent](https://github.com/angribot/pi-openai-server-compaction/blob/main/docs/adr/0003-keep-provider-transport-independent.md)
 - [ADR 0004: Keep resolved endpoints out of model identity](https://github.com/angribot/pi-openai-server-compaction/blob/main/docs/adr/0004-keep-resolved-endpoints-out-of-model-identity.md) — superseded by ADR 0005
 - [ADR 0005: Use creation-time compatibility classes for Native replay](https://github.com/angribot/pi-openai-server-compaction/blob/main/docs/adr/0005-use-creation-time-compatibility-classes.md)
+- [ADR 0006: Re-derive Native replay compatibility from persisted turns](https://github.com/angribot/pi-openai-server-compaction/blob/main/docs/adr/0006-re-derive-replay-compatibility-from-turns.md)
 
 ## Testing
 
@@ -135,21 +136,12 @@ The offline suite uses Node's built-in test runner and requires no credentials o
 npm test
 ```
 
-Its four focused files are:
+Its two focused files are:
 
 - `tests/loader.test.ts` — production loader, package factory, exactly two hooks, and no provider override;
-- `tests/responses-projection.test.ts` — supported ordinary Responses projection and fail-closed context;
-- `tests/remote-compaction-operation.test.ts` — direct and Pi-mediated one-attempt SSE operations, payload ownership, raw completion, validation, failure classification, usage, and abort;
-- `tests/remote-compaction.test.ts` — protocol retry, cancellation, checkpoint formats, request-time compatibility evidence, branch reconstruction, Native replay, invalidation, and repeated compaction.
+- `tests/remote-compaction-operation.test.ts` — direct and Pi-mediated one-attempt SSE operations, payload ownership, raw completion, validation, failure classification, usage, and abort.
 
-The credentialed paid live scenario requires Pi CLI `0.85.1`, an explicit Eligible model whose ID is present in the catalog above, working Pi-managed credentials and network, endpoint Remote compaction capability, and permission to incur two compactions plus continuation calls:
-
-```bash
-pi --version
-PI_OPENAI_SERVER_COMPACTION_TEST_MODEL=provider/model npm run test:live
-```
-
-It covers one linear first compaction, same-process replay and Compatibility decision persistence, repeated compaction, and fresh-process reload with new branch-local evidence. If the model variable, catalog entry, or credentials are unavailable, live acceptance is not considered passed; report it as not run.
+Coverage is deliberately reduced: the projection suite, the Native replay and retry orchestration suite, and the credentialed live scenario were removed without replacement. `npm test` therefore does not exercise projection conversion, branch reconstruction, retry, or end-to-end continuity.
 
 ## Troubleshooting
 
@@ -157,7 +149,7 @@ It covers one linear first compaction, same-process replay and Compatibility dec
 - Inspect the active branch's latest compaction entry in the session JSONL, especially `summary` and `details.nativeReplayCheckpoint`.
 - If that checkpoint uses `details.remoteCompaction` or another unsupported format, start a new session or return before that checkpoint; there is no migration reader.
 - If Native replay reports a missing or ambiguous span, do not continue from the incomplete payload. Recover through a new session or a complete pre-checkpoint branch point.
-- If Native replay reports that a branch cannot be proven compatible, recover through a branch point before the affected class-aware checkpoint. Malformed or missing compatibility evidence does not by itself stop replay; the extension re-derives compatibility from the persisted assistant identity under the checkpoint's creation-time class. Do not hand-edit compatibility evidence to force replay.
+- If Native replay reports that a branch cannot be proven compatible, recover through a branch point before the affected class-aware checkpoint. Compatibility is re-derived from persisted successful assistant turns under the checkpoint's creation-time class; there is no request-time evidence to inspect or hand-edit.
 - If an endpoint rejects an equal-class compaction item, treat that route as unavailable for this session; the extension does not retry without the item or create a portable summary.
 - If an endpoint rejects the trigger, overflows, or exhausts retries, Remote compaction is cancelled and Pi's text compactor is intentionally not invoked.
 
@@ -167,11 +159,11 @@ It covers one linear first compaction, same-process replay and Compatibility dec
 | ----------------------------------- | --------------------------------------------------------------------------------- |
 | `index.ts`                          | composition root selecting and installing the production operation                |
 | `src/remote-compaction.ts`          | Pi hook orchestration, persistence effects, retry, and Responses span replacement |
-| `src/native-replay.ts`              | checkpoint records, compatibility evidence, and branch continuity derivation      |
+| `src/native-replay.ts`              | checkpoint records and branch continuity derivation                               |
 | `src/responses-projection.ts`       | narrow Pi `0.85.1` ordinary Responses projection adapter                          |
 | `src/direct-responses-operation.ts` | one-attempt direct HTTP/SSE capability-gap adapter                                |
 | `src/codex-responses-operation.ts`  | one-attempt Pi-mediated Codex SSE capture adapter                                 |
-| `tests/`                            | four offline contract files plus one credentialed live scenario                   |
+| `tests/`                            | two offline contract files                                                        |
 | `CONTEXT.md`                        | canonical Remote compaction domain language                                       |
 | `docs/adr/`                         | durable architecture decisions                                                    |
 | `CHANGELOG.md`                      | release history and pending user-visible changes                                  |

@@ -1,38 +1,19 @@
 import { convertToLlm, type AgentMessage } from "@earendil-works/pi-agent-core";
-import type { Message, Model } from "@earendil-works/pi-ai";
+import type {
+  AssistantMessage,
+  ImageContent,
+  Message,
+  Model,
+  TextContent,
+  ThinkingContent,
+  ToolCall,
+} from "@earendil-works/pi-ai";
 
 export type ResponsesItem = Record<string, unknown> & { type?: string };
-
-export class UnrepresentableCompactableContextError extends Error {
-  constructor(message: string, options?: ErrorOptions) {
-    super(message, options);
-    this.name = "UnrepresentableCompactableContextError";
-  }
-}
 
 const NON_VISION_USER_IMAGE_PLACEHOLDER = "(image omitted: model does not support images)";
 const NON_VISION_TOOL_IMAGE_PLACEHOLDER = "(tool image omitted: model does not support images)";
 const OPENAI_TOOL_CALL_PROVIDERS = new Set(["openai", "openai-codex", "opencode"]);
-const SUPPORTED_AGENT_MESSAGE_ROLES = new Set([
-  "user",
-  "assistant",
-  "toolResult",
-  "custom",
-  "bashExecution",
-  "branchSummary",
-  "compactionSummary",
-]);
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-function fail(message: string, cause?: unknown): never {
-  throw new UnrepresentableCompactableContextError(
-    `Unrepresentable compactable context: ${message}`,
-    cause === undefined ? undefined : { cause },
-  );
-}
 
 function sanitizeSurrogates(text: string): string {
   return text.replace(
@@ -63,11 +44,7 @@ function shortHash(value: string): string {
   return (second >>> 0).toString(36) + (first >>> 0).toString(36);
 }
 
-function normalizeToolCallId(
-  id: string,
-  source: Record<string, unknown>,
-  model: Model<any>,
-): string {
+function normalizeToolCallId(id: string, source: AssistantMessage, model: Model<any>): string {
   if (!OPENAI_TOOL_CALL_PROVIDERS.has(model.provider)) return normalizeIdPart(id);
   if (!id.includes("|")) return normalizeIdPart(id);
 
@@ -79,14 +56,6 @@ function normalizeToolCallId(
     normalizedItemId = normalizeIdPart(`fc_${normalizedItemId}`);
   }
   return `${normalizedCallId}|${normalizedItemId}`;
-}
-
-function assertSupportedAgentMessages(messages: readonly AgentMessage[]): void {
-  for (const [index, message] of messages.entries()) {
-    if (!isRecord(message) || !SUPPORTED_AGENT_MESSAGE_ROLES.has(String(message.role))) {
-      fail(`message ${index} has an unknown model-facing role`);
-    }
-  }
 }
 
 function parseTextSignature(value: unknown): { id?: string; phase?: string } | undefined {
@@ -109,232 +78,196 @@ function parseTextSignature(value: unknown): { id?: string; phase?: string } | u
   return { id: value };
 }
 
-function replaceImagesWithPlaceholder(content: readonly unknown[], placeholder: string): unknown[] {
-  const result: unknown[] = [];
+function replaceImagesWithPlaceholder(
+  content: readonly (TextContent | ImageContent)[],
+  placeholder: string,
+): (TextContent | ImageContent)[] {
+  const result: (TextContent | ImageContent)[] = [];
   let previousWasPlaceholder = false;
   for (const block of content) {
-    if (!isRecord(block)) fail("message content contains a non-object block");
     if (block.type === "image") {
       if (!previousWasPlaceholder) result.push({ type: "text", text: placeholder });
       previousWasPlaceholder = true;
       continue;
     }
     result.push(block);
-    previousWasPlaceholder = block.type === "text" && block.text === placeholder;
+    previousWasPlaceholder = block.text === placeholder;
   }
   return result;
 }
 
-function normalizeMessages(
-  messages: readonly Message[],
-  model: Model<any>,
-): Record<string, unknown>[] {
+// Mirrors Pi 0.85.1 `transformMessages` (`openai-responses-shared` reuses it):
+// image downgrade, foreign thinking/tool normalization, then synthetic missing
+// tool results. This intentionally does not add validation Pi itself lacks.
+function normalizeMessages(messages: readonly Message[], model: Model<any>): Message[] {
   const toolCallIdMap = new Map<string, string>();
-  const supportsImages = model.input.includes("image");
-  const imageAware: Record<string, unknown>[] = messages.map((source) => {
-    const message = source as unknown as Record<string, unknown>;
-    const content = message.content == null ? [] : message.content;
-    if (supportsImages) return { ...message, content };
-    if (message.role === "user" && Array.isArray(content)) {
-      return {
-        ...message,
-        content: replaceImagesWithPlaceholder(content, NON_VISION_USER_IMAGE_PLACEHOLDER),
-      };
-    }
-    if (message.role === "toolResult" && Array.isArray(content)) {
-      return {
-        ...message,
-        content: replaceImagesWithPlaceholder(content, NON_VISION_TOOL_IMAGE_PLACEHOLDER),
-      };
-    }
-    return { ...message, content };
-  });
+  const normalizedMessages = messages.map((message) =>
+    message.content == null ? { ...message, content: [] } : message,
+  );
+  const imageAwareMessages = model.input.includes("image")
+    ? normalizedMessages
+    : normalizedMessages.map((message): Message => {
+        if (message.role === "user" && Array.isArray(message.content)) {
+          return {
+            ...message,
+            content: replaceImagesWithPlaceholder(
+              message.content,
+              NON_VISION_USER_IMAGE_PLACEHOLDER,
+            ),
+          };
+        }
+        if (message.role === "toolResult") {
+          return {
+            ...message,
+            content: replaceImagesWithPlaceholder(
+              message.content,
+              NON_VISION_TOOL_IMAGE_PLACEHOLDER,
+            ),
+          };
+        }
+        return message;
+      });
 
-  const transformed = imageAware.map((message, messageIndex) => {
+  const transformed = imageAwareMessages.map((message): Message => {
     if (message.role === "user") return message;
     if (message.role === "toolResult") {
-      if (typeof message.toolCallId !== "string" || !message.toolCallId) {
-        fail(`tool result ${messageIndex} has no call identity`);
-      }
       const normalizedId = toolCallIdMap.get(message.toolCallId);
-      return normalizedId ? { ...message, toolCallId: normalizedId } : message;
+      return normalizedId && normalizedId !== message.toolCallId
+        ? { ...message, toolCallId: normalizedId }
+        : message;
     }
-    if (message.role !== "assistant") {
-      const role = message.role;
-      fail(`normalized message ${messageIndex} has unknown role ${String(role)}`);
-    }
-    if (message.stopReason === "error" || message.stopReason === "aborted") {
-      return { ...message, content: [] };
-    }
-    if (!Array.isArray(message.content))
-      fail(`assistant message ${messageIndex} has invalid content`);
 
     const isSameModel =
       message.provider === model.provider &&
       message.api === model.api &&
       message.model === model.id;
-    const blocks = message.content as unknown[];
-    const content: unknown[] = blocks.flatMap((value, blockIndex): unknown[] => {
-      if (!isRecord(value)) {
-        fail(`assistant message ${messageIndex} block ${blockIndex} is invalid`);
-      }
-      const block = value;
-      if (block.type === "thinking") {
-        if (typeof block.thinking !== "string") {
-          fail(`assistant reasoning block ${blockIndex} is malformed`);
+    const content = message.content.flatMap(
+      (block): (TextContent | ThinkingContent | ToolCall)[] => {
+        if (block.type === "thinking") {
+          if (block.redacted) return isSameModel ? [block] : [];
+          if (isSameModel && block.thinkingSignature) return [block];
+          if (!block.thinking || block.thinking.trim() === "") return [];
+          return isSameModel ? [block] : [{ type: "text", text: block.thinking }];
         }
-        if (block.redacted === true) return isSameModel ? [block] : [];
-        if (isSameModel && typeof block.thinkingSignature === "string" && block.thinkingSignature) {
-          return [block];
+        if (block.type === "text") {
+          return [isSameModel ? block : { type: "text", text: block.text }];
         }
-        if (!block.thinking.trim()) return [];
-        return isSameModel ? [block] : [{ type: "text", text: block.thinking }];
-      }
-      if (block.type === "text") {
-        if (typeof block.text !== "string") fail(`assistant text block ${blockIndex} is malformed`);
-        return [isSameModel ? block : { type: "text", text: block.text }];
-      }
-      if (block.type === "toolCall") {
-        if (
-          typeof block.id !== "string" ||
-          !block.id.split("|")[0] ||
-          typeof block.name !== "string" ||
-          !block.name
-        ) {
-          fail(`assistant tool call ${blockIndex} is malformed`);
+        if (block.type === "toolCall") {
+          let normalized: ToolCall = block;
+          if (!isSameModel && block.thoughtSignature) {
+            normalized = { ...block };
+            delete normalized.thoughtSignature;
+          }
+          if (!isSameModel) {
+            const normalizedId = normalizeToolCallId(block.id, message, model);
+            if (normalizedId !== block.id) {
+              toolCallIdMap.set(block.id, normalizedId);
+              normalized = { ...normalized, id: normalizedId };
+            }
+          }
+          return [normalized];
         }
-        if (isSameModel) return [block];
-        const normalizedId = normalizeToolCallId(block.id, message, model);
-        toolCallIdMap.set(block.id, normalizedId);
-        const normalized: Record<string, unknown> = { ...block, id: normalizedId };
-        delete normalized.thoughtSignature;
-        return [normalized];
-      }
-      return fail(
-        `assistant message ${messageIndex} has unknown content type ${String(block.type)}`,
-      );
-    });
+        return [block];
+      },
+    );
     return { ...message, content };
   });
 
-  const result: Record<string, unknown>[] = [];
-  let pendingToolCalls: Record<string, unknown>[] = [];
-  let resultIds = new Set<string>();
+  const result: Message[] = [];
+  let pendingToolCalls: ToolCall[] = [];
+  let existingToolResultIds = new Set<string>();
 
-  const flushMissingResults = () => {
-    for (const call of pendingToolCalls) {
-      const id = String(call.id);
-      if (resultIds.has(id)) continue;
+  const insertSyntheticToolResults = () => {
+    if (pendingToolCalls.length === 0) return;
+    for (const toolCall of pendingToolCalls) {
+      if (existingToolResultIds.has(toolCall.id)) continue;
       result.push({
         role: "toolResult",
-        toolCallId: id,
-        toolName: call.name,
+        toolCallId: toolCall.id,
+        toolName: toolCall.name,
         content: [{ type: "text", text: "No result provided" }],
         isError: true,
+        timestamp: Date.now(),
       });
     }
     pendingToolCalls = [];
-    resultIds = new Set();
+    existingToolResultIds = new Set();
   };
 
-  for (const [messageIndex, message] of transformed.entries()) {
+  for (const message of transformed) {
     if (message.role === "assistant") {
-      flushMissingResults();
+      insertSyntheticToolResults();
       if (message.stopReason === "error" || message.stopReason === "aborted") continue;
-      const calls = (message.content as Record<string, unknown>[]).filter(
-        (block) => block.type === "toolCall",
+      const toolCalls = message.content.filter(
+        (block): block is ToolCall => block.type === "toolCall",
       );
-      const seen = new Set<string>();
-      for (const call of calls) {
-        const id = String(call.id);
-        if (seen.has(id)) fail(`assistant message ${messageIndex} repeats tool call ${id}`);
-        seen.add(id);
+      if (toolCalls.length > 0) {
+        pendingToolCalls = toolCalls;
+        existingToolResultIds = new Set();
       }
-      pendingToolCalls = calls;
       result.push(message);
       continue;
     }
     if (message.role === "toolResult") {
-      const toolCallId = String(message.toolCallId);
-      const matchingCall = pendingToolCalls.find((call) => call.id === toolCallId);
-      if (!matchingCall || matchingCall.name !== message.toolName || resultIds.has(toolCallId)) {
-        fail(`tool result ${messageIndex} has no unique matching function call`);
-      }
-      resultIds.add(toolCallId);
+      existingToolResultIds.add(message.toolCallId);
       result.push(message);
       continue;
     }
-    if (message.role === "user") {
-      flushMissingResults();
-      result.push(message);
-      continue;
-    }
-    fail(`normalized message ${messageIndex} has unknown role`);
+    insertSyntheticToolResults();
+    result.push(message);
   }
-  flushMissingResults();
+  insertSyntheticToolResults();
   return result;
 }
 
-function userContent(content: unknown): Record<string, unknown>[] {
+function userContent(content: string | readonly (TextContent | ImageContent)[]): ResponsesItem[] {
   if (typeof content === "string") {
     return [{ type: "input_text", text: sanitizeSurrogates(content) }];
   }
-  if (!Array.isArray(content)) fail("user content is neither text nor a content array");
-  return content.map((block, index) => {
-    if (!isRecord(block)) fail(`user content block ${index} is invalid`);
-    if (block.type === "text" && typeof block.text === "string") {
+  return content.map((block) => {
+    if (block.type === "text") {
       return { type: "input_text", text: sanitizeSurrogates(block.text) };
     }
-    if (
-      block.type === "image" &&
-      typeof block.mimeType === "string" &&
-      typeof block.data === "string"
-    ) {
-      return {
-        type: "input_image",
-        detail: "auto",
-        image_url: `data:${block.mimeType};base64,${block.data}`,
-      };
-    }
-    return fail(`user content block ${index} has unknown type ${String(block.type)}`);
+    return {
+      type: "input_image",
+      detail: "auto",
+      image_url: `data:${block.mimeType};base64,${block.data}`,
+    };
   });
 }
 
-function toolResultOutput(model: Model<any>, content: unknown): string | Record<string, unknown>[] {
-  if (!Array.isArray(content)) fail("tool result content is not an array");
-  const texts: string[] = [];
-  const images: Record<string, unknown>[] = [];
-  for (const [index, block] of content.entries()) {
-    if (!isRecord(block)) fail(`tool result block ${index} is invalid`);
-    if (block.type === "text" && typeof block.text === "string") {
-      texts.push(sanitizeSurrogates(block.text));
-      continue;
-    }
-    if (
-      block.type === "image" &&
-      typeof block.mimeType === "string" &&
-      typeof block.data === "string"
-    ) {
-      if (!model.input.includes("image")) {
-        texts.push(NON_VISION_TOOL_IMAGE_PLACEHOLDER);
-      } else {
-        images.push({
-          type: "input_image",
-          detail: "auto",
-          image_url: `data:${block.mimeType};base64,${block.data}`,
-        });
-      }
-      continue;
-    }
-    fail(`tool result block ${index} has unknown type ${String(block.type)}`);
+function toolResultOutput(
+  model: Model<any>,
+  content: readonly (TextContent | ImageContent)[],
+): string | ResponsesItem[] {
+  const textResult = content
+    .filter((block): block is TextContent => block.type === "text")
+    .map((block) => block.text)
+    .join("\n");
+  const images = content.filter((block): block is ImageContent => block.type === "image");
+  const hasText = textResult.length > 0;
+  if (images.length === 0 || !model.input.includes("image")) {
+    return sanitizeSurrogates(
+      hasText ? textResult : images.length > 0 ? "(see attached image)" : "(no tool output)",
+    );
   }
-  const text = texts.join("\n");
-  if (images.length === 0) return text || "(no tool output)";
-  return [...(text ? [{ type: "input_text", text }] : []), ...images];
+  const output: ResponsesItem[] = [];
+  if (hasText) output.push({ type: "input_text", text: sanitizeSurrogates(textResult) });
+  for (const image of images) {
+    output.push({
+      type: "input_image",
+      detail: "auto",
+      image_url: `data:${image.mimeType};base64,${image.data}`,
+    });
+  }
+  return output;
 }
 
+// Mirrors Pi 0.85.1 `convertResponsesMessages` for the tool-free Remote
+// compaction subset: message/function-call items, Pi fallback IDs and phases,
+// foreign item-id normalization, and function-call outputs.
 function projectNormalizedMessages(
-  messages: readonly Record<string, unknown>[],
+  messages: readonly Message[],
   model: Model<any>,
 ): ResponsesItem[] {
   const projected: ResponsesItem[] = [];
@@ -345,32 +278,17 @@ function projectNormalizedMessages(
       const content = userContent(message.content);
       if (Array.isArray(message.content) && content.length === 0) continue;
       projected.push({ role: "user", content });
-      messageIndex++;
-      continue;
-    }
-
-    if (message.role === "assistant") {
-      if (!Array.isArray(message.content)) fail("assistant content is not an array");
+    } else if (message.role === "assistant") {
       const isSameProviderAndApi = message.provider === model.provider && message.api === model.api;
       const isSameModel = isSameProviderAndApi && message.model === model.id;
       const isDifferentModel = isSameProviderAndApi && message.model !== model.id;
       const output: ResponsesItem[] = [];
       let textBlockIndex = 0;
 
-      for (const [blockIndex, block] of message.content.entries()) {
-        if (!isRecord(block)) fail(`assistant block ${blockIndex} is invalid`);
+      for (const block of message.content) {
         if (block.type === "thinking") {
           if (block.thinkingSignature) {
-            try {
-              const reasoning = JSON.parse(String(block.thinkingSignature)) as unknown;
-              if (!isRecord(reasoning) || reasoning.type !== "reasoning") {
-                fail(`assistant reasoning block ${blockIndex} has an invalid signature item`);
-              }
-              output.push(reasoning as ResponsesItem);
-            } catch (error) {
-              if (error instanceof UnrepresentableCompactableContextError) throw error;
-              fail(`assistant reasoning block ${blockIndex} has an invalid signature`, error);
-            }
+            output.push(JSON.parse(block.thinkingSignature) as ResponsesItem);
           }
           continue;
         }
@@ -389,7 +307,7 @@ function projectNormalizedMessages(
             content: [
               {
                 type: "output_text",
-                text: sanitizeSurrogates(String(block.text)),
+                text: sanitizeSurrogates(block.text),
                 annotations: [],
               },
             ],
@@ -400,52 +318,32 @@ function projectNormalizedMessages(
           continue;
         }
         if (block.type === "toolCall") {
-          const [callId, rawItemId] = String(block.id).split("|");
-          if (!callId) fail(`assistant tool call ${blockIndex} has an empty call identity`);
+          const [callId, rawItemId] = block.id.split("|");
           let itemId: string | undefined = rawItemId;
           if (!itemId?.startsWith("fc_") || isDifferentModel) {
             itemId = undefined;
-          }
-          let argumentsJson: string;
-          try {
-            argumentsJson = JSON.stringify(block.arguments);
-          } catch (error) {
-            fail(`assistant tool call ${blockIndex} arguments are not serializable`, error);
-          }
-          if (argumentsJson === undefined) {
-            fail(`assistant tool call ${blockIndex} arguments are not serializable`);
           }
           output.push({
             type: "function_call",
             ...(itemId ? { id: itemId } : {}),
             call_id: callId,
-            name: String(block.name),
-            arguments: argumentsJson,
-            ...(isSameModel && typeof block.namespace === "string"
-              ? { namespace: block.namespace }
-              : {}),
+            name: block.name,
+            arguments: JSON.stringify(block.arguments),
+            ...(isSameModel && block.namespace !== undefined ? { namespace: block.namespace } : {}),
           });
         }
       }
       if (output.length === 0) continue;
       projected.push(...output);
-      messageIndex++;
-      continue;
-    }
-
-    if (message.role === "toolResult") {
-      const [callId] = String(message.toolCallId).split("|");
-      if (!callId) fail("tool result has an empty call identity");
+    } else {
+      const [callId] = message.toolCallId.split("|");
       projected.push({
         type: "function_call_output",
         call_id: callId,
         output: toolResultOutput(model, message.content),
       });
-      messageIndex++;
-      continue;
     }
-
-    fail(`normalized message has unknown role ${String(message.role)}`);
+    messageIndex++;
   }
 
   return projected;
@@ -455,12 +353,5 @@ export function projectCompactableContext(
   messages: readonly AgentMessage[],
   model: Model<any>,
 ): ResponsesItem[] {
-  assertSupportedAgentMessages(messages);
-  let normalized: Message[];
-  try {
-    normalized = convertToLlm([...messages]);
-  } catch (error) {
-    fail("Pi message normalization failed", error);
-  }
-  return projectNormalizedMessages(normalizeMessages(normalized, model), model);
+  return projectNormalizedMessages(normalizeMessages(convertToLlm([...messages]), model), model);
 }
