@@ -279,15 +279,6 @@ function decodeCompatibilityDecision(value: unknown): CompatibilityDecision | un
   };
 }
 
-function successfulAssistant(entry: BranchEntry): boolean {
-  return (
-    entry.type === "message" &&
-    entry.message?.role === "assistant" &&
-    entry.message.stopReason !== "error" &&
-    entry.message.stopReason !== "aborted"
-  );
-}
-
 function assistantIdentity(entry: BranchEntry): RequestModelIdentity | undefined {
   const message = entry.message;
   if (entry.type !== "message" || message?.role !== "assistant") return undefined;
@@ -296,12 +287,6 @@ function assistantIdentity(entry: BranchEntry): RequestModelIdentity | undefined
     api: message.api,
     id: message.model,
   });
-}
-
-function assistantInvalidates(entry: BranchEntry, owner: RemoteCompactionModelKey): boolean {
-  if (!successfulAssistant(entry)) return false;
-  const identity = assistantIdentity(entry);
-  return !identity || !sameModelKey(owner, identity);
 }
 
 function identityCompatible(
@@ -316,14 +301,18 @@ function identityCompatible(
   );
 }
 
-function deriveClassAwareReplay(
+function deriveReplayContinuity(
   suffix: readonly BranchEntry[],
   state: Pick<ValidReplayState, "entry" | "modelKey" | "compactionCompatibilityClass">,
   resolver: CompactionCompatibilityResolver,
 ): ReplayDerivation {
   let pending: CompatibilityDecision | undefined;
   for (const entry of suffix) {
-    if (entry.type === "custom" && entry.customType === NATIVE_REPLAY_COMPATIBILITY_DECISION_TYPE) {
+    if (
+      requiresCompatibilityEvidence(state) &&
+      entry.type === "custom" &&
+      entry.customType === NATIVE_REPLAY_COMPATIBILITY_DECISION_TYPE
+    ) {
       const decision = decodeCompatibilityDecision(entry.data);
       // Malformed, foreign, or internally inconsistent bookkeeping is ignored, not
       // fatal: when no trustworthy decision applies, compatibility is re-derived
@@ -353,7 +342,9 @@ function deriveClassAwareReplay(
     const compatible =
       pending && sameModelKey(pending.target.modelKey, identity)
         ? pending.compatible
-        : identityCompatible(state, identity, resolver);
+        : state.compactionCompatibilityClass === null
+          ? sameModelKey(state.modelKey, identity)
+          : identityCompatible(state, identity, resolver);
     if (!compatible) return { invalidated: true };
     pending = undefined;
   }
@@ -386,19 +377,7 @@ function deriveActiveReplayState(
   }
 
   const suffix = branch.slice(latestIndex + 1);
-  const derivation = requiresCompatibilityEvidence(decoded)
-    ? deriveClassAwareReplay(
-        suffix,
-        {
-          entry,
-          modelKey: decoded.modelKey,
-          compactionCompatibilityClass: decoded.compactionCompatibilityClass,
-        },
-        resolver,
-      )
-    : {
-        invalidated: suffix.some((candidate) => assistantInvalidates(candidate, decoded.modelKey)),
-      };
+  const derivation = deriveReplayContinuity(suffix, { entry, ...decoded }, resolver);
 
   return {
     kind: "valid",
