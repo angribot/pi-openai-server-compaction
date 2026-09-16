@@ -4,6 +4,8 @@ This changelog intentionally starts at **0.1.0**.
 
 ## Unreleased
 
+- use Pi's deterministic fallback for empty versioned assistant text IDs instead of emitting an empty ID that can break Native replay span matching
+
 - tolerate unknown fields in persisted Native replay checkpoint details and compatibility decision records instead of treating them as a broken checkpoint
 - stop aborting ordinary requests and Remote compaction when request-time compatibility evidence is missing, malformed, foreign, or inconsistent; compatibility is re-derived from the persisted assistant turn under the checkpoint's creation-time class, and Native replay still stops when a turn cannot be proven compatible
 - report a failed compatibility-evidence write as a warning instead of stopping the request
