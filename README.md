@@ -65,7 +65,7 @@ Only `nativeReplayCheckpoint` records with format `native-replay-checkpoint/1` a
 | --- | --- |
 | Endpoint rejects compaction | Confirm it supports the v2 trigger, not just Responses or `/responses/compact`. |
 | Context overflow or retries exhausted | Compaction was cancelled; no text fallback was used. Start a new session if you cannot continue. |
-| Replay reports broken state, missing/ambiguous input, or invalid compatibility evidence | Start a new session or return to a complete branch point before the affected checkpoint. Do not continue with incomplete context. |
+| Replay reports broken state, missing/ambiguous input, or a compatibility turn that cannot be proven | Start a new session or return to a complete branch point before the affected checkpoint. Do not continue with incomplete context. |
 | A different endpoint rejects a supposedly compatible item | Treat that route as unavailable for this session; the extension will not strip the item and retry. |
 
 To inspect a failing session, check the active branch's latest compaction entry in the session JSONL, especially `summary` and `details.nativeReplayCheckpoint`.

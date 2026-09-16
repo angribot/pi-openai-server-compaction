@@ -7,6 +7,10 @@ export type CompactionItem = ResponsesItem & {
   encrypted_content: string;
 };
 
+/**
+ * The caller-owned logical Remote compaction request. It is shared read-only
+ * across retry attempts: adapters must not mutate it.
+ */
 export type RemoteCompactionRequest = Readonly<{
   model: Model<any>;
   input: readonly ResponsesItem[];
@@ -53,16 +57,6 @@ export type RemoteCompactionAttempt = (
 ) => Promise<RemoteCompactionAttemptOutcome>;
 
 const STREAM_IDLE_TIMEOUT_MS = 300_000;
-const TRANSIENT_ERROR_CODES = new Set([
-  "rate_limit_exceeded",
-  "request_timeout",
-  "server_error",
-  "server_overloaded",
-  "server_is_overloaded",
-  "slow_down",
-  "temporarily_unavailable",
-  "overloaded",
-]);
 const TERMINAL_ERROR_CODES = new Set([
   "bio_policy",
   "billing_hard_limit_reached",
@@ -175,13 +169,12 @@ function classifyFailure(failure: unknown): "retryable" | "terminal" {
 }
 
 function classifyHttpFailure(status: number, failure: unknown): "retryable" | "terminal" {
-  const semantics = errorSemantics(failure);
-  if (semantics.some((semantic) => TERMINAL_ERROR_CODES.has(semantic))) return "terminal";
+  if (errorSemantics(failure).some((semantic) => TERMINAL_ERROR_CODES.has(semantic))) {
+    return "terminal";
+  }
   if (status === 408 || status === 409 || status === 425 || status === 429 || status >= 500) {
     return "retryable";
   }
-  if (status >= 400 && status < 500) return "terminal";
-  if (semantics.some((semantic) => TRANSIENT_ERROR_CODES.has(semantic))) return "retryable";
   return "terminal";
 }
 

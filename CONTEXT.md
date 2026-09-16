@@ -41,7 +41,7 @@ Compactable context containing model-visible semantics that cannot be faithfully
 _Avoid_: Unsupported Pi context, unsupported context, unconvertible context
 
 **Replacement history**:
-The complete replayable Responses item sequence installed by a successful Remote compaction and substituted for the replay replacement span during native replay. In this project's minimum v2 contract it contains exactly the one opaque compaction item and no retained explicit items.
+The complete replayable Responses item sequence installed by a successful Remote compaction and substituted for the replay replacement span during native replay.
 _Avoid_: Remote history, explicit remote history, native replay history
 
 **Native replay**:
@@ -69,7 +69,7 @@ The durable local record that binds replacement history to its producer's Model 
 _Avoid_: Remote compaction version, v3 details, checkpoint summary
 
 **Compatibility decision record**:
-Branch-local evidence of the selected target identity, resolved class, and compatibility decision for an Ordinary request from a class-aware checkpoint. Its following assistant outcome determines whether Native replay continuity remains valid.
+Branch-local evidence of the selected target identity, resolved class, and compatibility decision for an Ordinary request from a class-aware checkpoint. Its compatibility result is fixed at request time; a following successful assistant outcome governed by an incompatible result invalidates Native replay continuity.
 _Avoid_: Compatibility cache, invalidation tombstone, model-change event
 
 **Ordinary request**:
