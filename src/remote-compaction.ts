@@ -1,7 +1,11 @@
 import { isDeepStrictEqual } from "node:util";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import type { Model, Usage } from "@earendil-works/pi-ai";
-import { buildSessionContext, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import {
+  buildSessionContext,
+  type ExtensionAPI,
+  type ExtensionContext,
+} from "@earendil-works/pi-coding-agent";
 import {
   prepareCompactionReplay,
   prepareNativeReplay,
@@ -38,14 +42,12 @@ const MAX_ATTEMPTS = 3;
 const MAX_RETRY_DELAY_MS = 60_000;
 const BASE_RETRY_DELAY_MS = 200;
 
-type HookContext = {
-  model?: Model<any>;
-  hasUI: boolean;
-  ui: { notify(message: string, level: "info" | "warning" | "error"): void };
+type HookContext = Pick<
+  ExtensionContext,
+  "model" | "hasUI" | "ui" | "getSystemPrompt" | "abort"
+> & {
   modelRegistry: Parameters<RemoteCompactionAttempt>[1]["modelRegistry"];
-  sessionManager: { getBranch(): BranchEntry[]; getSessionId(): string };
-  getSystemPrompt(): string;
-  abort(): void;
+  sessionManager: Pick<ExtensionContext["sessionManager"], "getBranch" | "getSessionId">;
 };
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -75,13 +77,14 @@ function appendCompatibilityDecision(
   pi: ExtensionAPI,
   context: HookContext,
   evidence: ReplayEvidenceRecord,
-): boolean {
+): void {
   try {
     pi.appendEntry(evidence.customType, evidence.data);
-    return true;
   } catch {
-    hardStop(context, "request-time compatibility evidence could not be persisted");
-    return false;
+    reportWarning(
+      context,
+      "Request-time compatibility evidence could not be persisted; compatibility will be re-derived from the persisted assistant turn.",
+    );
   }
 }
 
@@ -165,19 +168,6 @@ function combineInstructions(systemPrompt: string, customInstructions: string | 
     : systemPrompt;
 }
 
-function deepFreeze<T>(value: T, seen = new WeakSet<object>()): T {
-  if (typeof value !== "object" || value === null || seen.has(value)) return value;
-  seen.add(value);
-  for (const child of Object.values(value as Record<string, unknown>)) {
-    deepFreeze(child, seen);
-  }
-  return Object.freeze(value);
-}
-
-function immutableRequest(request: RemoteCompactionRequest): RemoteCompactionRequest {
-  return deepFreeze(structuredClone(request));
-}
-
 function retryDelay(
   outcome: Extract<RemoteCompactionAttemptOutcome, { kind: "retryable" }>,
   retry: number,
@@ -238,11 +228,11 @@ function buildRequest(
   // Remote compaction is a Responses protocol operation, not a model turn.
   // Do not send Pi's active tools: some built-in tool schemas use regex
   // lookaround, which OpenAI's Responses schema validator rejects.
-  return immutableRequest({
+  return {
     model,
     input: [...projected, { type: "compaction_trigger" }],
     instructions: combineInstructions(context.getSystemPrompt(), event.customInstructions),
-  });
+  };
 }
 
 function successResult(
@@ -276,8 +266,7 @@ export function installRemoteCompaction(
   attempt: RemoteCompactionAttempt,
   resolveCompatibilityClassForModel: CompactionCompatibilityResolver = resolveCodexCompactionCompatibilityClass,
 ): void {
-  pi.on("session_before_compact", async (event, rawContext) => {
-    const context = rawContext as unknown as HookContext;
+  pi.on("session_before_compact", async (event, context) => {
     const model = context.model;
     if (!model || remoteCompactionOperationKind(model) === undefined) return undefined;
     if (event.signal.aborted) return { cancel: true };
@@ -371,8 +360,7 @@ export function installRemoteCompaction(
     return { cancel: true };
   });
 
-  pi.on("before_provider_request", (event, rawContext) => {
-    const context = rawContext as unknown as HookContext;
+  pi.on("before_provider_request", (event, context) => {
     const model = context.model;
     if (!model) return undefined;
 
@@ -389,9 +377,7 @@ export function installRemoteCompaction(
     if (preparation.kind === "invalid-model") {
       return hardStop(context, "the selected model has an invalid structured identity");
     }
-    if (preparation.evidence && !appendCompatibilityDecision(pi, context, preparation.evidence)) {
-      return undefined;
-    }
+    if (preparation.evidence) appendCompatibilityDecision(pi, context, preparation.evidence);
     if (preparation.kind === "incompatible") {
       reportWarning(
         context,
