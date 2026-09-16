@@ -89,7 +89,7 @@ Run type checking and offline tests (no credentials or network needed):
 npm test
 ```
 
-The [live test](docs/reference.md#testing) requires credentials, a cataloged eligible model, a capable endpoint, and paid API calls. It is not part of `npm test`.
+`npm test` covers the extension loader and the one-attempt transport adapters, not end-to-end compaction or replay continuity. See [testing coverage](docs/reference.md#testing).
 
 - [Technical reference](docs/reference.md): protocol, checkpoint format, replay, retries, transport limitations, and repository layout.
 - [Domain glossary](CONTEXT.md) and [architecture decisions](docs/adr/).

@@ -16,7 +16,6 @@ import {
   type CompactionCompatibilityResolver,
   type NativeReplayCheckpointDetails,
   type ReplayCheckpoint,
-  type ReplayEvidenceRecord,
 } from "./native-replay.ts";
 import type {
   RemoteCompactionAttempt,
@@ -27,7 +26,6 @@ import { projectCompactableContext, type ResponsesItem } from "./responses-proje
 
 export {
   NATIVE_REPLAY_CHECKPOINT_FORMAT,
-  NATIVE_REPLAY_COMPATIBILITY_DECISION_TYPE,
   REMOTE_COMPACTION_CHECKPOINT_MARKER,
   remoteCompactionOperationKind,
   resolveCodexCompactionCompatibilityClass,
@@ -71,21 +69,6 @@ function hardStop(context: HookContext, reason: string): undefined {
   );
   context.abort();
   return undefined;
-}
-
-function appendCompatibilityDecision(
-  pi: ExtensionAPI,
-  context: HookContext,
-  evidence: ReplayEvidenceRecord,
-): void {
-  try {
-    pi.appendEntry(evidence.customType, evidence.data);
-  } catch {
-    reportWarning(
-      context,
-      "Request-time compatibility evidence could not be persisted; compatibility will be re-derived from the persisted assistant turn.",
-    );
-  }
 }
 
 function containsCheckpointMarker(value: unknown): boolean {
@@ -377,7 +360,6 @@ export function installRemoteCompaction(
     if (preparation.kind === "invalid-model") {
       return hardStop(context, "the selected model has an invalid structured identity");
     }
-    if (preparation.evidence) appendCompatibilityDecision(pi, context, preparation.evidence);
     if (preparation.kind === "incompatible") {
       reportWarning(
         context,

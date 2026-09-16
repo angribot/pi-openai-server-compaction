@@ -36,10 +36,6 @@ _Avoid_: Remote artifact, native artifact, opaque artifact
 The ordered, Pi-persisted, compaction-aware context of the active linear session that a Remote compaction v2 request replaces. Repeated Remote compaction starts from the latest replacement history plus later session entries; ephemeral `context` or provider-payload middleware mutations are not part of this context.
 _Avoid_: Final provider payload, last observed request, effective context
 
-**Unrepresentable compactable context**:
-Compactable context containing model-visible semantics that cannot be faithfully reconstructed as Responses input through Pi 0.85.1 public APIs. Its presence cancels Remote compaction rather than permitting silent omission, approximation, or partial replacement.
-_Avoid_: Unsupported Pi context, unsupported context, unconvertible context
-
 **Replacement history**:
 The complete replayable Responses item sequence installed by a successful Remote compaction and substituted for the replay replacement span during native replay.
 _Avoid_: Remote history, explicit remote history, native replay history
@@ -67,10 +63,6 @@ _Avoid_: Model ID, provider name, Compaction compatibility class
 **Native replay checkpoint record**:
 The durable local record that binds replacement history to its producer's Model key and creation-time Compaction compatibility class. It is distinct from the Remote compaction v2 wire protocol.
 _Avoid_: Remote compaction version, v3 details, checkpoint summary
-
-**Compatibility decision record**:
-Branch-local evidence of the selected target identity, resolved class, and compatibility decision for an Ordinary request from a class-aware checkpoint. Its compatibility result is fixed at request time; a following successful assistant outcome governed by an incompatible result invalidates Native replay continuity.
-_Avoid_: Compatibility cache, invalidation tombstone, model-change event
 
 **Ordinary request**:
 A model request that continues the conversation without asking the endpoint to compact it.

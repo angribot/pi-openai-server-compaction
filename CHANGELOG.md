@@ -6,9 +6,9 @@ This changelog intentionally starts at **0.1.0**.
 
 - use Pi's deterministic fallback for empty versioned assistant text IDs instead of emitting an empty ID that can break Native replay span matching
 
-- tolerate unknown fields in persisted Native replay checkpoint details and compatibility decision records instead of treating them as a broken checkpoint
-- stop aborting ordinary requests and Remote compaction when request-time compatibility evidence is missing, malformed, foreign, or inconsistent; compatibility is re-derived from the persisted assistant turn under the checkpoint's creation-time class, and Native replay still stops when a turn cannot be proven compatible
-- report a failed compatibility-evidence write as a warning instead of stopping the request
+- stop writing branch-local `native-replay-compatibility-decision/1` records and re-derive compatibility for a class-aware checkpoint from persisted successful assistant turns under the checkpoint's creation-time class on every reconstruction; custom compatibility-evidence entries, evidence-write warnings, and malformed-evidence handling are removed, and a later catalog revision can now reinterpret a history that evidence previously pinned
+- tolerate unknown fields in persisted Native replay checkpoint details instead of treating them as a broken checkpoint
+- remove the local Responses projection validator and `UnrepresentableCompactableContextError`; projection now mirrors Pi's ordinary Responses conversion and no longer fails closed on unrecognized model-visible content before transport
 - share one read-only Remote compaction request across retries instead of deeply cloning and freezing it, and remove an unreachable HTTP transient-error-code branch
 - reduce memory retained during Remote compaction by no longer accumulating parsed SSE event history, without changing response validation behavior
 
