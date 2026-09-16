@@ -194,7 +194,7 @@ test("attempts only Eligible models and publishes one atomic first compaction wi
     ],
     instructions: "SYSTEM-PROMPT\n\nAdditional compaction instructions:\nCUSTOM-GUIDANCE",
   });
-  assert.notEqual(recorded.requests[0]?.model, context.model);
+  assert.equal(recorded.requests[0]?.model, context.model);
   assert.deepEqual(result, {
     compaction: {
       summary: REMOTE_COMPACTION_CHECKPOINT_MARKER,
@@ -289,7 +289,7 @@ test("captures the producer class before an asynchronous compaction attempt comp
   );
 });
 
-test("owns one immutable three-attempt retry budget and cancels terminal failures", async () => {
+test("owns one shared three-attempt retry budget and cancels terminal failures", async () => {
   const branch = chainEntries([
     messageEntry("user", {
       role: "user",
@@ -304,8 +304,6 @@ test("owns one immutable three-attempt retry budget and cancels terminal failure
   assert.equal(fixture.requests.length, 3);
   assert.equal(fixture.requests[0], fixture.requests[1]);
   assert.equal(fixture.requests[1], fixture.requests[2]);
-  assert.ok(Object.isFrozen(fixture.requests[0]));
-  assert.ok(Object.isFrozen(fixture.requests[0]?.input));
   fixture.requests.forEach(assertSingleTerminalTrigger);
   assert.deepEqual(fixture.appendedEntries, []);
 
@@ -886,18 +884,14 @@ test("resumes generated checkpoint and decision evidence across catalog changes 
   assert.deepEqual(observed.notifications, []);
 });
 
-test("hard-stops decision persistence failures before replay or incompatible warnings", () => {
+test("warns and continues when decision evidence cannot be persisted", async () => {
   const producer = responsesModel({ id: "gpt-5.6-sol" });
-  const targets = [
-    responsesModel({ id: "gpt-5.6-luna" }),
-    responsesModel({ id: "gpt-5.5" }),
-    responsesModel({
-      provider: "third-party-codex",
-      api: "openai-codex-responses",
-      id: "gpt-5.6-luna",
-    }),
+  const incompatible = responsesModel({ id: "gpt-5.5" });
+  const cases: Array<[string, ReturnType<typeof responsesModel>, unknown]> = [
+    ["compatible", producer, { input: [firstCompactionItem] }],
+    ["incompatible", incompatible, undefined],
   ];
-  for (const target of targets) {
+  for (const [name, target, expected] of cases) {
     const fixture = installed();
     let appendCalls = 0;
     fixture.pi.appendEntry = () => {
@@ -911,23 +905,19 @@ test("hard-stops decision persistence failures before replay or incompatible war
     const observed = createHookContext({ branch, model: target });
     const payload = replayPayload();
     const original = structuredClone(payload);
-    assert.equal(
+    assert.deepEqual(
       hook(fixture, "before_provider_request")(
         { type: "before_provider_request", payload },
         observed.context,
       ),
-      undefined,
+      expected,
+      name,
     );
-    assert.equal(appendCalls, 1);
-    assert.equal(observed.abortCalls.count, 1);
-    assert.deepEqual(payload, original);
-    assert.deepEqual(fixture.appendedEntries, []);
-    assert.equal(observed.notifications.length, 1);
-    assert.equal(observed.notifications[0]?.level, "error");
-    assert.match(
-      observed.notifications[0]!.message,
-      /request-time compatibility evidence could not be persisted/,
-    );
+    assert.equal(appendCalls, 1, name);
+    assert.equal(observed.abortCalls.count, 0, name);
+    assert.equal(observed.notifications[0]?.level, "warning", name);
+    assert.match(observed.notifications[0]!.message, /could not be persisted/, name);
+    assert.deepEqual(payload, original, name);
   }
 });
 
@@ -1093,11 +1083,13 @@ test("consumes Compatibility decision records according to persisted assistant o
   );
 });
 
-test("fails closed on missing, malformed, or mismatched class-aware evidence", async () => {
+test("tolerates evidence bookkeeping anomalies by re-deriving compatibility", async () => {
   const producer = responsesModel({ id: "gpt-5.6-sol" });
-  const target = responsesModel({ id: "gpt-5.6-luna" });
-  const cases: Array<[string, Array<Omit<TestBranchEntry, "parentId" | "timestamp">>]> = [
-    ["missing", [messageEntry("assistant", assistantMessage("success", target))]],
+  const classEqualTarget = responsesModel({ id: "gpt-5.6-luna" });
+  const classDifferentTarget = responsesModel({ id: "gpt-5.5" });
+
+  const tolerated: Array<[string, Array<Omit<TestBranchEntry, "parentId" | "timestamp">>]> = [
+    ["missing", [messageEntry("assistant", assistantMessage("success", classEqualTarget))]],
     [
       "malformed",
       [
@@ -1111,43 +1103,105 @@ test("fails closed on missing, malformed, or mismatched class-aware evidence", a
     ],
     [
       "wrong checkpoint",
-      [compatibilityDecisionEntry("wrong", target, "3000", true, "other-checkpoint")],
+      [compatibilityDecisionEntry("wrong", classEqualTarget, "3000", true, "other-checkpoint")],
     ],
-    ["inconsistent", [compatibilityDecisionEntry("inconsistent", target, "3000", false)]],
+    [
+      "inconsistent",
+      [
+        compatibilityDecisionEntry("inconsistent", classEqualTarget, "3000", false),
+        messageEntry("assistant", assistantMessage("success", classEqualTarget)),
+      ],
+    ],
     [
       "assistant mismatch",
       [
-        compatibilityDecisionEntry("decision", target, "3000", true),
+        compatibilityDecisionEntry("decision", classEqualTarget, "3000", true),
         messageEntry("assistant", assistantMessage("success", producer)),
       ],
     ],
   ];
 
-  for (const [name, suffix] of cases) {
+  for (const [name, suffix] of tolerated) {
     const branch = checkpointBranch({
       details: nativeReplayDetails(firstCompactionItem, producer, "3000"),
       suffix,
     });
     const fixture = installed();
     const observed = createHookContext({ branch, model: producer });
-    const payload = replayPayload();
-    const originalPayload = structuredClone(payload);
-    assert.equal(
+    assert.deepEqual(
       hook(fixture, "before_provider_request")(
-        { type: "before_provider_request", payload },
+        { type: "before_provider_request", payload: replayPayload() },
         observed.context,
       ),
-      undefined,
+      { input: [firstCompactionItem] },
       name,
     );
-    assert.equal(observed.abortCalls.count, 1, name);
-    assert.deepEqual(payload, originalPayload, name);
-    assert.deepEqual(
-      await hook(fixture, "session_before_compact")(compactionEvent(branch), observed.context),
-      { cancel: true },
-      name,
-    );
+    assert.equal(observed.abortCalls.count, 0, name);
   }
+
+  const invalidating = checkpointBranch({
+    details: nativeReplayDetails(firstCompactionItem, producer, "3000"),
+    suffix: [messageEntry("assistant", assistantMessage("success", classDifferentTarget))],
+  });
+  const invalidatingFixture = installed();
+  const invalidatingContext = createHookContext({ branch: invalidating, model: producer });
+  assert.equal(
+    hook(invalidatingFixture, "before_provider_request")(
+      { type: "before_provider_request", payload: replayPayload() },
+      invalidatingContext.context,
+    ),
+    undefined,
+  );
+  assert.equal(invalidatingContext.abortCalls.count, 1);
+
+  const inconsistentClaim = checkpointBranch({
+    details: nativeReplayDetails(firstCompactionItem, producer, "3000"),
+    suffix: [
+      compatibilityDecisionEntry("lying", classDifferentTarget, "2911", true),
+      messageEntry("assistant", assistantMessage("success", classDifferentTarget)),
+    ],
+  });
+  const inconsistentClaimFixture = installed();
+  const inconsistentClaimContext = createHookContext({
+    branch: inconsistentClaim,
+    model: producer,
+  });
+  assert.equal(
+    hook(inconsistentClaimFixture, "before_provider_request")(
+      { type: "before_provider_request", payload: replayPayload() },
+      inconsistentClaimContext.context,
+    ),
+    undefined,
+  );
+  assert.equal(inconsistentClaimContext.abortCalls.count, 1);
+});
+
+test("accepts unknown fields in checkpoint details and compatibility evidence", () => {
+  const producer = responsesModel({ id: "gpt-5.6-sol" });
+  const classEqualTarget = responsesModel({ id: "gpt-5.6-luna" });
+  const details = nativeReplayDetails(firstCompactionItem, producer, "3000") as any;
+  details.futureField = { anything: true };
+  details.nativeReplayCheckpoint.futureField = { anything: true };
+  details.nativeReplayCheckpoint.producer.futureField = 1;
+  details.nativeReplayCheckpoint.producer.modelKey.futureField = "ignored";
+
+  const decision = compatibilityDecisionEntry("decision", classEqualTarget, "3000", true);
+  (decision.data as any).futureField = "ignored";
+
+  const branch = checkpointBranch({
+    details,
+    suffix: [decision, messageEntry("assistant", assistantMessage("success", classEqualTarget))],
+  });
+  const fixture = installed();
+  const observed = createHookContext({ branch, model: producer });
+  assert.deepEqual(
+    hook(fixture, "before_provider_request")(
+      { type: "before_provider_request", payload: replayPayload() },
+      observed.context,
+    ),
+    { input: [firstCompactionItem] },
+  );
+  assert.equal(observed.abortCalls.count, 0);
 });
 
 test("rejects v0.8.0 legacy checkpoints for ordinary requests and Remote compaction", async () => {

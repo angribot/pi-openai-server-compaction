@@ -73,9 +73,7 @@ type CompatibilityDecision = {
   compatible: boolean;
 };
 
-type ReplayDerivation =
-  | { kind: "valid"; invalidated: boolean }
-  | { kind: "broken"; reason: string };
+type ReplayDerivation = { invalidated: boolean };
 
 type ValidReplayState = {
   kind: "valid";
@@ -123,10 +121,8 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-function hasExactKeys(value: Record<string, unknown>, keys: readonly string[]): boolean {
-  const actual = Object.keys(value).sort();
-  const expected = [...keys].sort();
-  return actual.length === expected.length && actual.every((key, index) => key === expected[index]);
+function hasRequiredKeys(value: Record<string, unknown>, keys: readonly string[]): boolean {
+  return keys.every((key) => Object.prototype.hasOwnProperty.call(value, key));
 }
 
 function operationKindForIdentity(
@@ -219,18 +215,18 @@ function resolveCompatibilityClass(
 function decodeNativeDetails(
   value: unknown,
 ): Omit<ValidReplayState, "kind" | "entry" | "entryIndex" | "invalidated"> | undefined {
-  if (!isRecord(value) || !hasExactKeys(value, ["nativeReplayCheckpoint"])) {
+  if (!isRecord(value) || !hasRequiredKeys(value, ["nativeReplayCheckpoint"])) {
     return undefined;
   }
   const checkpoint = value.nativeReplayCheckpoint;
   if (
     !isRecord(checkpoint) ||
-    !hasExactKeys(checkpoint, ["format", "producer", "replacementHistory"]) ||
+    !hasRequiredKeys(checkpoint, ["format", "producer", "replacementHistory"]) ||
     checkpoint.format !== NATIVE_REPLAY_CHECKPOINT_FORMAT ||
     !isRecord(checkpoint.producer) ||
-    !hasExactKeys(checkpoint.producer, ["modelKey", "compactionCompatibilityClass"]) ||
+    !hasRequiredKeys(checkpoint.producer, ["modelKey", "compactionCompatibilityClass"]) ||
     !isRecord(checkpoint.producer.modelKey) ||
-    !hasExactKeys(checkpoint.producer.modelKey, ["provider", "api", "id"])
+    !hasRequiredKeys(checkpoint.producer.modelKey, ["provider", "api", "id"])
   ) {
     return undefined;
   }
@@ -259,14 +255,14 @@ function decodeNativeDetails(
 function decodeCompatibilityDecision(value: unknown): CompatibilityDecision | undefined {
   if (
     !isRecord(value) ||
-    !hasExactKeys(value, ["checkpointId", "target", "compatible"]) ||
+    !hasRequiredKeys(value, ["checkpointId", "target", "compatible"]) ||
     typeof value.checkpointId !== "string" ||
     !value.checkpointId ||
     typeof value.compatible !== "boolean" ||
     !isRecord(value.target) ||
-    !hasExactKeys(value.target, ["modelKey", "compactionCompatibilityClass"]) ||
+    !hasRequiredKeys(value.target, ["modelKey", "compactionCompatibilityClass"]) ||
     !isRecord(value.target.modelKey) ||
-    !hasExactKeys(value.target.modelKey, ["provider", "api", "id"])
+    !hasRequiredKeys(value.target.modelKey, ["provider", "api", "id"])
   ) {
     return undefined;
   }
@@ -308,72 +304,66 @@ function assistantInvalidates(entry: BranchEntry, owner: RemoteCompactionModelKe
   return !identity || !sameModelKey(owner, identity);
 }
 
+function identityCompatible(
+  state: Pick<ValidReplayState, "modelKey" | "compactionCompatibilityClass">,
+  identity: RequestModelIdentity,
+  resolver: CompactionCompatibilityResolver,
+): boolean {
+  return compatibleWithCheckpoint(
+    state,
+    identity,
+    resolveCompatibilityClass(resolver, identity.id) ?? null,
+  );
+}
+
 function deriveClassAwareReplay(
   suffix: readonly BranchEntry[],
   state: Pick<ValidReplayState, "entry" | "modelKey" | "compactionCompatibilityClass">,
+  resolver: CompactionCompatibilityResolver,
 ): ReplayDerivation {
   let pending: CompatibilityDecision | undefined;
   for (const entry of suffix) {
     if (entry.type === "custom" && entry.customType === NATIVE_REPLAY_COMPATIBILITY_DECISION_TYPE) {
       const decision = decodeCompatibilityDecision(entry.data);
-      if (!decision) {
-        return { kind: "broken", reason: "compatibility evidence is malformed" };
-      }
-      if (decision.checkpointId !== state.entry.id) {
-        return {
-          kind: "broken",
-          reason: "compatibility evidence belongs to a different checkpoint",
-        };
-      }
-      if (
-        decision.compatible !==
-        compatibleWithCheckpoint(
-          state,
-          decision.target.modelKey,
-          decision.target.compactionCompatibilityClass,
-        )
-      ) {
-        return {
-          kind: "broken",
-          reason: "compatibility evidence contains an inconsistent decision",
-        };
-      }
-      pending = decision;
+      // Malformed, foreign, or internally inconsistent bookkeeping is ignored, not
+      // fatal: when no trustworthy decision applies, compatibility is re-derived
+      // from the persisted assistant identity under the checkpoint's creation-time class.
+      pending =
+        decision &&
+        decision.checkpointId === state.entry.id &&
+        decision.compatible ===
+          compatibleWithCheckpoint(
+            state,
+            decision.target.modelKey,
+            decision.target.compactionCompatibilityClass,
+          )
+          ? decision
+          : undefined;
       continue;
     }
 
     const message = entry.message;
     if (entry.type !== "message" || message?.role !== "assistant") continue;
-    const identity = assistantIdentity(entry);
     if (message.stopReason === "error" || message.stopReason === "aborted") {
       pending = undefined;
       continue;
     }
-    if (!identity) {
-      return {
-        kind: "broken",
-        reason: "a successful assistant turn has an invalid model identity",
-      };
-    }
-    if (!pending) {
-      return {
-        kind: "broken",
-        reason: "a successful assistant turn is missing compatibility evidence",
-      };
-    }
-    if (!sameModelKey(pending.target.modelKey, identity)) {
-      return {
-        kind: "broken",
-        reason: "compatibility evidence does not match its assistant turn",
-      };
-    }
-    if (!pending.compatible) return { kind: "valid", invalidated: true };
+    const identity = assistantIdentity(entry);
+    if (!identity) return { invalidated: true };
+    const compatible =
+      pending && sameModelKey(pending.target.modelKey, identity)
+        ? pending.compatible
+        : identityCompatible(state, identity, resolver);
+    if (!compatible) return { invalidated: true };
     pending = undefined;
   }
-  return { kind: "valid", invalidated: false };
+  return { invalidated: false };
 }
 
-function deriveActiveReplayState(branch: readonly BranchEntry[]): ActiveReplayState {
+function deriveActiveReplayState(
+  branch: readonly BranchEntry[],
+  resolver: CompactionCompatibilityResolver,
+): ActiveReplayState {
   let latestIndex = -1;
   for (let index = branch.length - 1; index >= 0; index--) {
     if (branch[index]?.type === "compaction") {
@@ -397,16 +387,18 @@ function deriveActiveReplayState(branch: readonly BranchEntry[]): ActiveReplaySt
 
   const suffix = branch.slice(latestIndex + 1);
   const derivation = requiresCompatibilityEvidence(decoded)
-    ? deriveClassAwareReplay(suffix, {
-        entry,
-        modelKey: decoded.modelKey,
-        compactionCompatibilityClass: decoded.compactionCompatibilityClass,
-      })
+    ? deriveClassAwareReplay(
+        suffix,
+        {
+          entry,
+          modelKey: decoded.modelKey,
+          compactionCompatibilityClass: decoded.compactionCompatibilityClass,
+        },
+        resolver,
+      )
     : {
-        kind: "valid" as const,
         invalidated: suffix.some((candidate) => assistantInvalidates(candidate, decoded.modelKey)),
       };
-  if (derivation.kind === "broken") return derivation;
 
   return {
     kind: "valid",
@@ -436,7 +428,7 @@ export function prepareCompactionReplay(
     modelKey: key,
     compactionCompatibilityClass: resolveCompatibilityClass(resolver, key.id) ?? null,
   };
-  const state = deriveActiveReplayState(branch);
+  const state = deriveActiveReplayState(branch, resolver);
   if (state.kind === "broken") return state;
   if (state.kind === "valid") {
     if (state.invalidated) return { kind: "invalidated" };
@@ -465,7 +457,7 @@ export function prepareNativeReplay(
   model: unknown,
   resolver: CompactionCompatibilityResolver,
 ): NativeReplayPreparation {
-  const state = deriveActiveReplayState(branch);
+  const state = deriveActiveReplayState(branch, resolver);
   if (state.kind === "none" || state.kind === "broken") return state;
   if (state.invalidated) return { kind: "invalidated" };
 
