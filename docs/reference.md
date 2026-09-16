@@ -136,12 +136,13 @@ The offline suite uses Node's built-in test runner and requires no credentials o
 npm test
 ```
 
-Its two focused files are:
+Its three focused files are:
 
 - `tests/loader.test.ts` — production loader, package factory, exactly two hooks, and no provider override;
-- `tests/remote-compaction-operation.test.ts` — direct and Pi-mediated one-attempt SSE operations, payload ownership, raw completion, validation, failure classification, usage, and abort.
+- `tests/remote-compaction-operation.test.ts` — direct and Pi-mediated one-attempt SSE operations, payload ownership, raw completion, validation, failure classification, usage, and abort;
+- `tests/native-replay.test.ts` — checkpoint restoration, repeated-compaction input, ordinary span replacement, span matching failures, and continuity invalidation from persisted turns.
 
-Coverage is deliberately reduced: the projection suite, the Native replay and retry orchestration suite, and the credentialed live scenario were removed without replacement. `npm test` therefore does not exercise projection conversion, branch reconstruction, retry, or end-to-end continuity.
+Coverage remains deliberately reduced: the projection suite, the hook retry orchestration suite, and the credentialed live scenario are still removed without replacement. `npm test` therefore does not exercise projection conversion internals, the retry loop, or end-to-end continuity.
 
 ## Troubleshooting
 
@@ -155,18 +156,18 @@ Coverage is deliberately reduced: the projection suite, the Native replay and re
 
 ## Repository layout
 
-| Path                                | Purpose                                                                           |
-| ----------------------------------- | --------------------------------------------------------------------------------- |
-| `index.ts`                          | composition root selecting and installing the production operation                |
-| `src/remote-compaction.ts`          | Pi hook orchestration, persistence effects, retry, and Responses span replacement |
-| `src/native-replay.ts`              | checkpoint records and branch continuity derivation                               |
-| `src/responses-projection.ts`       | narrow Pi `0.85.1` ordinary Responses projection adapter                          |
-| `src/direct-responses-operation.ts` | one-attempt direct HTTP/SSE capability-gap adapter                                |
-| `src/codex-responses-operation.ts`  | one-attempt Pi-mediated Codex SSE capture adapter                                 |
-| `tests/`                            | two offline contract files                                                        |
-| `CONTEXT.md`                        | canonical Remote compaction domain language                                       |
-| `docs/adr/`                         | durable architecture decisions                                                    |
-| `CHANGELOG.md`                      | release history and pending user-visible changes                                  |
+| Path                                | Purpose                                                                         |
+| ----------------------------------- | ------------------------------------------------------------------------------- |
+| `index.ts`                          | composition root selecting and installing the production operation              |
+| `src/remote-compaction.ts`          | Pi hook orchestration, notifications, cancel/abort, persistence effects, retry  |
+| `src/native-replay.ts`              | checkpoint records, branch continuity, context reconstruction, span replacement |
+| `src/responses-projection.ts`       | narrow Pi `0.85.1` ordinary Responses projection adapter                        |
+| `src/direct-responses-operation.ts` | one-attempt direct HTTP/SSE capability-gap adapter                              |
+| `src/codex-responses-operation.ts`  | one-attempt Pi-mediated Codex SSE capture adapter                               |
+| `tests/`                            | three offline contract files                                                    |
+| `CONTEXT.md`                        | canonical Remote compaction domain language                                     |
+| `docs/adr/`                         | durable architecture decisions                                                  |
+| `CHANGELOG.md`                      | release history and pending user-visible changes                                |
 
 ## License
 
