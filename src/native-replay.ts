@@ -1,5 +1,9 @@
+import { isDeepStrictEqual } from "node:util";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
+import type { Model } from "@earendil-works/pi-ai";
+import { buildSessionContext } from "@earendil-works/pi-coding-agent";
 import type { CompactionItem } from "./remote-compaction-operation.ts";
+import { projectCompactableContext, type ResponsesItem } from "./responses-projection.ts";
 
 export const REMOTE_COMPACTION_CHECKPOINT_MARKER =
   "[Remote Responses compaction checkpoint]\n\n" +
@@ -75,11 +79,6 @@ type ValidReplayState = {
 
 type ActiveReplayState = { kind: "none" } | { kind: "broken"; reason: string } | ValidReplayState;
 
-export type ReplayCheckpoint = Pick<
-  ValidReplayState,
-  "entry" | "entryIndex" | "replacementHistory"
->;
-
 type ReplayPreparationFailure =
   | { kind: "broken"; reason: string }
   | { kind: "invalidated" }
@@ -90,15 +89,21 @@ type CompactionReplayPreparation =
   | { kind: "incompatible" }
   | {
       kind: "ready";
-      replay: ReplayCheckpoint | undefined;
+      buildInput(): ResponsesItem[];
       createCheckpointDetails(item: CompactionItem): NativeReplayCheckpointDetails;
     };
+
+export type NativeReplayRewrite =
+  | { kind: "patched"; payload: Record<string, unknown> }
+  | { kind: "payload-not-full-array" }
+  | { kind: "span-unavailable" }
+  | { kind: "span-missing-or-ambiguous" };
 
 type NativeReplayPreparation =
   | ReplayPreparationFailure
   | { kind: "none" }
   | { kind: "incompatible" }
-  | { kind: "compatible"; replay: ReplayCheckpoint };
+  | { kind: "compatible"; rewrite(payload: unknown): NativeReplayRewrite };
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -305,9 +310,89 @@ function deriveActiveReplayState(
   };
 }
 
+function suffixMessages(branch: readonly BranchEntry[], state: ValidReplayState): AgentMessage[] {
+  if (state.entryIndex >= branch.length - 1) return [];
+  return buildSessionContext(
+    branch.slice(state.entryIndex + 1) as Parameters<typeof buildSessionContext>[0],
+  ).messages;
+}
+
+function containsCheckpointMarker(value: unknown): boolean {
+  if (typeof value === "string") return value.includes(REMOTE_COMPACTION_CHECKPOINT_MARKER);
+  if (Array.isArray(value)) return value.some(containsCheckpointMarker);
+  return isRecord(value) && Object.values(value).some(containsCheckpointMarker);
+}
+
+function checkpointSpan(
+  branch: readonly BranchEntry[],
+  state: ValidReplayState,
+  model: Model<any>,
+): ResponsesItem[] | undefined {
+  if (
+    typeof state.entry.firstKeptEntryId !== "string" ||
+    !branch.slice(0, state.entryIndex).some((entry) => entry.id === state.entry.firstKeptEntryId)
+  ) {
+    return undefined;
+  }
+
+  try {
+    const context = buildSessionContext(
+      branch as Parameters<typeof buildSessionContext>[0],
+      state.entry.id,
+    );
+    const span = projectCompactableContext(context.messages, model);
+    const first = span[0];
+    return first && containsCheckpointMarker(first) ? span : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function wireValue(value: unknown): unknown | undefined {
+  try {
+    const serialized = JSON.parse(JSON.stringify(value)) as unknown;
+    if (
+      isRecord(serialized) &&
+      !("type" in serialized) &&
+      typeof serialized.role === "string" &&
+      "content" in serialized
+    ) {
+      return { ...serialized, type: "message" };
+    }
+    return serialized;
+  } catch {
+    return undefined;
+  }
+}
+
+function wireEquivalent(left: unknown, right: unknown): boolean {
+  const serializedLeft = wireValue(left);
+  const serializedRight = wireValue(right);
+  return (
+    serializedLeft !== undefined &&
+    serializedRight !== undefined &&
+    isDeepStrictEqual(serializedLeft, serializedRight)
+  );
+}
+
+function findUniqueSpan(
+  input: readonly unknown[],
+  expected: readonly unknown[],
+): number | undefined {
+  if (expected.length === 0 || expected.length > input.length) return undefined;
+  let match: number | undefined;
+  const lastStart = input.length - expected.length;
+  for (let start = 0; start <= lastStart; start++) {
+    if (!expected.every((item, offset) => wireEquivalent(input[start + offset], item))) continue;
+    if (match !== undefined) return undefined;
+    match = start;
+  }
+  return match;
+}
+
 export function prepareCompactionReplay(
   branch: readonly BranchEntry[],
-  model: { provider: string; api: string; id: string },
+  model: Model<any>,
   resolver: CompactionCompatibilityResolver,
 ): CompactionReplayPreparation {
   const key = modelKeyFromIdentity(model.provider, model.api, model.id);
@@ -329,7 +414,19 @@ export function prepareCompactionReplay(
 
   return {
     kind: "ready",
-    replay: state.kind === "valid" ? state : undefined,
+    buildInput() {
+      const messages =
+        state.kind === "valid"
+          ? [
+              ...state.replacementHistory,
+              ...projectCompactableContext(suffixMessages(branch, state), model),
+            ]
+          : projectCompactableContext(
+              buildSessionContext(branch as Parameters<typeof buildSessionContext>[0]).messages,
+              model,
+            );
+      return [...messages, { type: "compaction_trigger" }];
+    },
     createCheckpointDetails(item) {
       return {
         nativeReplayCheckpoint: {
@@ -344,7 +441,7 @@ export function prepareCompactionReplay(
 
 export function prepareNativeReplay(
   branch: readonly BranchEntry[],
-  model: unknown,
+  model: Model<any>,
   resolver: CompactionCompatibilityResolver,
 ): NativeReplayPreparation {
   const state = deriveActiveReplayState(branch, resolver);
@@ -356,6 +453,30 @@ export function prepareNativeReplay(
   const key = modelKeyFromIdentity(identity.provider, identity.api, identity.id);
   const targetClass = resolveCompatibilityClass(resolver, identity.id) ?? null;
   const compatible = key !== undefined && compatibleWithCheckpoint(state, identity, targetClass);
+  if (!compatible) return { kind: "incompatible" };
 
-  return compatible ? { kind: "compatible", replay: state } : { kind: "incompatible" };
+  return {
+    kind: "compatible",
+    rewrite(payload) {
+      if (!isRecord(payload) || !Array.isArray(payload.input)) {
+        return { kind: "payload-not-full-array" };
+      }
+      const expected = checkpointSpan(branch, state, model);
+      if (!expected) return { kind: "span-unavailable" };
+      const matchStart = findUniqueSpan(payload.input, expected);
+      if (matchStart === undefined) return { kind: "span-missing-or-ambiguous" };
+
+      const patched: Record<string, unknown> = {
+        ...payload,
+        input: [
+          ...payload.input.slice(0, matchStart),
+          ...state.replacementHistory,
+          ...payload.input.slice(matchStart + expected.length),
+        ],
+      };
+      delete patched.messages;
+      delete patched.previous_response_id;
+      return { kind: "patched", payload: patched };
+    },
+  };
 }

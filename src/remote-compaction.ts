@@ -1,11 +1,5 @@
-import { isDeepStrictEqual } from "node:util";
-import type { AgentMessage } from "@earendil-works/pi-agent-core";
-import type { Model, Usage } from "@earendil-works/pi-ai";
-import {
-  buildSessionContext,
-  type ExtensionAPI,
-  type ExtensionContext,
-} from "@earendil-works/pi-coding-agent";
+import type { Usage } from "@earendil-works/pi-ai";
+import { type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import {
   prepareCompactionReplay,
   prepareNativeReplay,
@@ -15,14 +9,12 @@ import {
   type BranchEntry,
   type CompactionCompatibilityResolver,
   type NativeReplayCheckpointDetails,
-  type ReplayCheckpoint,
 } from "./native-replay.ts";
 import type {
   RemoteCompactionAttempt,
   RemoteCompactionAttemptOutcome,
   RemoteCompactionRequest,
 } from "./remote-compaction-operation.ts";
-import { projectCompactableContext, type ResponsesItem } from "./responses-projection.ts";
 
 export {
   NATIVE_REPLAY_CHECKPOINT_FORMAT,
@@ -48,10 +40,6 @@ type HookContext = Pick<
   sessionManager: Pick<ExtensionContext["sessionManager"], "getBranch" | "getSessionId">;
 };
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
 function reportError(context: HookContext, message: string): void {
   if (context.hasUI) context.ui.notify(message, "error");
   else console.error(message);
@@ -69,79 +57,6 @@ function hardStop(context: HookContext, reason: string): undefined {
   );
   context.abort();
   return undefined;
-}
-
-function containsCheckpointMarker(value: unknown): boolean {
-  if (typeof value === "string") return value.includes(REMOTE_COMPACTION_CHECKPOINT_MARKER);
-  if (Array.isArray(value)) return value.some(containsCheckpointMarker);
-  return isRecord(value) && Object.values(value).some(containsCheckpointMarker);
-}
-
-function checkpointSpan(
-  branch: readonly BranchEntry[],
-  state: ReplayCheckpoint,
-  model: Model<any>,
-): ResponsesItem[] | undefined {
-  if (
-    typeof state.entry.firstKeptEntryId !== "string" ||
-    !branch.slice(0, state.entryIndex).some((entry) => entry.id === state.entry.firstKeptEntryId)
-  ) {
-    return undefined;
-  }
-
-  try {
-    const context = buildSessionContext(
-      branch as Parameters<typeof buildSessionContext>[0],
-      state.entry.id,
-    );
-    const span = projectCompactableContext(context.messages, model);
-    const first = span[0];
-    return first && containsCheckpointMarker(first) ? span : undefined;
-  } catch {
-    return undefined;
-  }
-}
-
-function wireValue(value: unknown): unknown | undefined {
-  try {
-    const serialized = JSON.parse(JSON.stringify(value)) as unknown;
-    if (
-      isRecord(serialized) &&
-      !("type" in serialized) &&
-      typeof serialized.role === "string" &&
-      "content" in serialized
-    ) {
-      return { ...serialized, type: "message" };
-    }
-    return serialized;
-  } catch {
-    return undefined;
-  }
-}
-
-function wireEquivalent(left: unknown, right: unknown): boolean {
-  const serializedLeft = wireValue(left);
-  const serializedRight = wireValue(right);
-  return (
-    serializedLeft !== undefined &&
-    serializedRight !== undefined &&
-    isDeepStrictEqual(serializedLeft, serializedRight)
-  );
-}
-
-function findUniqueSpan(
-  input: readonly unknown[],
-  expected: readonly unknown[],
-): number | undefined {
-  if (expected.length === 0 || expected.length > input.length) return undefined;
-  let match: number | undefined;
-  const lastStart = input.length - expected.length;
-  for (let start = 0; start <= lastStart; start++) {
-    if (!expected.every((item, offset) => wireEquivalent(input[start + offset], item))) continue;
-    if (match !== undefined) return undefined;
-    match = start;
-  }
-  return match;
 }
 
 function combineInstructions(systemPrompt: string, customInstructions: string | undefined): string {
@@ -178,44 +93,6 @@ async function abortableDelay(delayMs: number, signal: AbortSignal): Promise<voi
     signal.addEventListener("abort", onAbort, { once: true });
     if (signal.aborted) onAbort();
   });
-}
-
-function suffixMessages(branch: readonly BranchEntry[], state: ReplayCheckpoint): AgentMessage[] {
-  if (state.entryIndex >= branch.length - 1) return [];
-  return buildSessionContext(
-    branch.slice(state.entryIndex + 1) as Parameters<typeof buildSessionContext>[0],
-  ).messages;
-}
-
-function buildRequest(
-  event: {
-    branchEntries: BranchEntry[];
-    customInstructions?: string;
-  },
-  context: HookContext,
-  model: Model<any>,
-  state: ReplayCheckpoint | undefined,
-): RemoteCompactionRequest {
-  let projected: ResponsesItem[];
-  if (state) {
-    projected = [
-      ...state.replacementHistory,
-      ...projectCompactableContext(suffixMessages(event.branchEntries, state), model),
-    ];
-  } else {
-    const session = buildSessionContext(
-      event.branchEntries as Parameters<typeof buildSessionContext>[0],
-    );
-    projected = projectCompactableContext(session.messages, model);
-  }
-  // Remote compaction is a Responses protocol operation, not a model turn.
-  // Do not send Pi's active tools: some built-in tool schemas use regex
-  // lookaround, which OpenAI's Responses schema validator rejects.
-  return {
-    model,
-    input: [...projected, { type: "compaction_trigger" }],
-    instructions: combineInstructions(context.getSystemPrompt(), event.customInstructions),
-  };
 }
 
 function successResult(
@@ -285,15 +162,14 @@ export function installRemoteCompaction(
 
     let request: RemoteCompactionRequest;
     try {
-      request = buildRequest(
-        {
-          branchEntries,
-          customInstructions: event.customInstructions,
-        },
-        context,
+      // Remote compaction is a Responses protocol operation, not a model turn.
+      // Do not send Pi's active tools: some built-in tool schemas use regex
+      // lookaround, which OpenAI's Responses schema validator rejects.
+      request = {
         model,
-        preparation.replay,
-      );
+        input: preparation.buildInput(),
+        instructions: combineInstructions(context.getSystemPrompt(), event.customInstructions),
+      };
     } catch (error) {
       if (!event.signal.aborted) {
         const message = error instanceof Error ? error.message : String(error);
@@ -368,35 +244,20 @@ export function installRemoteCompaction(
       return undefined;
     }
 
-    if (!isRecord(event.payload) || !Array.isArray(event.payload.input)) {
+    const rewrite = preparation.rewrite(event.payload);
+    if (rewrite.kind === "patched") return rewrite.payload;
+    if (rewrite.kind === "payload-not-full-array") {
       return hardStop(
         context,
         "the ordinary request does not contain a full-array Responses input",
       );
     }
-    const state = preparation.replay;
-    const expected = checkpointSpan(branch, state, model);
-    if (!expected) {
+    if (rewrite.kind === "span-unavailable") {
       return hardStop(
         context,
         "the replay replacement span could not be reconstructed from the active branch",
       );
     }
-    const matchStart = findUniqueSpan(event.payload.input, expected);
-    if (matchStart === undefined) {
-      return hardStop(context, "the replay replacement span was missing or ambiguous");
-    }
-
-    const patched: Record<string, unknown> = {
-      ...event.payload,
-      input: [
-        ...event.payload.input.slice(0, matchStart),
-        ...state.replacementHistory,
-        ...event.payload.input.slice(matchStart + expected.length),
-      ],
-    };
-    delete patched.messages;
-    delete patched.previous_response_id;
-    return patched;
+    return hardStop(context, "the replay replacement span was missing or ambiguous");
   });
 }
