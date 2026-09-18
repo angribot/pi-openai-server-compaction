@@ -27,15 +27,18 @@ For a global installation, omit `-l`.
 
 ## Which models can use it?
 
-Eligibility is based on Pi's configured API type, not the model name or endpoint hostname:
+Eligibility requires both Pi's configured API type and a model ID that resolves a non-empty Compaction compatibility class in the extension's release-managed Codex catalog:
 
 | Model configuration | Can attempt Remote compaction? |
 | --- | --- |
-| Any provider using `openai-responses` | Yes, including custom providers and relays |
-| Pi's built-in `openai-codex` provider using `openai-codex-responses` | Yes |
+| Any provider using `openai-responses` with a catalogued model ID | Yes, including custom providers and relays |
+| Pi's built-in `openai-codex` provider using `openai-codex-responses` with a catalogued model ID | Yes |
+| A supported API type whose model ID is not in the catalog | No; Pi's normal compaction summarization runs instead |
 | Other configurations | No |
 
 API type strings are exact and case-sensitive. **Eligibility is not a guarantee of endpoint support.**
+
+The catalog is a release-managed list of OpenAI Codex model IDs and their opaque compatibility classes; it is not user-configurable. If the selected model ID is absent, the extension makes no Remote compaction attempt and Pi's default compaction handles the conversation.
 
 The endpoint must accept **Remote compaction v2**: a request to `/responses` ending in a `compaction_trigger`, returning a compaction item that can be replayed later. This extension does **not** use `/responses/compact`. Ordinary Responses support alone is insufficient; capability is discovered when compaction is attempted.
 
@@ -51,7 +54,7 @@ Even matching compatibility classes do not guarantee that a different endpoint w
 
 ### Failures do not produce a backup text summary
 
-Transient compaction failures may retry, up to three attempts total. Unsupported operations, context overflow, and other terminal failures cancel compaction. The extension does not truncate context to make it fit.
+Transient compaction failures may retry, up to three attempts total. Unsupported operations, context overflow, and other terminal failures cancel compaction. The extension does not truncate context to make it fit. A model whose compatibility class is not catalogued is not an eligible attempt, so Pi's normal summarization runs; that is not a fallback from a failed Remote compaction.
 
 If a checkpoint is broken or cannot be safely replayed, the extension stops the ordinary request rather than silently sending incomplete context. It never generates a portable text fallback.
 

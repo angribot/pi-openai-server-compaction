@@ -129,7 +129,7 @@ test("repeated compaction sends replacement history plus the post-checkpoint suf
     userEntry("e3", "after checkpoint"),
   ];
 
-  const preparation = prepareCompactionReplay(branch, model(), () => undefined);
+  const preparation = prepareCompactionReplay(branch, model(), () => "2911");
   assert.equal(preparation.kind, "ready");
   if (preparation.kind !== "ready") return;
 
@@ -146,7 +146,7 @@ test("repeated compaction sends replacement history plus the post-checkpoint suf
         format: "native-replay-checkpoint/1",
         producer: {
           modelKey: { provider: "example-provider", api: "openai-responses", id: "gpt-test" },
-          compactionCompatibilityClass: null,
+          compactionCompatibilityClass: "2911",
         },
         replacementHistory: [{ type: "compaction", encrypted_content: "new-item" }],
       },

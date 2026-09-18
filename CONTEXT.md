@@ -17,7 +17,7 @@ The standalone `/responses/compact` protocol whose response supplies the next co
 _Avoid_: Remote compaction v2
 
 **Eligible model**:
-A model selected for attempting Remote compaction v2 either by the exact `openai-responses` API contract, or by Pi's built-in `openai-codex` provider together with the exact `openai-codex-responses` API contract. Eligibility does not guarantee that the selected endpoint accepts the v2 trigger or that the model is compatible with an existing compaction item.
+A model permitted to attempt Remote compaction v2 that has a known Compaction compatibility class and uses either the `openai-responses` API contract or Pi's built-in `openai-codex` provider with the `openai-codex-responses` API contract. Eligibility guarantees neither endpoint capability nor compatibility with an existing compaction item.
 _Avoid_: Supported provider, compatible model, v2-capable endpoint
 
 **Remote compaction capability**:
@@ -25,7 +25,7 @@ The selected endpoint's runtime ability to accept a Remote compaction v2 request
 _Avoid_: Eligible model, compatible model
 
 **Compatible model**:
-An Eligible model whose resolved Compaction compatibility class equals the checkpoint producer's creation-time class, or whose exact Model key matches when either class is unavailable. Class equality may cross Pi providers and the two Eligible Responses API types.
+A model that can replay a checkpoint under the Responses API contracts supported by Native replay, based on equality with the producer's creation-time Compaction compatibility class or exact Model key equality when either class is unavailable. Replay compatibility is distinct from eligibility to attempt Remote compaction and may cross model IDs and Pi providers.
 _Avoid_: Eligible model, supported model
 
 **Compaction item**:

@@ -2,7 +2,7 @@
 
 For installation, everyday use, and recovery guidance, start with the [README](../README.md). This document describes the detailed protocol and implementation contract.
 
-Eligible models are either any provider using the exact, case-sensitive `openai-responses` API type, or Pi's built-in `openai-codex` provider using the exact `openai-codex-responses` API type. Eligibility permits a Remote compaction attempt; actual endpoint capability is discovered from the result.
+Eligible models satisfy both an API contract and a catalog lookup: any provider using the exact, case-sensitive `openai-responses` API type, or Pi's built-in `openai-codex` provider using the exact `openai-codex-responses` API type, whose model ID resolves a non-empty Compaction compatibility class in the release-managed Codex catalog. Eligibility permits a Remote compaction attempt; actual endpoint capability is discovered from the result. A model whose class is unresolved is not attempted: `session_before_compact` returns `undefined` and Pi's default compaction handles the conversation.
 
 > **Status:** experimental. Install project-local first and keep rollback easy.
 
@@ -12,11 +12,11 @@ Eligible models are either any provider using the exact, case-sensitive `openai-
 
 - Node `>=22`
 - Pi `0.85.1` as the implementation baseline
-- a selected model using exact API type `openai-responses`, or Pi's built-in `openai-codex` provider using `openai-codex-responses`
+- a selected model using exact API type `openai-responses`, or Pi's built-in `openai-codex` provider using `openai-codex-responses`, with a model ID listed in the release-managed compatibility catalog
 - working Pi-managed credentials for that model
 - a Responses endpoint that accepts the Remote compaction v2 trigger and can replay the returned compaction item
 
-The extension does not infer Remote compaction capability from model names or endpoint hostnames. Custom providers and relays are eligible through the exact `openai-responses` API contract. The `openai-codex-responses` exception is deliberately restricted to Pi's built-in `openai-codex` provider because that API uses Pi-managed ChatGPT OAuth and Codex routing rather than a third-party-compatible Responses contract. A small exact model-ID catalog is used only for Native replay compatibility, never capability or routing.
+The extension does not infer Remote compaction capability from model names or endpoint hostnames. Custom providers and relays are eligible through the exact `openai-responses` API contract when the selected model ID is catalogued. The `openai-codex-responses` exception is deliberately restricted to Pi's built-in `openai-codex` provider because that API uses Pi-managed ChatGPT OAuth and Codex routing rather than a third-party-compatible Responses contract. The small exact model-ID catalog supplies each model's Compaction compatibility class; it gates whether a new Remote compaction is attempted as well as how a checkpoint may be replayed, and it is the only supported source of that class.
 
 ## Remote compaction contract
 
@@ -26,6 +26,8 @@ On `session_before_compact`, an eligible model receives one read-only logical re
 - Pi's persisted, compaction-aware active linear-session compactable context projected into ordinary Responses input;
 - the effective system instructions plus supplied custom compaction instructions; and
 - exactly one terminal, payload-free `{ "type": "compaction_trigger" }`.
+
+A model whose compatibility class is unresolved is not eligible for an attempt: the handler returns `undefined`, no adapter runs, and Pi's default compaction proceeds.
 
 The request never includes active tool declarations (`tools`), including any inherited from the provider envelope. Historical function calls and their outputs remain part of the projected input.
 
@@ -64,7 +66,7 @@ The matching `CompactionEntry.details` written by this release contains exactly:
 }
 ```
 
-The class is the opaque value resolved when the compaction item is created; explicit `null` means the producer was not cataloged. It is never recalculated for an old checkpoint. Replacement history contains only the newly accepted opaque compaction item. It does not contain retained user or assistant messages, the marker, a trigger, endpoint or routing data, response IDs, implementation tags, or duplicated usage. A persisted `openai-codex-responses` key is valid only with provider `openai-codex`.
+The class is the opaque value resolved when the compaction item is created. A checkpoint written by this release always carries a non-null class because an attempt requires one. Explicit `null` appears only in records persisted by earlier releases, where it means the producer was not catalogued; it is never recalculated for an old checkpoint. Replacement history contains only the newly accepted opaque compaction item. It does not contain retained user or assistant messages, the marker, a trigger, endpoint or routing data, response IDs, implementation tags, or duplicated usage. A persisted `openai-codex-responses` key is valid only with provider `openai-codex`.
 
 Only the active branch's latest `CompactionEntry` can define replay state. The extension reconstructs that state from the branch on every hook; it keeps no replay cache, request-shape cache, invalidation tombstone, or lifecycle synchronization listener. A later ordinary compaction supersedes an older checkpoint. A fixed marker with missing, unknown-format, or malformed details is a broken checkpoint and fails closed.
 
@@ -72,9 +74,9 @@ For a checkpoint with a non-null class, compatibility is re-derived from the per
 
 ## Native replay
 
-Compatibility is structured and case-sensitive. When both the checkpoint producer and selected target have non-null Compaction compatibility classes, both must be Eligible models and the opaque classes must be equal. Equal classes may cross model IDs, Pi provider identities, and the two Eligible API contracts (`openai-responses` and built-in `openai-codex-responses`). If either class is unavailable, compatibility falls back to exact `{ provider, api, model ID }` equality. Credentials, accounts, headers, and resolved endpoints remain routing data rather than compatibility identity.
+Compatibility is structured and case-sensitive. When both the checkpoint producer and selected target have non-null Compaction compatibility classes, both must satisfy Native replay's supported API contracts and the opaque classes must be equal. Equal classes may cross model IDs, Pi provider identities, and the two supported API contracts (`openai-responses` and built-in `openai-codex-responses`). If either class is unavailable, compatibility falls back to exact `{ provider, api, model ID }` equality. Credentials, accounts, headers, and resolved endpoints remain routing data rather than compatibility identity. The attempt gate applies only to `session_before_compact`: a previously persisted checkpoint with an explicit `null` class still replays for its exact Model key even when the selected model ID is no longer catalogued.
 
-The release-managed catalog is copied from [OpenAI Codex model metadata](https://github.com/openai/codex/blob/459a79eb85400af759e9220c7bafb4429ae07516/codex-rs/models-manager/models.json) and currently maps `gpt-5.4`, `gpt-5.4-mini`, and `gpt-5.5` to opaque class `2911`, and `gpt-5.6-sol`, `gpt-5.6-terra`, `gpt-5.6-luna`, `gpt-6-astra`, `gpt-daybreak-blue-latest`, `gpt-daybreak-red-latest`, and `codex-auto-review` to opaque class `3000`. Values are strings and carry no numeric meaning. The extension does not infer entries from family names, aliases, providers, or endpoints, fetch a private `/models` endpoint, or accept user-supplied mappings.
+The release-managed catalog is copied from [OpenAI Codex model metadata](https://github.com/openai/codex/blob/459a79eb85400af759e9220c7bafb4429ae07516/codex-rs/models-manager/models.json) and currently maps `gpt-5.4`, `gpt-5.4-mini`, and `gpt-5.5` to opaque class `2911`, and `gpt-5.6-sol`, `gpt-5.6-terra`, `gpt-5.6-luna`, `gpt-6-astra`, `gpt-daybreak-blue-latest`, `gpt-daybreak-red-latest`, and `codex-auto-review` to opaque class `3000`. Values are strings and carry no numeric meaning. A model ID absent from this catalog is not eligible for a new Remote compaction attempt. The extension does not infer entries from family names, aliases, providers, or endpoints, fetch a private `/models` endpoint, or accept user-supplied mappings.
 
 For a compatible ordinary request, the extension:
 
@@ -121,7 +123,7 @@ The local Responses projection adapter covers Pi `0.85.1` ordinary semantics for
 
 Architecture decisions:
 
-- [ADR 0001: Select models by API contract](https://github.com/angribot/pi-openai-server-compaction/blob/main/docs/adr/0001-select-models-by-api-contract.md)
+- [ADR 0001: Select models by API contract and known compatibility class](https://github.com/angribot/pi-openai-server-compaction/blob/main/docs/adr/0001-select-models-by-api-contract.md)
 - [ADR 0002: Prefer native replay continuity](https://github.com/angribot/pi-openai-server-compaction/blob/main/docs/adr/0002-prefer-native-replay-continuity.md)
 - [ADR 0003: Keep provider transport independent](https://github.com/angribot/pi-openai-server-compaction/blob/main/docs/adr/0003-keep-provider-transport-independent.md)
 - [ADR 0004: Keep resolved endpoints out of model identity](https://github.com/angribot/pi-openai-server-compaction/blob/main/docs/adr/0004-keep-resolved-endpoints-out-of-model-identity.md) — superseded by ADR 0005
@@ -136,9 +138,10 @@ The offline suite uses Node's built-in test runner and requires no credentials o
 npm test
 ```
 
-Its three focused files are:
+Its four focused files are:
 
 - `tests/loader.test.ts` — production loader, package factory, exactly two hooks, and no provider override;
+- `tests/remote-compaction.test.ts` — `session_before_compact` eligibility: catalogued class invokes the attempt, unresolved class defers to Pi, unsupported APIs and third-party `openai-codex-responses` are untouched, and the gate covers repeated compaction;
 - `tests/remote-compaction-operation.test.ts` — direct and Pi-mediated one-attempt SSE operations, payload ownership, raw completion, validation, failure classification, usage, and abort;
 - `tests/native-replay.test.ts` — checkpoint restoration, repeated-compaction input, ordinary span replacement, span matching failures, and continuity invalidation from persisted turns.
 
@@ -164,7 +167,7 @@ Coverage remains deliberately reduced: the projection suite, the hook retry orch
 | `src/responses-projection.ts`       | narrow Pi `0.85.1` ordinary Responses projection adapter                        |
 | `src/direct-responses-operation.ts` | one-attempt direct HTTP/SSE capability-gap adapter                              |
 | `src/codex-responses-operation.ts`  | one-attempt Pi-mediated Codex SSE capture adapter                               |
-| `tests/`                            | three offline contract files                                                    |
+| `tests/`                            | four offline contract files                                                     |
 | `CONTEXT.md`                        | canonical Remote compaction domain language                                     |
 | `docs/adr/`                         | durable architecture decisions                                                  |
 | `CHANGELOG.md`                      | release history and pending user-visible changes                                |
