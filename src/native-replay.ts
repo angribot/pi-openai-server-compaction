@@ -87,6 +87,7 @@ type ReplayPreparationFailure =
 type CompactionReplayPreparation =
   | ReplayPreparationFailure
   | { kind: "incompatible" }
+  | { kind: "class-unavailable" }
   | {
       kind: "ready";
       buildInput(): ResponsesItem[];
@@ -399,10 +400,11 @@ export function prepareCompactionReplay(
   if (!key) return { kind: "invalid-model" };
 
   // Capture the producer class before the remote operation, never when it completes.
-  const producer = {
-    modelKey: key,
-    compactionCompatibilityClass: resolveCompatibilityClass(resolver, key.id) ?? null,
-  };
+  // A new attempt requires a catalog-resolved class; otherwise the model is left to
+  // Pi's default compaction instead of producing a null-class checkpoint.
+  const compactionCompatibilityClass = resolveCompatibilityClass(resolver, key.id);
+  if (compactionCompatibilityClass === undefined) return { kind: "class-unavailable" };
+  const producer = { modelKey: key, compactionCompatibilityClass };
   const state = deriveActiveReplayState(branch, resolver);
   if (state.kind === "broken") return state;
   if (state.kind === "valid") {

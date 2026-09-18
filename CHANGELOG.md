@@ -4,6 +4,8 @@ This changelog intentionally starts at **0.1.0**.
 
 ## Unreleased
 
+- require a catalogued Codex Compaction compatibility class before attempting Remote compaction: API-eligible models whose model ID has no resolved class now leave compaction to Pi's default summarization instead of creating a `null`-class checkpoint, including direct `openai-responses` custom providers and relays
+
 - use Pi's deterministic fallback for empty versioned assistant text IDs instead of emitting an empty ID that can break Native replay span matching
 
 - stop writing branch-local `native-replay-compatibility-decision/1` records and re-derive compatibility for a class-aware checkpoint from persisted successful assistant turns under the checkpoint's creation-time class on every reconstruction; custom compatibility-evidence entries, evidence-write warnings, and malformed-evidence handling are removed, and a later catalog revision can now reinterpret a history that evidence previously pinned

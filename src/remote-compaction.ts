@@ -141,6 +141,11 @@ export function installRemoteCompaction(
       reportError(context, "Remote compaction requires a non-empty structured model identity.");
       return { cancel: true };
     }
+    if (preparation.kind === "class-unavailable") {
+      // No catalogued Compaction compatibility class: leave this model to Pi's
+      // default compaction instead of attempting a null-class Remote compaction.
+      return undefined;
+    }
     if (preparation.kind === "broken") {
       reportError(context, `Remote compaction was cancelled because ${preparation.reason}.`);
       return { cancel: true };
