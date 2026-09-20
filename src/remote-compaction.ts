@@ -159,6 +159,13 @@ export function installRemoteCompaction(
       );
       return { cancel: true };
     }
+    if (preparation.kind === "snapshot-unavailable") {
+      reportError(
+        context,
+        "Remote compaction was cancelled because the active checkpoint was written without a host system-message snapshot, so its instructions cannot be reconstructed safely. Start a new session to compact again; native replay of this checkpoint still works.",
+      );
+      return { cancel: true };
+    }
 
     let request: RemoteCompactionRequest;
     try {

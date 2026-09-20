@@ -93,6 +93,7 @@ type ReplayPreparationFailure =
 
 type CompactionReplayPreparation =
   | ReplayPreparationFailure
+  | { kind: "snapshot-unavailable" }
   | { kind: "incompatible" }
   | { kind: "class-unavailable" }
   | {
@@ -470,6 +471,9 @@ export function prepareCompactionReplay(
     if (!compatibleWithCheckpoint(state, key, producer.compactionCompatibilityClass)) {
       return { kind: "incompatible" };
     }
+    // Without a host system-message snapshot the checkpoint stays readable for
+    // ordinary replay, but a further compaction must not guess its instructions.
+    if (state.entry.systemMessage === undefined) return { kind: "snapshot-unavailable" };
   }
 
   return {

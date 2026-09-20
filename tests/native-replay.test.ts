@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import type { AssistantMessage, Model } from "@earendil-works/pi-ai";
+import type { AssistantMessage, Model, SystemMessage } from "@earendil-works/pi-ai";
 import {
   NATIVE_REPLAY_CHECKPOINT_FORMAT,
   prepareCompactionReplay,
@@ -96,6 +96,7 @@ function checkpointEntry(
   parentId: string,
   firstKeptEntryId: string,
   details: NativeReplayCheckpointDetails,
+  systemMessage?: SystemMessage,
 ): BranchEntry {
   return {
     type: "compaction",
@@ -106,6 +107,7 @@ function checkpointEntry(
     firstKeptEntryId,
     tokensBefore: 123,
     details,
+    ...(systemMessage ? { systemMessage } : {}),
   };
 }
 
@@ -123,9 +125,10 @@ function checkpointDetails(
 }
 
 test("repeated compaction sends replacement history plus the post-checkpoint suffix", () => {
+  const snapshot: SystemMessage = { role: "system", content: "BASE PROMPT", timestamp: 1 };
   const branch: BranchEntry[] = [
     userEntry("e1", "retained before checkpoint"),
-    checkpointEntry("e2", "e1", "e1", checkpointDetails()),
+    checkpointEntry("e2", "e1", "e1", checkpointDetails(), snapshot),
     userEntry("e3", "after checkpoint"),
   ];
 
@@ -152,6 +155,22 @@ test("repeated compaction sends replacement history plus the post-checkpoint suf
       },
     },
   );
+});
+
+test("a snapshot-less checkpoint stays readable for replay but cannot compact again", () => {
+  const branch: BranchEntry[] = [
+    userEntry("e1", "retained before checkpoint"),
+    checkpointEntry("e2", "e1", "e1", checkpointDetails()),
+    userEntry("e3", "after checkpoint"),
+  ];
+
+  assert.deepEqual(
+    prepareCompactionReplay(branch, model(), () => "2911"),
+    {
+      kind: "snapshot-unavailable",
+    },
+  );
+  assert.equal(prepareNativeReplay(branch, model(), () => undefined).kind, "compatible");
 });
 
 test("native replay replaces only the replay replacement span and preserves surrounding items", () => {
