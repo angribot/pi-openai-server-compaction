@@ -1,6 +1,6 @@
 {
   "name": "pi-openai-server-compaction",
-  "version": "0.11.0",
+  "version": "0.12.0",
   "private": true,
   "description": "Pi extension for OpenAI Responses Remote compaction with native replay.",
   "keywords": [

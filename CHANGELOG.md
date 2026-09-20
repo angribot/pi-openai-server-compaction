@@ -4,6 +4,8 @@ This changelog intentionally starts at **0.1.0**.
 
 ## Unreleased
 
+## 0.12.0 - 2026-09-20
+
 - upgrade the development and documentation baseline from Pi 0.85.1 to Pi 0.86.0 and validate against 0.86 as the implementation baseline rather than a guarantee about every later patch
 - restore Remote compaction and Native replay against Pi 0.86's persisted transcript: leading and mid-conversation system messages, string and text-array content, prompt-section additions/replacements/removals, and tool declaration changes are projected per the selected model's collapse-versus-mid-conversation capability and each supported API contract's leading-system placement
 - keep checkpoint-owned `systemMessage` snapshots and `native-replay-checkpoint/1` records written without one; a snapshot-less record stays readable for ordinary Native replay, but a further Remote compaction is cancelled before any attempt with an explicit new-session requirement rather than reconstructing or guessing its instructions, and no checkpoint format migration is introduced
