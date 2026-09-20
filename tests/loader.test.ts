@@ -27,6 +27,7 @@ test("the production extension loader installs only the Remote compaction protoc
     assert.ok(extension);
     assert.deepEqual([...extension.handlers.keys()].sort(), [
       "before_provider_request",
+      "cache_warming_decision",
       "session_before_compact",
     ]);
     assert.equal(extension.tools.size, 0);

@@ -1,6 +1,8 @@
 import type { Usage } from "@earendil-works/pi-ai";
 import { type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import {
+  compactionInstructions,
+  hasActiveRemoteCompactionCheckpoint,
   prepareCompactionReplay,
   prepareNativeReplay,
   remoteCompactionOperationKind,
@@ -57,13 +59,6 @@ function hardStop(context: HookContext, reason: string): undefined {
   );
   context.abort();
   return undefined;
-}
-
-function combineInstructions(systemPrompt: string, customInstructions: string | undefined): string {
-  const custom = customInstructions?.trim();
-  return custom
-    ? `${systemPrompt}\n\nAdditional compaction instructions:\n${custom}`
-    : systemPrompt;
 }
 
 function retryDelay(
@@ -164,6 +159,13 @@ export function installRemoteCompaction(
       );
       return { cancel: true };
     }
+    if (preparation.kind === "snapshot-unavailable") {
+      reportError(
+        context,
+        "Remote compaction was cancelled because the active checkpoint was written without a host system-message snapshot, so its instructions cannot be reconstructed safely. Start a new session to compact again; native replay of this checkpoint still works.",
+      );
+      return { cancel: true };
+    }
 
     let request: RemoteCompactionRequest;
     try {
@@ -173,7 +175,12 @@ export function installRemoteCompaction(
       request = {
         model,
         input: preparation.buildInput(),
-        instructions: combineInstructions(context.getSystemPrompt(), event.customInstructions),
+        instructions: compactionInstructions(
+          branchEntries,
+          model,
+          event.customInstructions,
+          context.getSystemPrompt(),
+        ),
       };
     } catch (error) {
       if (!event.signal.aborted) {
@@ -222,6 +229,19 @@ export function installRemoteCompaction(
     }
 
     return { cancel: true };
+  });
+
+  pi.on("cache_warming_decision", (_event, context) => {
+    // A Remote compaction checkpoint owns context that Native replay must
+    // reconstruct. Pi's warmer re-runs before_provider_request during a refresh
+    // with its own abort controller, so the replay hook's fail-closed abort
+    // cannot stop that refresh. Stop it here, before provider dispatch, instead.
+    //
+    // Protection is deliberately independent of model eligibility: it follows
+    // the active branch, so a malformed, invalidated, incompatible, or legacy
+    // checkpoint is protected too, and no replay or warming state is cached.
+    const branch = context.sessionManager.getBranch();
+    return hasActiveRemoteCompactionCheckpoint(branch) ? { action: "stop" } : undefined;
   });
 
   pi.on("before_provider_request", (event, context) => {
