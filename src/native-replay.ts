@@ -1,6 +1,12 @@
 import { isDeepStrictEqual } from "node:util";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
-import type { Model } from "@earendil-works/pi-ai";
+import {
+  getCurrentSystemMessage,
+  getInitialSystemMessage,
+  getSystemMessageText,
+  type Model,
+  type SystemMessage,
+} from "@earendil-works/pi-ai";
 import { buildSessionContext } from "@earendil-works/pi-coding-agent";
 import type { CompactionItem } from "./remote-compaction-operation.ts";
 import { projectCompactableContext, type ResponsesItem } from "./responses-projection.ts";
@@ -61,6 +67,7 @@ export type BranchEntry = {
   tokensBefore?: unknown;
   details?: unknown;
   message?: AgentMessage;
+  systemMessage?: SystemMessage;
 };
 
 type RequestModelIdentity = { provider: string; api: string; id: string };
@@ -318,6 +325,39 @@ function suffixMessages(branch: readonly BranchEntry[], state: ValidReplayState)
   ).messages;
 }
 
+function supportsMidConversationSystemMessages(model: Model<any>): boolean {
+  return (
+    (model.compat as { supportsMidConvoSystemMessages?: boolean } | undefined)
+      ?.supportsMidConvoSystemMessages ?? false
+  );
+}
+
+/**
+ * Effective Remote compaction instructions for the selected model's transcript
+ * contract. Models without mid-conversation system messages collapse the prompt
+ * into one head; those that accept them keep the leading base prompt and re-send
+ * later section/tool updates as ordered input items.
+ */
+export function compactionInstructions(
+  branch: readonly BranchEntry[],
+  model: Model<any>,
+  customInstructions: string | undefined,
+  fallbackSystemPrompt = "",
+): string {
+  const messages = buildSessionContext(
+    branch as Parameters<typeof buildSessionContext>[0],
+  ).messages;
+  const head = supportsMidConversationSystemMessages(model)
+    ? getInitialSystemMessage(messages)
+    : getCurrentSystemMessage(messages);
+  const base = (head ? getSystemMessageText(head) : "") || fallbackSystemPrompt;
+  const custom = customInstructions?.trim();
+  if (!custom) return base;
+  return base
+    ? `${base}\n\nAdditional compaction instructions:\n${custom}`
+    : `Additional compaction instructions:\n${custom}`;
+}
+
 function containsCheckpointMarker(value: unknown): boolean {
   if (typeof value === "string") return value.includes(REMOTE_COMPACTION_CHECKPOINT_MARKER);
   if (Array.isArray(value)) return value.some(containsCheckpointMarker);
@@ -341,9 +381,14 @@ function checkpointSpan(
       branch as Parameters<typeof buildSessionContext>[0],
       state.entry.id,
     );
-    const span = projectCompactableContext(context.messages, model);
-    const first = span[0];
-    return first && containsCheckpointMarker(first) ? span : undefined;
+    // The leading system snapshot (if any) is provider instruction state that
+    // stays outside the replay replacement span. Anchor the span on the checkpoint
+    // marker instead of assuming it is the first projected item.
+    const projected = projectCompactableContext(context.messages, model, {
+      includeSystemPrompt: false,
+    });
+    const markerIndex = projected.findIndex((item) => containsCheckpointMarker(item));
+    return markerIndex < 0 ? undefined : projected.slice(markerIndex);
   } catch {
     return undefined;
   }
@@ -417,16 +462,23 @@ export function prepareCompactionReplay(
   return {
     kind: "ready",
     buildInput() {
-      const messages =
-        state.kind === "valid"
-          ? [
-              ...state.replacementHistory,
-              ...projectCompactableContext(suffixMessages(branch, state), model),
-            ]
-          : projectCompactableContext(
-              buildSessionContext(branch as Parameters<typeof buildSessionContext>[0]).messages,
-              model,
-            );
+      if (state.kind === "valid") {
+        return [
+          ...state.replacementHistory,
+          ...projectCompactableContext(suffixMessages(branch, state), model, {
+            includeSystemPrompt: false,
+            // A post-checkpoint system message continues the compacted transcript
+            // rather than leading it; only mid-conversation models keep it in place.
+            hasPrecedingItems: supportsMidConversationSystemMessages(model),
+          }),
+          { type: "compaction_trigger" },
+        ];
+      }
+      const messages = projectCompactableContext(
+        buildSessionContext(branch as Parameters<typeof buildSessionContext>[0]).messages,
+        model,
+        { includeSystemPrompt: false },
+      );
       return [...messages, { type: "compaction_trigger" }];
     },
     createCheckpointDetails(item) {

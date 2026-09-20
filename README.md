@@ -8,7 +8,7 @@ The endpoint returns an opaque compaction item. This extension saves it with you
 
 ## Quick start
 
-You need Node **22 or newer**, Pi (**0.85.1** is the implementation baseline), and working Pi-managed credentials for an eligible model. The endpoint must support the compaction protocol described below.
+You need Node **22 or newer**, Pi (**0.86.0** is the implementation and validation baseline), and working Pi-managed credentials for an eligible model. The endpoint must support the compaction protocol described below.
 
 Install in your project:
 
@@ -58,9 +58,13 @@ Transient compaction failures may retry, up to three attempts total. Unsupported
 
 If a checkpoint is broken or cannot be safely replayed, the extension stops the ordinary request rather than silently sending incomplete context. It never generates a portable text fallback.
 
-### Old checkpoints are not supported
+### Legacy checkpoints are not supported
 
-Only `nativeReplayCheckpoint` records with format `native-replay-checkpoint/1` are supported. Legacy `remoteCompaction` records, including those written by v0.8.0 and earlier, have no migration path. Start a new session or return to a branch point before the old checkpoint.
+Only `nativeReplayCheckpoint` records with format `native-replay-checkpoint/1` are supported. Earlier records in that format, including those written before Pi persisted a `systemMessage` snapshot, remain readable and replayable. Legacy `remoteCompaction` records, including those written by v0.8.0 and earlier, have no migration path. Start a new session or return to a branch point before the old checkpoint.
+
+### Pi 0.86 support is partial until cache warming is safeguarded
+
+This release restores Remote compaction and Native replay for Pi 0.86's persisted transcript model, but it deliberately does not yet guard Pi's optional prompt-cache warming refreshes. A warming refresh re-runs the provider-request hook with its own abort controller, so the extension's fail-closed replay path cannot reliably stop a protected refresh. Treat Pi 0.86 compatibility as incomplete until the dependent cache-warming safeguard ships.
 
 ## Troubleshooting
 

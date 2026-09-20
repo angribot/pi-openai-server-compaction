@@ -1,15 +1,39 @@
 import { convertToLlm, type AgentMessage } from "@earendil-works/pi-agent-core";
-import type {
-  AssistantMessage,
-  ImageContent,
-  Message,
-  Model,
-  TextContent,
-  ThinkingContent,
-  ToolCall,
+import {
+  getSystemMessageText,
+  normalizeContext,
+  renderSystemMessageUpdate,
+  resolveTranscript,
+  type AssistantMessage,
+  type ImageContent,
+  type Message,
+  type Model,
+  type TextContent,
+  type ThinkingContent,
+  type ToolCall,
 } from "@earendil-works/pi-ai";
 
 export type ResponsesItem = Record<string, unknown> & { type?: string };
+
+/**
+ * Projection controls mirroring the subset of Pi's Responses conversion this
+ * extension owns. The production extension loader cannot resolve Pi's Responses
+ * converter subpath, so the narrow projection is retained locally.
+ */
+export type CompactableContextOptions = {
+  /**
+   * Emit the leading system message as a provider input item. Remote compaction
+   * keeps effective instructions in the top-level request field, so its input
+   * omits the leading system message; later system updates remain in place.
+   */
+  includeSystemPrompt: boolean;
+  /**
+   * True when this projection continues Responses items that precede it, such as
+   * replacement history. A system message at the start is then a mid-conversation
+   * update rather than the leading prompt.
+   */
+  hasPrecedingItems?: boolean;
+};
 
 const NON_VISION_USER_IMAGE_PLACEHOLDER = "(image omitted: model does not support images)";
 const NON_VISION_TOOL_IMAGE_PLACEHOLDER = "(tool image omitted: model does not support images)";
@@ -96,13 +120,14 @@ function replaceImagesWithPlaceholder(
   return result;
 }
 
-// Mirrors Pi 0.85.1 `transformMessages` (`openai-responses-shared` reuses it):
-// image downgrade, foreign thinking/tool normalization, then synthetic missing
-// tool results. This intentionally does not add validation Pi itself lacks.
+// Mirrors Pi 0.86 `transformMessages` (`openai-responses-shared` reuses it):
+// null-content normalization, image downgrade, foreign thinking/tool
+// normalization, and synthetic missing tool results. System messages that land
+// between a tool call and its results are held back until after those results.
 function normalizeMessages(messages: readonly Message[], model: Model<any>): Message[] {
   const toolCallIdMap = new Map<string, string>();
   const normalizedMessages = messages.map((message) =>
-    message.content == null ? { ...message, content: [] } : message,
+    message.content == null ? ({ ...message, content: [] } as Message) : message,
   );
   const imageAwareMessages = model.input.includes("image")
     ? normalizedMessages
@@ -129,7 +154,7 @@ function normalizeMessages(messages: readonly Message[], model: Model<any>): Mes
       });
 
   const transformed = imageAwareMessages.map((message): Message => {
-    if (message.role === "user") return message;
+    if (message.role === "system" || message.role === "user") return message;
     if (message.role === "toolResult") {
       const normalizedId = toolCallIdMap.get(message.toolCallId);
       return normalizedId && normalizedId !== message.toolCallId
@@ -176,27 +201,31 @@ function normalizeMessages(messages: readonly Message[], model: Model<any>): Mes
   const result: Message[] = [];
   let pendingToolCalls: ToolCall[] = [];
   let existingToolResultIds = new Set<string>();
+  const heldSystemMessages: Message[] = [];
 
-  const insertSyntheticToolResults = () => {
-    if (pendingToolCalls.length === 0) return;
-    for (const toolCall of pendingToolCalls) {
-      if (existingToolResultIds.has(toolCall.id)) continue;
-      result.push({
-        role: "toolResult",
-        toolCallId: toolCall.id,
-        toolName: toolCall.name,
-        content: [{ type: "text", text: "No result provided" }],
-        isError: true,
-        timestamp: Date.now(),
-      });
+  const closePendingToolCalls = () => {
+    if (pendingToolCalls.length > 0) {
+      for (const toolCall of pendingToolCalls) {
+        if (existingToolResultIds.has(toolCall.id)) continue;
+        result.push({
+          role: "toolResult",
+          toolCallId: toolCall.id,
+          toolName: toolCall.name,
+          content: [{ type: "text", text: "No result provided" }],
+          isError: true,
+          timestamp: Date.now(),
+        });
+      }
+      pendingToolCalls = [];
+      existingToolResultIds = new Set();
     }
-    pendingToolCalls = [];
-    existingToolResultIds = new Set();
+    result.push(...heldSystemMessages);
+    heldSystemMessages.length = 0;
   };
 
   for (const message of transformed) {
     if (message.role === "assistant") {
-      insertSyntheticToolResults();
+      closePendingToolCalls();
       if (message.stopReason === "error" || message.stopReason === "aborted") continue;
       const toolCalls = message.content.filter(
         (block): block is ToolCall => block.type === "toolCall",
@@ -213,10 +242,19 @@ function normalizeMessages(messages: readonly Message[], model: Model<any>): Mes
       result.push(message);
       continue;
     }
-    insertSyntheticToolResults();
+    if (message.role === "system") {
+      if (pendingToolCalls.length > 0) heldSystemMessages.push(message);
+      else result.push(message);
+      continue;
+    }
+    if (message.role === "user") {
+      closePendingToolCalls();
+      result.push(message);
+      continue;
+    }
     result.push(message);
   }
-  insertSyntheticToolResults();
+  closePendingToolCalls();
   return result;
 }
 
@@ -263,18 +301,37 @@ function toolResultOutput(
   return output;
 }
 
-// Mirrors Pi 0.85.1 `convertResponsesMessages` for the tool-free Remote
-// compaction subset: message/function-call items, Pi fallback IDs and phases,
-// foreign item-id normalization, and function-call outputs.
+// Mirrors Pi 0.86 `convertResponsesMessages` for the tool-free Remote compaction
+// subset: message/function-call items, Pi fallback IDs and phases, foreign
+// item-id normalization, function-call outputs, and API-specific leading-system
+// placement. It intentionally never emits tool declarations.
 function projectNormalizedMessages(
   messages: readonly Message[],
   model: Model<any>,
+  options: CompactableContextOptions,
 ): ResponsesItem[] {
   const projected: ResponsesItem[] = [];
+  const supportsDeveloperRole =
+    (model.compat as { supportsDeveloperRole?: boolean } | undefined)?.supportsDeveloperRole !==
+    false;
+  const instructionRole = model.reasoning && supportsDeveloperRole ? "developer" : "system";
   let messageIndex = 0;
+  let sourceIndex = 0;
 
   for (const message of messages) {
-    if (message.role === "user") {
+    const isFirstMessage = sourceIndex++ === 0;
+    const isLeadingSystemMessage =
+      !options.hasPrecedingItems && isFirstMessage && message.role === "system";
+    if (message.role === "system") {
+      if (!isLeadingSystemMessage || options.includeSystemPrompt) {
+        const text = isLeadingSystemMessage
+          ? getSystemMessageText(message)
+          : renderSystemMessageUpdate(message);
+        if (text.length > 0) {
+          projected.push({ role: instructionRole, content: sanitizeSurrogates(text) });
+        }
+      }
+    } else if (message.role === "user") {
       const content = userContent(message.content);
       if (Array.isArray(message.content) && content.length === 0) continue;
       projected.push({ role: "user", content });
@@ -343,7 +400,7 @@ function projectNormalizedMessages(
         output: toolResultOutput(model, message.content),
       });
     }
-    messageIndex++;
+    if (!isLeadingSystemMessage) messageIndex++;
   }
 
   return projected;
@@ -352,6 +409,14 @@ function projectNormalizedMessages(
 export function projectCompactableContext(
   messages: readonly AgentMessage[],
   model: Model<any>,
+  options: CompactableContextOptions = { includeSystemPrompt: true },
 ): ResponsesItem[] {
-  return projectNormalizedMessages(normalizeMessages(convertToLlm([...messages]), model), model);
+  const supportsMidConvoSystemMessages =
+    (model.compat as { supportsMidConvoSystemMessages?: boolean } | undefined)
+      ?.supportsMidConvoSystemMessages ?? false;
+  const resolved = resolveTranscript(
+    normalizeContext({ messages: convertToLlm([...messages]) }),
+    supportsMidConvoSystemMessages,
+  );
+  return projectNormalizedMessages(normalizeMessages(resolved.messages, model), model, options);
 }

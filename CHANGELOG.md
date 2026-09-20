@@ -4,6 +4,12 @@ This changelog intentionally starts at **0.1.0**.
 
 ## Unreleased
 
+- upgrade the development and documentation baseline from Pi 0.85.1 to Pi 0.86.0 and validate against 0.86 as the implementation baseline rather than a guarantee about every later patch
+- restore Remote compaction and Native replay against Pi 0.86's persisted transcript: leading and mid-conversation system messages, string and text-array content, prompt-section additions/replacements/removals, and tool declaration changes are projected per the selected model's collapse-versus-mid-conversation capability and each supported API contract's leading-system placement
+- keep checkpoint-owned `systemMessage` snapshots and older `native-replay-checkpoint/1` records written without one; Native replay anchors the replacement span on the checkpoint marker instead of assuming it is the first context item, preserves surrounding instruction and provider items, and no longer fails when the host dropped retained system messages, with no checkpoint format migration
+- Remote compaction continues to preserve effective and custom system instructions and historical function calls while never emitting active tool declarations, including declaration-bearing items such as `additional_tools` inherited from ordinary provider projection
+- **Known limitation:** Pi 0.86 compatibility is only partial until the dependent cache-warming safeguard lands. A Pi cache-warming refresh re-runs `before_provider_request` with an independent abort controller, so the existing fail-closed replay path is not guaranteed to stop that refresh; no warming guard is implemented in this release.
+
 - require a catalogued Codex Compaction compatibility class before attempting Remote compaction: API-eligible models whose model ID has no resolved class now leave compaction to Pi's default summarization instead of creating a `null`-class checkpoint, including direct `openai-responses` custom providers and relays
 
 - use Pi's deterministic fallback for empty versioned assistant text IDs instead of emitting an empty ID that can break Native replay span matching

@@ -1,6 +1,7 @@
 import type { Usage } from "@earendil-works/pi-ai";
 import { type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import {
+  compactionInstructions,
   prepareCompactionReplay,
   prepareNativeReplay,
   remoteCompactionOperationKind,
@@ -57,13 +58,6 @@ function hardStop(context: HookContext, reason: string): undefined {
   );
   context.abort();
   return undefined;
-}
-
-function combineInstructions(systemPrompt: string, customInstructions: string | undefined): string {
-  const custom = customInstructions?.trim();
-  return custom
-    ? `${systemPrompt}\n\nAdditional compaction instructions:\n${custom}`
-    : systemPrompt;
 }
 
 function retryDelay(
@@ -173,7 +167,12 @@ export function installRemoteCompaction(
       request = {
         model,
         input: preparation.buildInput(),
-        instructions: combineInstructions(context.getSystemPrompt(), event.customInstructions),
+        instructions: compactionInstructions(
+          branchEntries,
+          model,
+          event.customInstructions,
+          context.getSystemPrompt(),
+        ),
       };
     } catch (error) {
       if (!event.signal.aborted) {

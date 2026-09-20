@@ -34,9 +34,9 @@
     "test": "npm run typecheck && npm run test:offline"
   },
   "devDependencies": {
-    "@earendil-works/pi-agent-core": "^0.85.1",
-    "@earendil-works/pi-ai": "^0.85.1",
-    "@earendil-works/pi-coding-agent": "^0.85.1",
+    "@earendil-works/pi-agent-core": "^0.86.0",
+    "@earendil-works/pi-ai": "^0.86.0",
+    "@earendil-works/pi-coding-agent": "^0.86.0",
     "@types/node": "^26.3.0",
     "typescript": "^7.0.2"
   },
