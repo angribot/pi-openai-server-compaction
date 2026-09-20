@@ -281,17 +281,30 @@ function deriveReplayContinuity(
   return { invalidated: false };
 }
 
+function latestCompactionIndex(branch: readonly BranchEntry[]): number {
+  for (let index = branch.length - 1; index >= 0; index--) {
+    if (branch[index]?.type === "compaction") return index;
+  }
+  return -1;
+}
+
+/**
+ * Whether the active branch's latest compaction is a Remote compaction
+ * checkpoint. This deliberately ignores checkpoint decode, continuity, and
+ * model eligibility: any latest Remote checkpoint owns context that Native
+ * replay reconstructs, including broken, invalidated, incompatible, and
+ * recognized legacy records.
+ */
+export function hasActiveRemoteCompactionCheckpoint(branch: readonly BranchEntry[]): boolean {
+  const index = latestCompactionIndex(branch);
+  return index >= 0 && branch[index]?.summary === REMOTE_COMPACTION_CHECKPOINT_MARKER;
+}
+
 function deriveActiveReplayState(
   branch: readonly BranchEntry[],
   resolver: CompactionCompatibilityResolver,
 ): ActiveReplayState {
-  let latestIndex = -1;
-  for (let index = branch.length - 1; index >= 0; index--) {
-    if (branch[index]?.type === "compaction") {
-      latestIndex = index;
-      break;
-    }
-  }
+  const latestIndex = latestCompactionIndex(branch);
   if (latestIndex < 0) return { kind: "none" };
 
   const entry = branch[latestIndex];

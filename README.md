@@ -62,9 +62,11 @@ If a checkpoint is broken or cannot be safely replayed, the extension stops the 
 
 Only `nativeReplayCheckpoint` records with format `native-replay-checkpoint/1` are supported. Earlier records in that format, including those written before Pi persisted a `systemMessage` snapshot, remain readable and replayable. Legacy `remoteCompaction` records, including those written by v0.8.0 and earlier, have no migration path. Start a new session or return to a branch point before the old checkpoint.
 
-### Pi 0.86 support is partial until cache warming is safeguarded
+### Active checkpoints pause prompt-cache warming
 
-This release restores Remote compaction and Native replay for Pi 0.86's persisted transcript model, but it deliberately does not yet guard Pi's optional prompt-cache warming refreshes. A warming refresh re-runs the provider-request hook with its own abort controller, so the extension's fail-closed replay path cannot reliably stop a protected refresh. Treat Pi 0.86 compatibility as incomplete until the dependent cache-warming safeguard ships.
+Pi 0.86 can refresh a prompt cache during long runs. A warming refresh re-runs the provider-request hook with its own abort controller, so the extension cannot rely on its fail-closed replay path to stop it. While the active branch's latest compaction is a Remote compaction checkpoint, the extension stops those refreshes before dispatch through Pi's `cache_warming_decision` hook, including broken, invalidated, incompatible, and legacy checkpoints. This keeps a protected refresh from bypassing fail-closed replay or disturbing the concurrent run.
+
+When the branch has no such checkpoint, Pi's decision is left unchanged: ordinary prompt caching, warming, and unrelated branches keep working. The trade-off is that an active Remote compaction checkpoint temporarily forgoes proactive prompt-cache refreshes until the next ordinary request. The hook stops a refresh before dispatch only; it does not cancel a refresh already in flight or provide general request-specific cancellation.
 
 ## Troubleshooting
 
@@ -96,7 +98,7 @@ Run type checking and offline tests (no credentials or network needed):
 npm test
 ```
 
-`npm test` covers the extension loader and the one-attempt transport adapters, not end-to-end compaction or replay continuity. See [testing coverage](docs/reference.md#testing).
+`npm test` covers the extension loader, the cache-warming guard through Pi's real warmer decision/dispatch path, and the transport/projection contracts, but not credentialed end-to-end compaction or replay continuity. See [testing coverage](docs/reference.md#testing).
 
 - [Technical reference](docs/reference.md): protocol, checkpoint format, replay, retries, transport limitations, and repository layout.
 - [Domain glossary](CONTEXT.md) and [architecture decisions](docs/adr/).

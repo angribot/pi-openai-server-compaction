@@ -2,6 +2,7 @@ import type { Usage } from "@earendil-works/pi-ai";
 import { type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import {
   compactionInstructions,
+  hasActiveRemoteCompactionCheckpoint,
   prepareCompactionReplay,
   prepareNativeReplay,
   remoteCompactionOperationKind,
@@ -221,6 +222,19 @@ export function installRemoteCompaction(
     }
 
     return { cancel: true };
+  });
+
+  pi.on("cache_warming_decision", (_event, context) => {
+    // A Remote compaction checkpoint owns context that Native replay must
+    // reconstruct. Pi's warmer re-runs before_provider_request during a refresh
+    // with its own abort controller, so the replay hook's fail-closed abort
+    // cannot stop that refresh. Stop it here, before provider dispatch, instead.
+    //
+    // Protection is deliberately independent of model eligibility: it follows
+    // the active branch, so a malformed, invalidated, incompatible, or legacy
+    // checkpoint is protected too, and no replay or warming state is cached.
+    const branch = context.sessionManager.getBranch();
+    return hasActiveRemoteCompactionCheckpoint(branch) ? { action: "stop" } : undefined;
   });
 
   pi.on("before_provider_request", (event, context) => {
