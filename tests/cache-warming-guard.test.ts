@@ -131,7 +131,7 @@ function userEntry(id: string): BranchEntry {
   };
 }
 
-function assistantEntry(id: string, modelId = "gpt-5.4"): BranchEntry {
+function assistantEntry(id: string, promptTokens = 1_000_000, modelId = "gpt-5.4"): BranchEntry {
   return {
     type: "message",
     id,
@@ -143,11 +143,11 @@ function assistantEntry(id: string, modelId = "gpt-5.4"): BranchEntry {
       provider: "example-provider",
       model: modelId,
       usage: {
-        input: 1_000_000,
+        input: promptTokens,
         output: 0,
         cacheRead: 0,
         cacheWrite: 0,
-        totalTokens: 1_000_000,
+        totalTokens: promptTokens,
         cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
       },
       stopReason: "stop",
@@ -195,63 +195,48 @@ const LEGACY_DETAILS = {
   },
 };
 
+function checkpointBranch(
+  details: unknown = nativeDetails(),
+  suffix: BranchEntry[] = [assistantEntry("a1")],
+): BranchEntry[] {
+  return [
+    userEntry("u1"),
+    ...suffix,
+    compactionEntry("c1", REMOTE_COMPACTION_CHECKPOINT_MARKER, details),
+  ];
+}
+
 test("every active Remote compaction checkpoint state stops warming regardless of host decision", async () => {
   const harness = await loadHarness();
   const ordinary = compactionEntry("c9", "portable summary", {});
-  const checkpoint = compactionEntry("c1", REMOTE_COMPACTION_CHECKPOINT_MARKER, nativeDetails());
+  const checkpoint = checkpointBranch();
 
   const cases: Array<[string, BranchEntry[], boolean]> = [
-    ["native checkpoint", [userEntry("u1"), checkpoint], true],
+    ["native checkpoint", checkpoint, true],
     [
       "native checkpoint with a null compatibility class",
-      [
-        userEntry("u1"),
-        compactionEntry(
-          "c1",
-          REMOTE_COMPACTION_CHECKPOINT_MARKER,
-          nativeDetails({ compatibilityClass: null }),
-        ),
-      ],
+      checkpointBranch(nativeDetails({ compatibilityClass: null })),
       true,
     ],
     [
       "checkpoint produced by a different model key",
-      [
-        userEntry("u1"),
-        compactionEntry(
-          "c1",
-          REMOTE_COMPACTION_CHECKPOINT_MARKER,
-          nativeDetails({ modelId: "gpt-other" }),
-        ),
-      ],
+      checkpointBranch(nativeDetails({ modelId: "gpt-other" })),
       true,
     ],
     [
       "checkpoint invalidated by a successful incompatible turn",
-      [userEntry("u1"), checkpoint, assistantEntry("a1", "gpt-other")],
+      [...checkpoint, assistantEntry("a2", 1_000_000, "gpt-other")],
       true,
     ],
-    [
-      "malformed checkpoint details",
-      [userEntry("u1"), compactionEntry("c1", REMOTE_COMPACTION_CHECKPOINT_MARKER, {})],
-      true,
-    ],
+    ["malformed checkpoint details", checkpointBranch({}), true],
     [
       "checkpoint without details",
       [userEntry("u1"), compactionEntry("c1", REMOTE_COMPACTION_CHECKPOINT_MARKER)],
       true,
     ],
-    [
-      "legacy remoteCompaction checkpoint",
-      [userEntry("u1"), compactionEntry("c1", REMOTE_COMPACTION_CHECKPOINT_MARKER, LEGACY_DETAILS)],
-      true,
-    ],
+    ["legacy remoteCompaction checkpoint", checkpointBranch(LEGACY_DETAILS), true],
     ["ordinary compaction", [userEntry("u1"), ordinary], false],
-    [
-      "checkpoint superseded by later ordinary compaction",
-      [userEntry("u1"), checkpoint, ordinary],
-      false,
-    ],
+    ["checkpoint superseded by later ordinary compaction", [...checkpoint, ordinary], false],
     ["no compaction", [userEntry("u1"), assistantEntry("a1")], false],
     ["empty branch", [], false],
   ];
@@ -273,74 +258,27 @@ test("every active Remote compaction checkpoint state stops warming regardless o
 
 test("each decision follows the current branch without stale suppression", async () => {
   const harness = await loadHarness();
-  const checkpointBranch = [
-    userEntry("u1"),
-    compactionEntry("c1", REMOTE_COMPACTION_CHECKPOINT_MARKER, nativeDetails()),
-  ];
-  const supersededBranch = [...checkpointBranch, compactionEntry("c2", "portable summary", {})];
+  const checkpoint = checkpointBranch();
+  const superseded = [...checkpoint, compactionEntry("c2", "portable summary", {})];
 
-  harness.session.branch = checkpointBranch;
+  harness.session.branch = checkpoint;
   assert.equal(await decide(harness, "warm"), "stop");
 
-  harness.session.branch = supersededBranch;
+  harness.session.branch = superseded;
   assert.equal(await decide(harness, "warm"), "warm", "ordinary compaction lifts protection");
 
   harness.session.branch = [];
   assert.equal(await decide(harness, "warm"), "warm", "branch navigation lifts protection");
 
-  harness.session.branch = checkpointBranch;
+  harness.session.branch = checkpoint;
   assert.equal(await decide(harness, "warm"), "stop", "a restored checkpoint protects again");
 });
 
-test("Pi 0.86's real CacheWarmer stops a protected refresh before provider dispatch", async () => {
+test("Pi 0.86's real CacheWarmer stops before transport and leaves its own decisions unchanged", async () => {
   const harness = await loadHarness();
   const { CacheWarmer } = (await import(cacheWarmerUrl.href)) as {
     CacheWarmer: CacheWarmerConstructor;
   };
-
-  const protectedBranches: Array<[string, BranchEntry[]]> = [
-    [
-      "valid checkpoint",
-      [
-        userEntry("u1"),
-        assistantEntry("a1"),
-        compactionEntry("c1", REMOTE_COMPACTION_CHECKPOINT_MARKER, nativeDetails()),
-      ],
-    ],
-    [
-      "malformed checkpoint",
-      [
-        userEntry("u1"),
-        assistantEntry("a1"),
-        compactionEntry("c1", REMOTE_COMPACTION_CHECKPOINT_MARKER, {}),
-      ],
-    ],
-    [
-      "incompatible checkpoint",
-      [
-        userEntry("u1"),
-        assistantEntry("a1"),
-        compactionEntry(
-          "c1",
-          REMOTE_COMPACTION_CHECKPOINT_MARKER,
-          nativeDetails({ modelId: "gpt-other" }),
-        ),
-      ],
-    ],
-    [
-      "invalidated checkpoint",
-      [
-        userEntry("u1"),
-        assistantEntry("a1"),
-        compactionEntry("c1", REMOTE_COMPACTION_CHECKPOINT_MARKER, nativeDetails()),
-        assistantEntry("a2", "gpt-other"),
-      ],
-    ],
-  ];
-  // Prompt usage gives Pi's own decision a positive expected saving (warm);
-  // without a successful assistant turn Pi decides to stop on its own.
-  const warmableBranch = [userEntry("u1"), assistantEntry("a1")];
-  const coldBranch = [userEntry("u1")];
 
   const warmedMessage = {
     role: "assistant",
@@ -364,6 +302,7 @@ test("Pi 0.86's real CacheWarmer stops a protected refresh before provider dispa
     harness.session.branch = branch;
     const abortsBefore = harness.aborts();
     let streamSimpleCalls = 0;
+    let decisions = 0;
     const warmer = new CacheWarmer(
       {
         streamSimple() {
@@ -373,17 +312,25 @@ test("Pi 0.86's real CacheWarmer stops a protected refresh before provider dispa
       },
       harness.session,
       () => "streaming",
-      (event) => harness.runner.emitCacheWarmingDecision(event),
+      (event) => {
+        decisions++;
+        return harness.runner.emitCacheWarmingDecision(event);
+      },
     );
     warmer.start({ model: warmingModel(), context: {}, options: {} }, () => true);
 
+    // A run may stop before dispatch once its decision runs (protected
+    // checkpoint) or its expected savings are too low. Wait for either the
+    // transport or an observed, settled decision rather than the status getter,
+    // which reports "inactive" for an unevaluated cold run.
     const deadline = Date.now() + 2_000;
-    while (warmer.status.state !== "inactive" && streamSimpleCalls === 0) {
-      if (Date.now() > deadline) throw new Error("cache warmer did not settle");
+    while (Date.now() < deadline && streamSimpleCalls === 0) {
+      if (decisions > 0 && warmer.status.state === "inactive") break;
       await new Promise((resolve) => setTimeout(resolve, 5));
     }
     const outcome = {
       streamSimpleCalls,
+      decisions,
       aborts: harness.aborts() - abortsBefore,
       status: warmer.status,
     };
@@ -391,22 +338,31 @@ test("Pi 0.86's real CacheWarmer stops a protected refresh before provider dispa
     return outcome;
   }
 
-  for (const [name, branch] of protectedBranches) {
-    const outcome = await runWarmer(branch);
-    assert.equal(outcome.streamSimpleCalls, 0, `${name}: must not reach transport`);
-    assert.equal(outcome.aborts, 0, `${name}: must not abort the main run`);
-    assert.equal(outcome.status.state, "inactive", name);
-    assert.equal(outcome.status.extensionOverride, true, `${name}: the guard stopped the refresh`);
-  }
+  const protectedRun = await runWarmer([
+    userEntry("u1"),
+    assistantEntry("a1"),
+    compactionEntry("c1", REMOTE_COMPACTION_CHECKPOINT_MARKER, nativeDetails()),
+  ]);
+  assert.ok(protectedRun.decisions >= 1, "the protected decision must run");
+  assert.equal(protectedRun.streamSimpleCalls, 0, "the protected refresh must not reach transport");
+  assert.equal(protectedRun.aborts, 0, "the protected refresh must not abort the main run");
+  assert.equal(protectedRun.status.state, "inactive");
+  assert.equal(protectedRun.status.extensionOverride, true, "the guard stopped the refresh");
 
-  const warmRun = await runWarmer(warmableBranch);
+  const warmRun = await runWarmer([userEntry("u1"), assistantEntry("a1")]);
+  assert.ok(warmRun.decisions >= 1, "the ordinary decision must run");
   assert.equal(warmRun.streamSimpleCalls, 1, "ordinary warming still reaches the provider");
   assert.equal(warmRun.aborts, 0);
 
-  const coldRun = await runWarmer(coldBranch);
-  assert.equal(coldRun.streamSimpleCalls, 0, "Pi's own stop is left unchanged");
-  assert.equal(coldRun.status.extensionOverride, undefined);
-  assert.equal(coldRun.aborts, 0);
+  // A successful turn with tiny prompt usage makes Pi's own economics decide
+  // "stop"; the extension must leave that decision unchanged and still not
+  // abort the main run.
+  const hostStopRun = await runWarmer([userEntry("u1"), assistantEntry("a1", 1)]);
+  assert.ok(hostStopRun.decisions >= 1, "the host-stop decision must run");
+  assert.equal(hostStopRun.streamSimpleCalls, 0, "Pi's own stop must not reach transport");
+  assert.equal(hostStopRun.status.state, "inactive");
+  assert.equal(hostStopRun.status.extensionOverride, false, "no extension override was applied");
+  assert.equal(hostStopRun.aborts, 0);
 });
 
 function warmingModel(): Model<any> {
