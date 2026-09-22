@@ -209,6 +209,8 @@ test("a catalogued class invokes the attempt and persists the resolved producer 
   const cases: Array<[Model<any>, string]> = [
     [model({ id: "gpt-5.4" }), "2911"],
     [model({ provider: "openai-codex", api: "openai-codex-responses", id: "gpt-5.6-sol" }), "3000"],
+    [model({ id: "gpt-6-sol" }), "3000"],
+    [model({ provider: "openai-codex", api: "openai-codex-responses", id: "gpt-6-luna" }), "3000"],
   ];
 
   for (const [selected, expectedClass] of cases) {
