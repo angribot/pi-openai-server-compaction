@@ -120,7 +120,7 @@ function replaceImagesWithPlaceholder(
   return result;
 }
 
-// Mirrors Pi 0.86 `transformMessages` (`openai-responses-shared` reuses it):
+// Mirrors Pi 0.87 `transformMessages` (`openai-responses-shared` reuses it):
 // null-content normalization, image downgrade, foreign thinking/tool
 // normalization, and synthetic missing tool results. System messages that land
 // between a tool call and its results are held back until after those results.
@@ -301,7 +301,7 @@ function toolResultOutput(
   return output;
 }
 
-// Mirrors Pi 0.86 `convertResponsesMessages` for the tool-free Remote compaction
+// Mirrors Pi 0.87 `convertResponsesMessages` for the tool-free Remote compaction
 // subset: message/function-call items, Pi fallback IDs and phases, foreign
 // item-id normalization, function-call outputs, and API-specific leading-system
 // placement. It intentionally never emits tool declarations.

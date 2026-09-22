@@ -8,7 +8,7 @@ The endpoint returns an opaque compaction item. This extension saves it with you
 
 ## Quick start
 
-You need Node **22 or newer**, Pi (**0.86.0** is the implementation and validation baseline), and working Pi-managed credentials for an eligible model. The endpoint must support the compaction protocol described below.
+You need Node **22 or newer**, Pi (**0.87.0** is the implementation and validation baseline), and working Pi-managed credentials for an eligible model. The endpoint must support the compaction protocol described below.
 
 Install in your project:
 
@@ -64,7 +64,7 @@ Only `nativeReplayCheckpoint` records with format `native-replay-checkpoint/1` a
 
 ### Active checkpoints pause prompt-cache warming
 
-Pi 0.86 can refresh a prompt cache during long runs. A warming refresh re-runs the provider-request hook with its own abort controller, so the extension cannot rely on its fail-closed replay path to stop it. While the active branch's latest compaction is a Remote compaction checkpoint, the extension stops those refreshes before dispatch through Pi's `cache_warming_decision` hook, including broken, invalidated, incompatible, and legacy checkpoints. This keeps a protected refresh from bypassing fail-closed replay or disturbing the concurrent run.
+Pi 0.87 can refresh a prompt cache during long runs. A warming refresh re-runs the provider-request hook with its own abort controller, so the extension cannot rely on its fail-closed replay path to stop it. While the active branch's latest compaction is a Remote compaction checkpoint, the extension stops those refreshes before dispatch through Pi's `cache_warming_decision` hook, including broken, invalidated, incompatible, and legacy checkpoints. This keeps a protected refresh from bypassing fail-closed replay or disturbing the concurrent run.
 
 When the branch has no such checkpoint, Pi's decision is left unchanged: ordinary prompt caching, warming, and unrelated branches keep working. The trade-off is that proactive prompt-cache refreshes stay paused while a Remote compaction checkpoint is the active branch's latest compaction. Pi may schedule another refresh, but the guard re-evaluates the branch and stops each protected refresh until the checkpoint is superseded. The hook stops a refresh before dispatch only; it does not cancel a refresh already in flight or provide general request-specific cancellation.
 
