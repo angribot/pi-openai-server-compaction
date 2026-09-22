@@ -24,7 +24,7 @@ import {
 } from "../src/native-replay.ts";
 
 // ---------------------------------------------------------------------------
-// Pi 0.86 public-behavior oracle
+// Pi 0.87 public-behavior oracle
 //
 // These helpers drive Pi's real Responses providers with a mocked fetch. The
 // captured body is what Pi would send on the wire, so projection and replay

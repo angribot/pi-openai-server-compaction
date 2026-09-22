@@ -22,7 +22,7 @@ import {
 
 const repoRoot = fileURLToPath(new URL("..", import.meta.url));
 
-// Pi 0.86 does not export the warmer from its package root; load the real
+// Pi 0.87 does not export the warmer from its package root; load the real
 // module instance used by the host so the timer, decision, and dispatch path
 // under test are Pi's, not a re-implementation.
 const cacheWarmerUrl = new URL(
@@ -274,7 +274,7 @@ test("each decision follows the current branch without stale suppression", async
   assert.equal(await decide(harness, "warm"), "stop", "a restored checkpoint protects again");
 });
 
-test("Pi 0.86's real CacheWarmer stops before transport and leaves its own decisions unchanged", async () => {
+test("Pi 0.87's real CacheWarmer stops before transport and leaves its own decisions unchanged", async () => {
   const harness = await loadHarness();
   const { CacheWarmer } = (await import(cacheWarmerUrl.href)) as {
     CacheWarmer: CacheWarmerConstructor;

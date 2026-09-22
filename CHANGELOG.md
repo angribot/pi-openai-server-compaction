@@ -4,6 +4,8 @@ This changelog intentionally starts at **0.1.0**.
 
 ## Unreleased
 
+- upgrade the development and documentation baseline from Pi 0.86.0 to Pi 0.87.0 and validate against 0.87 as the implementation baseline rather than a guarantee about every later patch
+
 ## 0.12.0 - 2026-09-20
 
 - upgrade the development and documentation baseline from Pi 0.85.1 to Pi 0.86.0 and validate against 0.86 as the implementation baseline rather than a guarantee about every later patch
