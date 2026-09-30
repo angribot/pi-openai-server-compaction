@@ -6,6 +6,7 @@ import {
   prepareCompactionReplay,
   prepareNativeReplay,
   REMOTE_COMPACTION_CHECKPOINT_MARKER,
+  resolveCodexCompactionCompatibilityClass,
   type BranchEntry,
   type NativeReplayCheckpointDetails,
 } from "../src/native-replay.ts";
@@ -123,6 +124,64 @@ function checkpointDetails(
     },
   };
 }
+
+test("gpt-6.1-sol compacts and replays existing 3000 checkpoints across supported APIs", () => {
+  assert.equal(resolveCodexCompactionCompatibilityClass("gpt-6.1-sol"), "3000");
+  assert.equal(resolveCodexCompactionCompatibilityClass("gpt-5.4"), "2911");
+  assert.equal(resolveCodexCompactionCompatibilityClass("gpt-5.4-mini"), "2911");
+  assert.equal(resolveCodexCompactionCompatibilityClass("gpt-unknown"), undefined);
+
+  const snapshot: SystemMessage = { role: "system", content: "BASE PROMPT", timestamp: 1 };
+  const branch: BranchEntry[] = [
+    userEntry("e1", "retained"),
+    checkpointEntry(
+      "e2",
+      "e1",
+      "e1",
+      checkpointDetails(
+        {
+          provider: "openai-codex",
+          api: "openai-codex-responses",
+          id: "gpt-6-sol",
+        },
+        "3000",
+      ),
+      snapshot,
+    ),
+    userEntry("e3", "after checkpoint"),
+  ];
+
+  for (const target of [
+    model({ provider: "openai", api: "openai-responses", id: "gpt-6.1-sol" }),
+    model({ provider: "openai-codex", api: "openai-codex-responses", id: "gpt-6.1-sol" }),
+  ]) {
+    const fresh = prepareCompactionReplay(
+      [userEntry("fresh", "hello")],
+      target,
+      resolveCodexCompactionCompatibilityClass,
+    );
+    assert.equal(fresh.kind, "ready");
+    if (fresh.kind !== "ready") continue;
+    assert.equal(
+      fresh.createCheckpointDetails(COMPACTION_ITEM).nativeReplayCheckpoint.producer
+        .compactionCompatibilityClass,
+      "3000",
+    );
+    const repeated = prepareCompactionReplay(
+      branch,
+      target,
+      resolveCodexCompactionCompatibilityClass,
+    );
+    assert.equal(repeated.kind, "ready");
+    if (repeated.kind === "ready") {
+      assert.equal(repeated.buildInput()[0], COMPACTION_ITEM);
+    }
+    assert.equal(
+      prepareNativeReplay(branch, target, resolveCodexCompactionCompatibilityClass).kind,
+      "compatible",
+    );
+  }
+});
 
 test("repeated compaction sends replacement history plus the post-checkpoint suffix", () => {
   const snapshot: SystemMessage = { role: "system", content: "BASE PROMPT", timestamp: 1 };

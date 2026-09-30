@@ -29,7 +29,8 @@ export type CompactionCompatibilityResolver = (modelId: string) => string | unde
 export const NATIVE_REPLAY_CHECKPOINT_FORMAT = "native-replay-checkpoint/1";
 
 const CODEX_COMPACTION_COMPATIBILITY_CLASSES: Readonly<Record<string, string>> = Object.freeze({
-  // OpenAI Codex catalog at 49e95cc.
+  // OpenAI Codex catalog at 2cc65cdd4c7c167f0c7252fcb5165d649c16aca0.
+  // Retain retired gpt-5.4 / gpt-5.4-mini classes from catalog 8e694e955.
   "gpt-5.4": "2911",
   "gpt-5.4-mini": "2911",
   "gpt-5.5": "2911",
@@ -39,6 +40,7 @@ const CODEX_COMPACTION_COMPATIBILITY_CLASSES: Readonly<Record<string, string>> =
   "gpt-6-astra": "3000",
   "gpt-6-sol": "3000",
   "gpt-6-luna": "3000",
+  "gpt-6.1-sol": "3000",
   "gpt-daybreak-blue-latest": "3000",
   "gpt-daybreak-red-latest": "3000",
   "codex-auto-review": "3000",
