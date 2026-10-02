@@ -4,6 +4,8 @@ This changelog intentionally starts at **0.1.0**.
 
 ## Unreleased
 
+## 0.13.1 - 2026-10-02
+
 - fix Remote compaction preparation on Pi 1.0.0 by importing transcript conversion from Pi's coding-agent public API instead of the removed agent-core export
 
 ## 0.13.0 - 2026-09-30
