@@ -1,4 +1,5 @@
-import { convertToLlm, type AgentMessage } from "@earendil-works/pi-agent-core";
+import type { AgentMessage } from "@earendil-works/pi-agent-core";
+import { convertToLlm } from "@earendil-works/pi-coding-agent";
 import {
   getSystemMessageText,
   normalizeContext,

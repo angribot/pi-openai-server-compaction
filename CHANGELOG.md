@@ -4,6 +4,8 @@ This changelog intentionally starts at **0.1.0**.
 
 ## Unreleased
 
+- fix Remote compaction preparation on Pi 1.0.0 by importing transcript conversion from Pi's coding-agent public API instead of the removed agent-core export
+
 ## 0.13.0 - 2026-09-30
 
 - recognize Pi's new `gpt-6.1-sol`, `gpt-6-sol`, and `gpt-6-luna` models as Codex `3000` compaction-compatible models for Remote compaction and Native replay
