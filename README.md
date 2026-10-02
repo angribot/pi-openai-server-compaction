@@ -100,10 +100,10 @@ Run type checking and offline tests (no credentials or network needed):
 npm test
 ```
 
-`npm test` covers the extension loader, the cache-warming guard through Pi's real warmer decision/dispatch path, and the transport/projection contracts, but not credentialed end-to-end compaction or replay continuity. See [testing coverage](docs/reference.md#testing).
+`npm test` covers the extension loader, the cache-warming guard through Pi's real warmer decision/dispatch path, and the transport/projection contracts, but not credentialed end-to-end compaction or replay continuity. The retry loop and end-to-end continuity have no offline coverage, so a change to retry classification or replay reconstruction is not caught by the suite. See [testing coverage](docs/reference.md#testing) and the [test ownership rule](docs/reference.md#test-ownership).
 
 - [Technical reference](docs/reference.md): protocol, checkpoint format, replay, retries, transport limitations, and repository layout.
-- [Domain glossary](CONTEXT.md) and [architecture decisions](docs/adr/).
+- [Domain glossary](GLOSSARY.md) and [architecture decisions](docs/adr/).
 - [Changelog](CHANGELOG.md).
 
 Other extensions' request mutations are outside the supported contract; see the [transport and projection limitations](docs/reference.md#transport-boundary-and-limitations) before composing extensions.

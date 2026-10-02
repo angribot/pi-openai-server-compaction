@@ -141,6 +141,20 @@ Architecture decisions:
 - [ADR 0005: Use creation-time compatibility classes for Native replay](https://github.com/angribot/pi-openai-server-compaction/blob/main/docs/adr/0005-use-creation-time-compatibility-classes.md)
 - [ADR 0006: Re-derive Native replay compatibility from persisted turns](https://github.com/angribot/pi-openai-server-compaction/blob/main/docs/adr/0006-re-derive-replay-compatibility-from-turns.md)
 
+## Test ownership
+
+Tests committed to this repository must be necessary to cover this extension's own core contract.
+
+Do not commit:
+
+- cross-extension loading matrices;
+- provider allowlist fixtures from a transport extension;
+- HTTP-versus-WebSocket composition matrices;
+- machine-specific provider names or settings;
+- temporary live probes.
+
+Cross-extension composition stays an external, ephemeral validation. A defect found there is reduced to the owning project's interface before it can become a test here.
+
 ## Testing
 
 The offline suite uses Node's built-in test runner and requires no credentials or network:
@@ -183,7 +197,7 @@ Coverage remains deliberately reduced: the hook retry orchestration suite and th
 | `src/direct-responses-operation.ts` | one-attempt direct HTTP/SSE capability-gap adapter                              |
 | `src/codex-responses-operation.ts`  | one-attempt Pi-mediated Codex SSE capture adapter                               |
 | `tests/`                            | six offline contract files                                                      |
-| `CONTEXT.md`                        | canonical Remote compaction domain language                                     |
+| `GLOSSARY.md`                       | canonical Remote compaction domain language                                     |
 | `docs/adr/`                         | durable architecture decisions                                                  |
 | `CHANGELOG.md`                      | release history and pending user-visible changes                                |
 
