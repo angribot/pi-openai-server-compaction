@@ -17,7 +17,7 @@ The standalone `/responses/compact` protocol whose response supplies the next co
 _Avoid_: Remote compaction v2
 
 **Eligible model**:
-A model permitted to attempt Remote compaction v2 that has a known Compaction compatibility class and uses either the `openai-responses` API contract or Pi's built-in `openai-codex` provider with the `openai-codex-responses` API contract. Eligibility guarantees neither endpoint capability nor compatibility with an existing compaction item.
+A model with a valid nonempty provider identity, exact `openai-responses` or `openai-codex-responses` API, and a request model ID beginning with literal lowercase `gpt-`. Model eligibility is provider-independent and does not prove endpoint capability; an operation-specific authentication restriction can still exclude Remote compaction without excluding Native replay.
 _Avoid_: Supported provider, compatible model, v2-capable endpoint
 
 **Remote compaction capability**:
@@ -25,7 +25,7 @@ The selected endpoint's runtime ability to accept a Remote compaction v2 request
 _Avoid_: Eligible model, compatible model
 
 **Compatible model**:
-A model that can replay a checkpoint under the Responses API contracts supported by Native replay, based on equality with the producer's creation-time Compaction compatibility class or exact Model key equality when either class is unavailable. Replay compatibility is distinct from eligibility to attempt Remote compaction and may cross model IDs and Pi providers.
+An eligible target locally permitted to attempt Native replay of an eligible producer's checkpoint, subject to checkpoint integrity and branch continuity. This optimistic permission is not proof of backend interoperability across models or endpoints.
 _Avoid_: Eligible model, supported model
 
 **Compaction item**:
@@ -53,15 +53,15 @@ The unique contiguous portion of an ordinary request's final Responses input tha
 _Avoid_: Checkpoint history, Historical replay span, Checkpoint region, Pre-compaction span (when referring to this exact provider-input region)
 
 **Compaction compatibility class**:
-An opaque provider-resolved identifier grouping model configurations that can share compaction history; OpenAI Codex calls this `comp_hash`. It is distinct from Model key, provider routing identity, and ordinary Responses item metadata compatibility.
+An upstream opaque identifier grouping compaction-compatible model configurations, called `comp_hash` by OpenAI Codex. In this project it is historical checkpoint metadata, not a local replay permission boundary.
 _Avoid_: Model family, model hash, Model key
 
 **Model key**:
-The provider, API type, and model ID considered together as this project's conservative Native replay compatibility boundary when either Compaction compatibility class is unavailable. Request-specific credentials and resolved endpoints are not part of this boundary.
+The provider, API type, and request model ID together identifying a checkpoint's producer. It is persisted identity, not a cross-model replay boundary; credentials and resolved endpoints remain routing data.
 _Avoid_: Model ID, provider name, Compaction compatibility class
 
 **Native replay checkpoint record**:
-The durable local record that binds replacement history to its producer's Model key and creation-time Compaction compatibility class. It is distinct from the Remote compaction v2 wire protocol.
+The durable local record binding replacement history to its producer's Model key and historical compatibility-class metadata. It is distinct from the Remote compaction v2 wire protocol.
 _Avoid_: Remote compaction version, v3 details, checkpoint summary
 
 **Ordinary request**:

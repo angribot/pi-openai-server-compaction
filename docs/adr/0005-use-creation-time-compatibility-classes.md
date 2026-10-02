@@ -1,5 +1,5 @@
 ---
-status: accepted; request-time decision records superseded by ADR-0006
+status: superseded by ADR-0007; request-time decision records previously superseded by ADR-0006
 ---
 
 # Use creation-time compatibility classes for Native replay

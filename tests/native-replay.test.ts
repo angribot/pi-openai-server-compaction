@@ -6,7 +6,6 @@ import {
   prepareCompactionReplay,
   prepareNativeReplay,
   REMOTE_COMPACTION_CHECKPOINT_MARKER,
-  resolveCodexCompactionCompatibilityClass,
   type BranchEntry,
   type NativeReplayCheckpointDetails,
 } from "../src/native-replay.ts";
@@ -126,11 +125,6 @@ function checkpointDetails(
 }
 
 test("gpt-6.1-sol compacts and replays existing 3000 checkpoints across supported APIs", () => {
-  assert.equal(resolveCodexCompactionCompatibilityClass("gpt-6.1-sol"), "3000");
-  assert.equal(resolveCodexCompactionCompatibilityClass("gpt-5.4"), "2911");
-  assert.equal(resolveCodexCompactionCompatibilityClass("gpt-5.4-mini"), "2911");
-  assert.equal(resolveCodexCompactionCompatibilityClass("gpt-unknown"), undefined);
-
   const snapshot: SystemMessage = { role: "system", content: "BASE PROMPT", timestamp: 1 };
   const branch: BranchEntry[] = [
     userEntry("e1", "retained"),
@@ -158,28 +152,20 @@ test("gpt-6.1-sol compacts and replays existing 3000 checkpoints across supporte
     const fresh = prepareCompactionReplay(
       [userEntry("fresh", "hello")],
       target,
-      resolveCodexCompactionCompatibilityClass,
     );
     assert.equal(fresh.kind, "ready");
     if (fresh.kind !== "ready") continue;
     assert.equal(
       fresh.createCheckpointDetails(COMPACTION_ITEM).nativeReplayCheckpoint.producer
         .compactionCompatibilityClass,
-      "3000",
+      null,
     );
-    const repeated = prepareCompactionReplay(
-      branch,
-      target,
-      resolveCodexCompactionCompatibilityClass,
-    );
+    const repeated = prepareCompactionReplay(branch, target);
     assert.equal(repeated.kind, "ready");
     if (repeated.kind === "ready") {
       assert.equal(repeated.buildInput()[0], COMPACTION_ITEM);
     }
-    assert.equal(
-      prepareNativeReplay(branch, target, resolveCodexCompactionCompatibilityClass).kind,
-      "compatible",
-    );
+    assert.equal(prepareNativeReplay(branch, target).kind, "compatible");
   }
 });
 
@@ -191,7 +177,7 @@ test("repeated compaction sends replacement history plus the post-checkpoint suf
     userEntry("e3", "after checkpoint"),
   ];
 
-  const preparation = prepareCompactionReplay(branch, model(), () => "2911");
+  const preparation = prepareCompactionReplay(branch, model());
   assert.equal(preparation.kind, "ready");
   if (preparation.kind !== "ready") return;
 
@@ -208,7 +194,7 @@ test("repeated compaction sends replacement history plus the post-checkpoint suf
         format: "native-replay-checkpoint/1",
         producer: {
           modelKey: { provider: "example-provider", api: "openai-responses", id: "gpt-test" },
-          compactionCompatibilityClass: "2911",
+          compactionCompatibilityClass: null,
         },
         replacementHistory: [{ type: "compaction", encrypted_content: "new-item" }],
       },
@@ -224,12 +210,12 @@ test("a snapshot-less checkpoint stays readable for replay but cannot compact ag
   ];
 
   assert.deepEqual(
-    prepareCompactionReplay(branch, model(), () => "2911"),
+    prepareCompactionReplay(branch, model()),
     {
       kind: "snapshot-unavailable",
     },
   );
-  assert.equal(prepareNativeReplay(branch, model(), () => undefined).kind, "compatible");
+  assert.equal(prepareNativeReplay(branch, model()).kind, "compatible");
 });
 
 test("native replay replaces only the replay replacement span and preserves surrounding items", () => {
@@ -253,7 +239,7 @@ test("native replay replaces only the replay replacement span and preserves surr
     messages: [{ role: "user", content: "legacy" }],
   };
 
-  const preparation = prepareNativeReplay(branch, model(), () => undefined);
+  const preparation = prepareNativeReplay(branch, model());
   assert.equal(preparation.kind, "compatible");
   if (preparation.kind !== "compatible") return;
 
@@ -276,7 +262,7 @@ test("native replay fails when the replay replacement span is missing or ambiguo
     checkpointEntry("e2", "e1", "e1", checkpointDetails()),
     userEntry("e3", "after checkpoint"),
   ];
-  const preparation = prepareNativeReplay(branch, model(), () => undefined);
+  const preparation = prepareNativeReplay(branch, model());
   assert.equal(preparation.kind, "compatible");
   if (preparation.kind !== "compatible") return;
 
@@ -302,7 +288,6 @@ test("native replay fails when the replay replacement span is missing or ambiguo
       userEntry("u3", "after checkpoint"),
     ],
     model(),
-    () => undefined,
   );
   assert.equal(unavailable.kind, "compatible");
   if (unavailable.kind !== "compatible") return;
@@ -317,32 +302,41 @@ test("a successful incompatible assistant turn invalidates while error and abort
   ];
 
   const incompatible = prepareNativeReplay(
-    withSuffix([assistantEntry("e3", "e2", { model: "gpt-other" })]),
+    withSuffix([assistantEntry("e3", "e2", { model: "non-gpt" })]),
     model(),
-    () => undefined,
   );
   assert.equal(incompatible.kind, "invalidated");
 
   const invalidIdentity = prepareNativeReplay(
     withSuffix([assistantEntry("e4", "e2", { provider: "" })]),
     model(),
-    () => undefined,
   );
   assert.equal(invalidIdentity.kind, "invalidated");
 
   for (const stopReason of ["error", "aborted"] as const) {
     const skipped = prepareNativeReplay(
-      withSuffix([assistantEntry("e5", "e2", { model: "gpt-other", stopReason })]),
+      withSuffix([assistantEntry("e5", "e2", { model: "non-gpt", stopReason })]),
       model(),
-      () => undefined,
     );
     assert.equal(skipped.kind, "compatible");
 
     const skippedInvalidIdentity = prepareNativeReplay(
       withSuffix([assistantEntry("e6", "e2", { provider: "", stopReason })]),
       model(),
-      () => undefined,
     );
     assert.equal(skippedInvalidIdentity.kind, "compatible");
+  }
+});
+
+test("historical classes permit optimistic cross-provider and cross-API replay retrospectively", () => {
+  for (const historicalClass of ["2911", "3000", "unknown-class", null]) {
+    const branch = [
+      userEntry("e1", "retained"),
+      checkpointEntry("c1", "e1", "e1", checkpointDetails({
+        provider: "custom-codex", api: "openai-codex-responses", id: "gpt-5.5",
+      }, historicalClass)),
+      assistantEntry("a1", "c1", { model: "gpt-6-sol" }),
+    ];
+    assert.equal(prepareNativeReplay(branch, model({ id: "gpt-future" })).kind, "compatible");
   }
 });

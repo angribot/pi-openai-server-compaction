@@ -56,6 +56,7 @@ test("the production extension loader installs only the Remote compaction protoc
       getSystemPrompt: () => "Be concise.",
       sessionManager: { getBranch: () => branch, getSessionId: () => "loader-probe" },
       modelRegistry: {
+        isUsingOAuth: () => false,
         getApiKeyAndHeaders: async () => {
           reachedAuth = true;
           return { ok: false, error: "Intentional stop before network" };

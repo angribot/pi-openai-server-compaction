@@ -27,20 +27,19 @@ For a global installation, omit `-l`.
 
 ## Which models can use it?
 
-Eligibility requires both Pi's configured API type and a model ID that resolves a non-empty Compaction compatibility class in the extension's release-managed Codex catalog:
+Eligibility requires a nonempty structured provider/API/model identity, an exact API type of `openai-responses` or `openai-codex-responses`, and a request model ID beginning with the case-sensitive literal prefix `gpt-`.
 
-| Model configuration | Can attempt Remote compaction? |
-| --- | --- |
-| Any provider using `openai-responses` with a catalogued model ID | Yes, including custom providers and relays |
-| Pi's built-in `openai-codex` provider using `openai-codex-responses` with a catalogued model ID | Yes |
-| A supported API type whose model ID is not in the catalog | No; Pi's normal compaction summarization runs instead |
-| Other configurations | No |
+Both API types work with configured providers, including custom Codex providers and relays. Provider identity, credentials, and routing remain unchanged. Newly released GPT IDs need no extension catalog update. Display names and endpoint hostnames do not affect eligibility.
 
-API type strings are exact and case-sensitive. **Eligibility is not a guarantee of endpoint support.**
+Matching does not trim, lowercase, strip namespaces, or resolve aliases: `gpt-` passes, but `GPT-example`, `openai/gpt-example`, and `codex-auto-review` do not. Non-GPT catalog exceptions from earlier releases are no longer eligible. Ineligible models leave new compaction to Pi.
 
-The catalog includes `gpt-6.1-sol` with compatibility class `3000` and retains historical mappings for retired model IDs; a catalog entry does not guarantee that the model is still available. See the [catalog and its sources](docs/reference.md#native-replay).
+For exact provider `openai`, new and repeated Remote compaction are skipped when Pi reports OAuth authentication (including direct-sharing subscriptions). Pi's default compaction proceeds instead; this is not a failed Remote compaction fallback. API-key authentication can attempt compaction, subject to the same GPT/API rules and normal credential validation. Other providers are unchanged.
 
-The catalog is a release-managed list of OpenAI Codex model IDs and their opaque compatibility classes; it is not user-configurable. If the selected model ID is absent, the extension makes no Remote compaction attempt and Pi's default compaction handles the conversation.
+The gate uses Pi's public `modelRegistry.isUsingOAuth(model)` status, not token shape or a direct `auth.json` read. Under Pi's normal managed lifecycle, a runtime `--api-key` override takes precedence over stored OAuth; stored OAuth takes precedence over configured or environment keys. Removing the runtime override restores OAuth deferral. Unconfigured authentication is not proof of an API key: the normal operation still resolves and validates credentials. The extension adds no auth refresh and does not promise atomicity with concurrent out-of-band credential edits.
+
+**Native replay has no authentication-method restriction.** OpenAI OAuth can still receive a compatible checkpoint from another provider. Skipping repeated Remote compaction does not rewrite the checkpoint; a later ordinary Pi compaction can supersede it under Pi's existing policy.
+
+**Eligibility permits an attempt, not proven backend interoperability.**
 
 The endpoint must accept **Remote compaction v2**: a request to `/responses` ending in a `compaction_trigger`, returning a compaction item that can be replayed later. This extension does **not** use `/responses/compact`. Ordinary Responses support alone is insufficient; capability is discovered when compaction is attempted.
 
@@ -48,15 +47,17 @@ The endpoint must accept **Remote compaction v2**: a request to `/responses` end
 
 ### Switching models can break continuity
 
-The saved compaction item is not a portable summary. A model can reuse it when its known compatibility class matches the checkpoint's class. If either class is unknown, the provider, API type, and model ID must match exactly. See the [compatibility rules and model catalog](docs/reference.md#native-replay).
+The saved compaction item is not a portable summary. Any eligible producer's item may be submitted to any eligible target, across model IDs, providers, and both supported API types, without comparing compatibility classes or requiring an exact Model key. See the [optimistic replay policy](docs/reference.md#native-replay).
+
+This policy applies retrospectively to supported checkpoints and successful historical turns. A branch previously invalidated solely by differing classes can replay again. Historical `2911`, `3000`, other nonempty classes, and explicit null classes are readable metadata, not replay gates. New checkpoints write null classes.
 
 Selecting an incompatible model produces a warning and leaves that model's ordinary request unchanged, **without access to detailed pre-checkpoint context**. Merely switching models does not invalidate the checkpoint, but a successful incompatible assistant turn does. After that, Native replay and further Remote compaction stop on that branch.
 
-Even matching compatibility classes do not guarantee that a different endpoint will accept the item.
+An eligible endpoint may reject another model, provider, account, or endpoint's opaque item, including old `2911` history. Ordinary provider errors surface without stripping the item and retrying.
 
 ### Failures do not produce a backup text summary
 
-Transient compaction failures may retry, up to three attempts total. Unsupported operations, context overflow, and other terminal failures cancel compaction. The extension does not truncate context to make it fit. A model whose compatibility class is not catalogued is not an eligible attempt, so Pi's normal summarization runs; that is not a fallback from a failed Remote compaction.
+Transient compaction failures may retry, up to three attempts total. Unsupported operations, context overflow, and other terminal failures cancel compaction. The extension does not truncate context to make it fit. A model outside the GPT-prefix/API policy, or `openai` using OAuth, does not attempt Remote compaction, so Pi's normal summarization runs; that is not a fallback from a failed Remote compaction.
 
 If a checkpoint is broken or cannot be safely replayed, the extension stops the ordinary request rather than silently sending incomplete context. It never generates a portable text fallback.
 
@@ -100,7 +101,7 @@ Run type checking and offline tests (no credentials or network needed):
 npm test
 ```
 
-`npm test` covers the extension loader, the cache-warming guard through Pi's real warmer decision/dispatch path, and the transport/projection contracts, but not credentialed end-to-end compaction or replay continuity. The retry loop and end-to-end continuity have no offline coverage, so a change to retry classification or replay reconstruction is not caught by the suite. See [testing coverage](docs/reference.md#testing) and the [test ownership rule](docs/reference.md#test-ownership).
+`npm test` covers the extension loader, the cache-warming guard through Pi's real warmer decision/dispatch path, and the transport/projection contracts, but not credentialed end-to-end compaction or replay continuity. Offline lifecycle and real-provider/mock-fetch tests cover optimistic eligibility, continuity, and custom Codex routing; they do not prove live backend interoperability or comprehensively exercise retry orchestration. See [testing coverage](docs/reference.md#testing) and the [test ownership rule](docs/reference.md#test-ownership).
 
 - [Technical reference](docs/reference.md): protocol, checkpoint format, replay, retries, transport limitations, and repository layout.
 - [Domain glossary](GLOSSARY.md) and [architecture decisions](docs/adr/).

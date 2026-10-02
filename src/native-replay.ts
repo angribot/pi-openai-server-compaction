@@ -24,31 +24,7 @@ export type RemoteCompactionModelKey = {
   id: string;
 };
 
-export type CompactionCompatibilityResolver = (modelId: string) => string | undefined;
-
 export const NATIVE_REPLAY_CHECKPOINT_FORMAT = "native-replay-checkpoint/1";
-
-const CODEX_COMPACTION_COMPATIBILITY_CLASSES: Readonly<Record<string, string>> = Object.freeze({
-  // OpenAI Codex catalog at 2cc65cdd4c7c167f0c7252fcb5165d649c16aca0.
-  // Retain retired gpt-5.4 / gpt-5.4-mini classes from catalog 8e694e955.
-  "gpt-5.4": "2911",
-  "gpt-5.4-mini": "2911",
-  "gpt-5.5": "2911",
-  "gpt-5.6-sol": "3000",
-  "gpt-5.6-terra": "3000",
-  "gpt-5.6-luna": "3000",
-  "gpt-6-astra": "3000",
-  "gpt-6-sol": "3000",
-  "gpt-6-luna": "3000",
-  "gpt-6.1-sol": "3000",
-  "gpt-daybreak-blue-latest": "3000",
-  "gpt-daybreak-red-latest": "3000",
-  "codex-auto-review": "3000",
-});
-
-export const resolveCodexCompactionCompatibilityClass: CompactionCompatibilityResolver = (
-  modelId,
-) => CODEX_COMPACTION_COMPATIBILITY_CLASSES[modelId];
 
 export type NativeReplayCheckpointDetails = {
   nativeReplayCheckpoint: {
@@ -99,7 +75,7 @@ type CompactionReplayPreparation =
   | ReplayPreparationFailure
   | { kind: "snapshot-unavailable" }
   | { kind: "incompatible" }
-  | { kind: "class-unavailable" }
+  | { kind: "ineligible" }
   | {
       kind: "ready";
       buildInput(): ResponsesItem[];
@@ -123,11 +99,10 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 function operationKindForIdentity(
-  provider: unknown,
   api: unknown,
 ): RemoteCompactionOperationKind | undefined {
   if (api === "openai-responses") return "direct-responses";
-  if (provider === "openai-codex" && api === "openai-codex-responses") {
+  if (api === "openai-codex-responses") {
     return "pi-codex-responses";
   }
   return undefined;
@@ -136,7 +111,7 @@ function operationKindForIdentity(
 export function remoteCompactionOperationKind(
   model: unknown,
 ): RemoteCompactionOperationKind | undefined {
-  return isRecord(model) ? operationKindForIdentity(model.provider, model.api) : undefined;
+  return isRecord(model) ? operationKindForIdentity(model.api) : undefined;
 }
 
 function modelKeyFromIdentity(
@@ -148,32 +123,28 @@ function modelKeyFromIdentity(
     return undefined;
   }
 
-  const operationKind = operationKindForIdentity(provider, api);
+  const operationKind = operationKindForIdentity(api);
   if (operationKind === "direct-responses") {
     return { provider, api: "openai-responses", id };
   }
   if (operationKind === "pi-codex-responses") {
-    return { provider: "openai-codex", api: "openai-codex-responses", id };
+    return { provider, api: "openai-codex-responses", id };
   }
   return undefined;
 }
 
-function sameModelKey(left: RequestModelIdentity, right: RequestModelIdentity): boolean {
-  return left.provider === right.provider && left.api === right.api && left.id === right.id;
+function eligibleIdentity(identity: RequestModelIdentity): boolean {
+  return (
+    modelKeyFromIdentity(identity.provider, identity.api, identity.id) !== undefined &&
+    identity.id.startsWith("gpt-")
+  );
 }
 
 function compatibleWithCheckpoint(
-  state: Pick<ValidReplayState, "modelKey" | "compactionCompatibilityClass">,
+  state: Pick<ValidReplayState, "modelKey">,
   targetIdentity: RequestModelIdentity,
-  targetClass: string | null | undefined,
 ): boolean {
-  if (state.compactionCompatibilityClass !== null && isCompatibilityClass(targetClass)) {
-    return (
-      modelKeyFromIdentity(targetIdentity.provider, targetIdentity.api, targetIdentity.id) !==
-        undefined && state.compactionCompatibilityClass === targetClass
-    );
-  }
-  return sameModelKey(state.modelKey, targetIdentity);
+  return eligibleIdentity(state.modelKey) && eligibleIdentity(targetIdentity);
 }
 
 function requestModelIdentity(model: unknown): RequestModelIdentity | undefined {
@@ -199,14 +170,6 @@ function isCompactionItem(value: unknown): value is CompactionItem {
 
 function isCompatibilityClass(value: unknown): value is string {
   return typeof value === "string" && value.length > 0;
-}
-
-function resolveCompatibilityClass(
-  resolver: CompactionCompatibilityResolver,
-  modelId: string,
-): string | undefined {
-  const value = resolver(modelId);
-  return isCompatibilityClass(value) ? value : undefined;
 }
 
 function decodeNativeDetails(
@@ -254,22 +217,8 @@ function assistantIdentity(entry: BranchEntry): RequestModelIdentity | undefined
   });
 }
 
-function identityCompatible(
-  state: Pick<ValidReplayState, "modelKey" | "compactionCompatibilityClass">,
-  identity: RequestModelIdentity,
-  resolver: CompactionCompatibilityResolver,
-): boolean {
-  return compatibleWithCheckpoint(
-    state,
-    identity,
-    resolveCompatibilityClass(resolver, identity.id) ?? null,
-  );
-}
-
 function deriveReplayContinuity(
   suffix: readonly BranchEntry[],
-  state: Pick<ValidReplayState, "modelKey" | "compactionCompatibilityClass">,
-  resolver: CompactionCompatibilityResolver,
 ): ReplayDerivation {
   for (const entry of suffix) {
     const message = entry.message;
@@ -277,10 +226,7 @@ function deriveReplayContinuity(
     if (message.stopReason === "error" || message.stopReason === "aborted") continue;
     const identity = assistantIdentity(entry);
     if (!identity) return { invalidated: true };
-    const compatible =
-      state.compactionCompatibilityClass === null
-        ? sameModelKey(state.modelKey, identity)
-        : identityCompatible(state, identity, resolver);
+    const compatible = eligibleIdentity(identity);
     if (!compatible) return { invalidated: true };
   }
   return { invalidated: false };
@@ -307,7 +253,6 @@ export function hasActiveRemoteCompactionCheckpoint(branch: readonly BranchEntry
 
 function deriveActiveReplayState(
   branch: readonly BranchEntry[],
-  resolver: CompactionCompatibilityResolver,
 ): ActiveReplayState {
   const latestIndex = latestCompactionIndex(branch);
   if (latestIndex < 0) return { kind: "none" };
@@ -325,7 +270,7 @@ function deriveActiveReplayState(
   }
 
   const suffix = branch.slice(latestIndex + 1);
-  const derivation = deriveReplayContinuity(suffix, decoded, resolver);
+  const derivation = deriveReplayContinuity(suffix);
 
   return {
     kind: "valid",
@@ -457,22 +402,17 @@ function findUniqueSpan(
 export function prepareCompactionReplay(
   branch: readonly BranchEntry[],
   model: Model<any>,
-  resolver: CompactionCompatibilityResolver,
 ): CompactionReplayPreparation {
   const key = modelKeyFromIdentity(model.provider, model.api, model.id);
   if (!key) return { kind: "invalid-model" };
 
-  // Capture the producer class before the remote operation, never when it completes.
-  // A new attempt requires a catalog-resolved class; otherwise the model is left to
-  // Pi's default compaction instead of producing a null-class checkpoint.
-  const compactionCompatibilityClass = resolveCompatibilityClass(resolver, key.id);
-  if (compactionCompatibilityClass === undefined) return { kind: "class-unavailable" };
-  const producer = { modelKey: key, compactionCompatibilityClass };
-  const state = deriveActiveReplayState(branch, resolver);
+  if (!eligibleIdentity(key)) return { kind: "ineligible" };
+  const producer = { modelKey: key, compactionCompatibilityClass: null };
+  const state = deriveActiveReplayState(branch);
   if (state.kind === "broken") return state;
   if (state.kind === "valid") {
     if (state.invalidated) return { kind: "invalidated" };
-    if (!compatibleWithCheckpoint(state, key, producer.compactionCompatibilityClass)) {
+    if (!compatibleWithCheckpoint(state, key)) {
       return { kind: "incompatible" };
     }
     // Without a host system-message snapshot the checkpoint stays readable for
@@ -517,17 +457,15 @@ export function prepareCompactionReplay(
 export function prepareNativeReplay(
   branch: readonly BranchEntry[],
   model: Model<any>,
-  resolver: CompactionCompatibilityResolver,
 ): NativeReplayPreparation {
-  const state = deriveActiveReplayState(branch, resolver);
+  const state = deriveActiveReplayState(branch);
   if (state.kind === "none" || state.kind === "broken") return state;
   if (state.invalidated) return { kind: "invalidated" };
 
   const identity = requestModelIdentity(model);
   if (!identity) return { kind: "invalid-model" };
   const key = modelKeyFromIdentity(identity.provider, identity.api, identity.id);
-  const targetClass = resolveCompatibilityClass(resolver, identity.id) ?? null;
-  const compatible = key !== undefined && compatibleWithCheckpoint(state, identity, targetClass);
+  const compatible = key !== undefined && compatibleWithCheckpoint(state, identity);
   if (!compatible) return { kind: "incompatible" };
 
   return {

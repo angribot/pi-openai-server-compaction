@@ -7,9 +7,7 @@ import {
   prepareNativeReplay,
   remoteCompactionOperationKind,
   REMOTE_COMPACTION_CHECKPOINT_MARKER,
-  resolveCodexCompactionCompatibilityClass,
   type BranchEntry,
-  type CompactionCompatibilityResolver,
   type NativeReplayCheckpointDetails,
 } from "./native-replay.ts";
 import type {
@@ -22,8 +20,6 @@ export {
   NATIVE_REPLAY_CHECKPOINT_FORMAT,
   REMOTE_COMPACTION_CHECKPOINT_MARKER,
   remoteCompactionOperationKind,
-  resolveCodexCompactionCompatibilityClass,
-  type CompactionCompatibilityResolver,
   type NativeReplayCheckpointDetails,
   type RemoteCompactionApi,
   type RemoteCompactionModelKey,
@@ -119,26 +115,25 @@ function successResult(
 export function installRemoteCompaction(
   pi: ExtensionAPI,
   attempt: RemoteCompactionAttempt,
-  resolveCompatibilityClassForModel: CompactionCompatibilityResolver = resolveCodexCompactionCompatibilityClass,
 ): void {
   pi.on("session_before_compact", async (event, context) => {
     const model = context.model;
     if (!model || remoteCompactionOperationKind(model) === undefined) return undefined;
     if (event.signal.aborted) return { cancel: true };
+    // Pi's auth status includes runtime key overrides; stored OAuth alone is
+    // not sufficient to identify the selected authentication method.
+    if (model.provider === "openai" && context.modelRegistry.isUsingOAuth(model)) {
+      return undefined;
+    }
 
     const branchEntries = event.branchEntries as BranchEntry[];
-    const preparation = prepareCompactionReplay(
-      branchEntries,
-      model,
-      resolveCompatibilityClassForModel,
-    );
+    const preparation = prepareCompactionReplay(branchEntries, model);
     if (preparation.kind === "invalid-model") {
       reportError(context, "Remote compaction requires a non-empty structured model identity.");
       return { cancel: true };
     }
-    if (preparation.kind === "class-unavailable") {
-      // No catalogued Compaction compatibility class: leave this model to Pi's
-      // default compaction instead of attempting a null-class Remote compaction.
+    if (preparation.kind === "ineligible") {
+      // Ineligible models remain on Pi's ordinary compaction path.
       return undefined;
     }
     if (preparation.kind === "broken") {
@@ -249,7 +244,7 @@ export function installRemoteCompaction(
     if (!model) return undefined;
 
     const branch = context.sessionManager.getBranch();
-    const preparation = prepareNativeReplay(branch, model, resolveCompatibilityClassForModel);
+    const preparation = prepareNativeReplay(branch, model);
     if (preparation.kind === "none") return undefined;
     if (preparation.kind === "broken") return hardStop(context, preparation.reason);
     if (preparation.kind === "invalidated") {
