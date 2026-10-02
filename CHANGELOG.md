@@ -4,6 +4,10 @@ This changelog intentionally starts at **0.1.0**.
 
 ## Unreleased
 
+- attempt Remote compaction for literal lowercase `gpt-` request IDs on either supported Responses API, including custom Codex providers, without a release-managed compatibility catalog; non-GPT exceptions such as `codex-auto-review` now leave new compaction to Pi
+- optimistically replay eligible producers' items across eligible models, providers, and both APIs without class or exact-identity comparisons; endpoint rejection remains possible and never strips items or triggers text fallback
+- re-evaluate existing supported checkpoints and successful historical turns under the new policy, potentially restoring branches invalidated only by class differences; new checkpoints retain their actual producer identity and write null classes while historical classes remain readable metadata
+
 ## 0.13.1 - 2026-10-02
 
 - fix Remote compaction preparation on Pi 1.0.0 by importing transcript conversion from Pi's coding-agent public API instead of the removed agent-core export

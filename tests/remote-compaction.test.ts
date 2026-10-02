@@ -6,7 +6,6 @@ import {
   NATIVE_REPLAY_CHECKPOINT_FORMAT,
   REMOTE_COMPACTION_CHECKPOINT_MARKER,
   type BranchEntry,
-  type CompactionCompatibilityResolver,
   type NativeReplayCheckpointDetails,
 } from "../src/native-replay.ts";
 import type {
@@ -36,17 +35,14 @@ function model(overrides: Partial<Model<any>> = {}): Model<any> {
   };
 }
 
-function install(
-  attempt: RemoteCompactionAttempt,
-  resolver?: CompactionCompatibilityResolver,
-): SessionBeforeCompactHandler {
+function install(attempt: RemoteCompactionAttempt): SessionBeforeCompactHandler {
   let captured: SessionBeforeCompactHandler | undefined;
   const pi = {
     on(name: string, handler: SessionBeforeCompactHandler) {
       if (name === "session_before_compact") captured = handler;
     },
   } as unknown as ExtensionAPI;
-  installRemoteCompaction(pi, attempt, resolver);
+  installRemoteCompaction(pi, attempt);
   assert.ok(captured, "session_before_compact handler was not installed");
   return captured;
 }
@@ -178,42 +174,30 @@ function recordingAttempt(): {
   return { attempt, calls: () => calls, request: () => request };
 }
 
-test("an unresolvable compatibility class defers to Pi default compaction without attempting", async () => {
-  const models = [
-    model({ id: "gpt-not-catalogued" }),
-    model({ provider: "openai-codex", api: "openai-codex-responses", id: "gpt-not-catalogued" }),
-  ];
-
-  for (const selected of models) {
-    const { attempt, calls } = recordingAttempt();
-    const handler = install(attempt);
-    const { context, notifications, aborts } = makeContext(selected);
-
-    assert.equal(await handler(compactEvent(), context), undefined);
-    assert.equal(calls(), 0, `${selected.api} ${selected.id} must not invoke the attempt`);
-    assert.equal(aborts(), 0);
-    assert.deepEqual(notifications, []);
+test("uncatalogued GPT IDs attempt compaction and persist null classes on either API", async () => {
+  for (const api of ["openai-responses", "openai-codex-responses"]) {
+    const selected = model({ provider: "custom-provider", api, id: "gpt-future" });
+    const { attempt, calls, request } = recordingAttempt();
+    const { context } = makeContext(selected);
+    const result = await install(attempt)(compactEvent(), context);
+    assert.equal(calls(), 1);
+    assert.equal(request()?.model, selected);
+    assert.deepEqual(result?.compaction?.details.nativeReplayCheckpoint.producer, {
+      modelKey: { provider: selected.provider, api, id: selected.id },
+      compactionCompatibilityClass: null,
+    });
   }
 });
 
-test("an empty resolver result is treated as an unresolvable class", async () => {
-  const { attempt, calls } = recordingAttempt();
-  const handler = install(attempt, () => "");
-  const { context } = makeContext(model());
-
-  assert.equal(await handler(compactEvent(), context), undefined);
-  assert.equal(calls(), 0);
-});
-
-test("a catalogued class invokes the attempt and persists the resolved producer class", async () => {
-  const cases: Array<[Model<any>, string]> = [
-    [model({ id: "gpt-5.4" }), "2911"],
-    [model({ provider: "openai-codex", api: "openai-codex-responses", id: "gpt-5.6-sol" }), "3000"],
-    [model({ id: "gpt-6-sol" }), "3000"],
-    [model({ provider: "openai-codex", api: "openai-codex-responses", id: "gpt-6-luna" }), "3000"],
+test("previously catalogued GPT IDs persist explicit null classes", async () => {
+  const cases = [
+    model({ id: "gpt-5.4" }),
+    model({ provider: "openai-codex", api: "openai-codex-responses", id: "gpt-5.6-sol" }),
+    model({ id: "gpt-6-sol" }),
+    model({ provider: "openai-codex", api: "openai-codex-responses", id: "gpt-6-luna" }),
   ];
 
-  for (const [selected, expectedClass] of cases) {
+  for (const selected of cases) {
     const { attempt, calls, request } = recordingAttempt();
     const handler = install(attempt);
     const { context, notifications, aborts } = makeContext(selected);
@@ -226,7 +210,7 @@ test("a catalogued class invokes the attempt and persists the resolved producer 
     assert.equal(result.compaction.summary, REMOTE_COMPACTION_CHECKPOINT_MARKER);
     assert.equal(
       result.compaction.details.nativeReplayCheckpoint.producer.compactionCompatibilityClass,
-      expectedClass,
+      null,
     );
     assert.deepEqual(request()?.input.at(-1), { type: "compaction_trigger" });
     assert.equal(request()?.instructions, "system instructions");
@@ -246,18 +230,28 @@ test("unsupported API types are left untouched", async () => {
   assert.deepEqual(notifications, []);
 });
 
-test("the provider-scoped Codex restriction is preserved even for a catalogued model ID", async () => {
-  const { attempt, calls } = recordingAttempt();
-  const handler = install(attempt);
-  const { context } = makeContext(
-    model({ provider: "third-party", api: "openai-codex-responses", id: "gpt-5.4" }),
-  );
-
-  assert.equal(await handler(compactEvent(), context), undefined);
-  assert.equal(calls(), 0);
+test("eligibility uses literal request IDs and exact APIs, never display names", async () => {
+  const cases: Array<[Partial<Model<any>>, boolean]> = [
+    [{ id: "gpt-", name: "not GPT" }, true],
+    [{ id: "GPT-example" }, false],
+    [{ id: "openai/gpt-example" }, false],
+    [{ id: " gpt-example" }, false],
+    [{ id: "codex-auto-review", name: "gpt-example" }, false],
+    [{ id: "other", name: "gpt-5.4" }, false],
+    [{ api: "OpenAI-responses" }, false],
+    [{ api: "openai-responses " }, false],
+    [{ api: "OpenAI-codex-responses" }, false],
+  ];
+  for (const [overrides, eligible] of cases) {
+    const { attempt, calls } = recordingAttempt();
+    const { context } = makeContext(model(overrides));
+    const result = await install(attempt)(compactEvent(), context);
+    assert.equal(calls(), eligible ? 1 : 0, JSON.stringify(overrides));
+    if (!eligible) assert.equal(result, undefined);
+  }
 });
 
-test("the class gate also applies to repeated compaction over an existing checkpoint", async () => {
+test("uncatalogued targets recompact replacement history with one terminal trigger", async () => {
   const details: NativeReplayCheckpointDetails = {
     nativeReplayCheckpoint: {
       format: NATIVE_REPLAY_CHECKPOINT_FORMAT,
@@ -278,14 +272,18 @@ test("the class gate also applies to repeated compaction over an existing checkp
       firstKeptEntryId: "e1",
       tokensBefore: 10,
       details,
+      systemMessage: { role: "system", content: "saved instructions", timestamp: 1 },
     },
   ];
-  const { attempt, calls } = recordingAttempt();
+  const { attempt, calls, request } = recordingAttempt();
   const handler = install(attempt);
   const { context, notifications } = makeContext(model({ id: "gpt-not-catalogued" }));
 
-  assert.equal(await handler(compactEvent(branch), context), undefined);
-  assert.equal(calls(), 0);
+  const result = await handler(compactEvent(branch), context);
+  assert.ok(result?.compaction);
+  assert.equal(calls(), 1);
+  assert.deepEqual(request()?.input, [{ type: "compaction", encrypted_content: "old-item" }, { type: "compaction_trigger" }]);
+  assert.deepEqual(result.compaction.details.nativeReplayCheckpoint.replacementHistory, [{ type: "compaction", encrypted_content: "opaque-item" }]);
   assert.deepEqual(notifications, []);
 });
 
@@ -319,4 +317,97 @@ test("a snapshot-less /1 checkpoint cancels Remote compaction before any attempt
       assert.match(error, /new session/, label);
     }
   }
+});
+
+function replayHook() {
+  const handlers: Record<string, (event: any, context: any) => any> = {};
+  installRemoteCompaction({ on(name: string, handler: any) { handlers[name] = handler; } } as any,
+    async () => { throw new Error("ordinary replay must not compact"); });
+  return handlers.before_provider_request!;
+}
+
+function replayPayload() {
+  return { input: [
+    { role: "user", content: [{ type: "input_text", text:
+      `The conversation history before this point was compacted into the following summary:\n\n<summary>\n${REMOTE_COMPACTION_CHECKPOINT_MARKER}\n</summary>` }] },
+    { role: "user", content: [{ type: "input_text", text: "retained" }] },
+    { role: "user", content: [{ type: "input_text", text: "after" }] },
+  ] };
+}
+
+test("ordinary hooks replay historical classes across identities and reinterpret successful GPT turns", () => {
+  for (const api of ["openai-responses", "openai-codex-responses"]) {
+    for (const historicalClass of ["2911", "3000", "opaque-other", null]) {
+      const producer = model({ provider: "custom-codex", api: "openai-codex-responses", id: "gpt-5.5" });
+      const branch = snapshotlessBranch(producer);
+      (branch[2]!.details as NativeReplayCheckpointDetails).nativeReplayCheckpoint.producer.compactionCompatibilityClass = historicalClass;
+      branch.push(messageEntry("a1", "e3", {
+        role: "assistant", content: [], provider: "another-provider", api: "openai-responses",
+        model: "gpt-6-sol", stopReason: "stop", timestamp: 5,
+      }));
+      const { context, notifications, aborts } = makeContext(model({ api, id: "gpt-future" }), "", branch);
+      const result = replayHook()({ payload: replayPayload() }, context);
+      assert.deepEqual(result.input[0], { type: "compaction", encrypted_content: "opaque-item" });
+      assert.equal(aborts(), 0);
+      assert.deepEqual(notifications, []);
+    }
+  }
+});
+
+test("ineligible producers and selection warn without corrupting state; successful ineligible turns stop replay", () => {
+  const hook = replayHook();
+  for (const producerId of ["gpt-5.5", "codex-auto-review"]) {
+    const branch = snapshotlessBranch(model({ id: producerId }));
+    const selected = makeContext(model({ id: "non-gpt" }), "", branch);
+    const payload = replayPayload();
+    assert.equal(hook({ payload }, selected.context), undefined);
+    assert.equal(selected.aborts(), 0);
+    assert.equal(selected.notifications[0]?.kind, "warning");
+    assert.deepEqual(payload, replayPayload());
+    const eligible = makeContext(model({ id: "gpt-future" }), "", branch);
+    const result = hook({ payload }, eligible.context);
+    assert.equal(Boolean(result), producerId.startsWith("gpt-"));
+    assert.equal(eligible.aborts(), 0); // A valid non-GPT record is not malformed.
+  }
+  for (const identity of [{ model: "non-gpt" }, { provider: "" }, { api: "openai-completions" }]) {
+    for (const stopReason of ["stop", "error", "aborted"]) {
+      const branch = snapshotlessBranch(model());
+      branch.push(messageEntry("a1", "e3", { role: "assistant", content: [],
+        provider: "custom", api: "openai-responses", model: "gpt-future", ...identity, stopReason }));
+      const state = makeContext(model(), "", branch);
+      const result = hook({ payload: replayPayload() }, state.context);
+      assert.equal(state.aborts(), stopReason === "stop" ? 1 : 0);
+      assert.equal(Boolean(result), stopReason !== "stop");
+    }
+  }
+});
+
+test("broken and legacy checkpoints and unsafe replay spans still hard stop", () => {
+  const hook = replayHook();
+  const detailsCases: unknown[] = [undefined, { remoteCompaction: { version: 2 } },
+    { nativeReplayCheckpoint: { ...replayDetails(model()).nativeReplayCheckpoint, producer: {
+      modelKey: { provider: "custom", api: "openai-responses", id: "gpt-test" },
+      compactionCompatibilityClass: "",
+    } } }];
+  for (const details of detailsCases) {
+    const branch = snapshotlessBranch(model());
+    branch[2]!.details = details;
+    const state = makeContext(model(), "", branch);
+    assert.equal(hook({ payload: replayPayload() }, state.context), undefined);
+    assert.equal(state.aborts(), 1);
+  }
+  for (const payload of [{ input: [] }, { input: [...replayPayload().input, ...replayPayload().input] }, { messages: [] }]) {
+    const state = makeContext(model(), "", snapshotlessBranch(model()));
+    assert.equal(hook({ payload }, state.context), undefined);
+    assert.equal(state.aborts(), 1);
+  }
+});
+
+test("terminal unsupported compaction cancels without a text fallback", async () => {
+  let attempts = 0;
+  const handler = install(async () => { attempts++; return { kind: "terminal", error: new Error("unsupported trigger") }; });
+  const state = makeContext(model({ id: "gpt-future" }));
+  assert.deepEqual(await handler(compactEvent(), state.context), { cancel: true });
+  assert.equal(attempts, 1);
+  assert.match(state.notifications[0]!.message, /no text fallback/);
 });

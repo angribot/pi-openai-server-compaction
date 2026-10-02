@@ -1,5 +1,7 @@
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 import assert from "node:assert/strict";
-import { test } from "node:test";
+import { mock, test } from "node:test";
 import * as zlib from "node:zlib";
 import {
   normalizeContext,
@@ -12,6 +14,7 @@ import {
 import { stream as codexResponsesStream } from "@earendil-works/pi-ai/api/openai-codex-responses";
 import { stream as directResponsesStream } from "@earendil-works/pi-ai/api/openai-responses";
 import { buildSessionContext, convertToLlm, SessionManager } from "@earendil-works/pi-coding-agent";
+import extension from "../index.ts";
 import {
   compactionInstructions,
   NATIVE_REPLAY_CHECKPOINT_FORMAT,
@@ -106,6 +109,7 @@ async function realProviderPayload(
   selectedModel: Model<any>,
   messages: readonly Message[],
   systemPrompt?: string,
+  onPayload?: (payload: unknown) => unknown,
 ): Promise<Record<string, any>> {
   const transcript = normalizeContext({
     ...(systemPrompt === undefined ? {} : { systemPrompt }),
@@ -125,7 +129,7 @@ async function realProviderPayload(
     return terminalResponse();
   }) as typeof globalThis.fetch;
 
-  const options: Record<string, unknown> = { fetch: fetchMock };
+  const options: Record<string, unknown> = { fetch: fetchMock, onPayload };
   if (kind === "direct") options.apiKey = "sk-test";
   else {
     options.apiKey = fakeJwt();
@@ -430,7 +434,7 @@ test("Remote compaction input matches the real provider projection for both API 
         );
       }
 
-      const preparation = prepareCompactionReplay(branch, selectedModel, () => "2911");
+      const preparation = prepareCompactionReplay(branch, selectedModel);
       assert.equal(preparation.kind, "ready", label);
       if (preparation.kind !== "ready") continue;
 
@@ -473,7 +477,7 @@ test("repeated Remote compaction matches the real provider projection of the pos
         branchSuffixMessages(branch),
         "ORACLE LEADING",
       );
-      const preparation = prepareCompactionReplay(branch, selectedModel, () => "2911");
+      const preparation = prepareCompactionReplay(branch, selectedModel);
       assert.equal(preparation.kind, "ready", label);
       if (preparation.kind !== "ready") continue;
       assert.deepEqual(
@@ -553,7 +557,7 @@ test("tool additions, removals, and redefinitions project like Pi and stay out o
       `${name}: the current tool set reflects the change`,
     );
 
-    const preparation = prepareCompactionReplay(branch, selectedModel, () => "2911");
+    const preparation = prepareCompactionReplay(branch, selectedModel);
     assert.equal(preparation.kind, "ready", name);
     if (preparation.kind !== "ready") continue;
     const input = preparation.buildInput();
@@ -597,7 +601,7 @@ test("a system message between a function call and its result is ordered like Pi
       withMidConvo("codex", true),
       payloadMessages(branch),
     );
-    const preparation = prepareCompactionReplay(branch, withMidConvo("codex", true), () => "2911");
+    const preparation = prepareCompactionReplay(branch, withMidConvo("codex", true));
     assert.equal(preparation.kind, "ready", `withResult=${withResult}`);
     if (preparation.kind !== "ready") continue;
     assert.deepEqual(
@@ -624,7 +628,7 @@ for (const kind of ["direct", "codex"] as const) {
       const markerIndex = indexOfMarker(payload.input);
       assert.ok(markerIndex >= 0, "the real payload must contain the checkpoint marker");
 
-      const preparation = prepareNativeReplay(branch, selectedModel, () => undefined);
+      const preparation = prepareNativeReplay(branch, selectedModel);
       assert.equal(preparation.kind, "compatible");
       if (preparation.kind !== "compatible") return;
 
@@ -652,19 +656,30 @@ for (const kind of ["direct", "codex"] as const) {
   }
 }
 
-test("native replay follows a restored SessionManager branch after navigation", async () => {
-  const selectedModel = withMidConvo("codex", false);
+test("native replay follows a reloaded SessionManager branch after navigation", async (t) => {
+  const selectedModel = model("codex", { provider: "custom-codex", id: "gpt-future" });
   const snapshot: SystemMessage = {
     role: "system",
     content: "BASE PROMPT",
     sections: { env: "ENV SECTION" },
     timestamp: 10,
   };
-  const session = SessionManager.inMemory("/tmp", undefined, [
+  const initial = SessionManager.inMemory("/tmp", undefined, [
     userEntry("e1", "old"),
     userEntry("e2", "kept", "e1"),
-    checkpointEntry("c1", "e2", "e2", checkpointDetails(selectedModel), snapshot),
+    checkpointEntry("c1", "e2", "e2", (() => {
+      const prepared = prepareCompactionReplay([userEntry("fresh", "old")], selectedModel);
+      assert.equal(prepared.kind, "ready");
+      if (prepared.kind !== "ready") throw new Error("not ready");
+      return JSON.parse(JSON.stringify(prepared.createCheckpointDetails(COMPACTION_ITEM)));
+    })(), snapshot),
   ] as never);
+  const directory = mkdtempSync(join(process.cwd(), ".test-session-"));
+  t.after(() => rmSync(directory, { recursive: true, force: true }));
+  const file = join(directory, "session.jsonl");
+  writeFileSync(file, [initial.getHeader(), ...initial.getEntries()]
+    .map(entry => JSON.stringify(entry)).join("\n") + "\n");
+  const session = SessionManager.open(file, directory);
   session.appendMessage({ role: "user", content: "branch one", timestamp: 7 });
   const firstBranch = session.getBranch() as unknown as BranchEntry[];
   const firstMessages = convertToLlm(session.buildSessionContext().messages) as Message[];
@@ -680,8 +695,14 @@ test("native replay follows a restored SessionManager branch after navigation", 
     [firstBranch, firstMessages, "branch one", "branch two"],
     [secondBranch, secondMessages, "branch two", "branch one"],
   ] as const) {
+    const repeated = prepareCompactionReplay(branch, model("direct", { id: "gpt-another" }));
+    assert.equal(repeated.kind, "ready");
+    if (repeated.kind === "ready") {
+      assert.deepEqual(repeated.buildInput()[0], COMPACTION_ITEM);
+      assert.deepEqual(repeated.buildInput().at(-1), { type: "compaction_trigger" });
+    }
     const payload = await realProviderPayload("codex", selectedModel, messages);
-    const preparation = prepareNativeReplay(branch, selectedModel, () => undefined);
+    const preparation = prepareNativeReplay(branch, selectedModel);
     assert.equal(preparation.kind, "compatible", suffix);
     if (preparation.kind !== "compatible") continue;
     const rewrite = preparation.rewrite(payload);
@@ -703,7 +724,7 @@ test("native replay reads a snapshot-less /1 checkpoint through the real provide
   });
   const payload = await realProviderPayload("codex", selectedModel, payloadMessages(branch));
 
-  const preparation = prepareNativeReplay(branch, selectedModel, () => undefined);
+  const preparation = prepareNativeReplay(branch, selectedModel);
   assert.equal(preparation.kind, "compatible");
   if (preparation.kind !== "compatible") return;
 
@@ -718,4 +739,86 @@ test("native replay reads a snapshot-less /1 checkpoint through the real provide
     input: payload.input.filter((_item: unknown, index: number) => index !== markerIndex),
   };
   assert.equal(preparation.rewrite(withoutMarker).kind, "span-missing-or-ambiguous");
+});
+
+test("production hooks preserve custom Codex routing and credentials through real Pi compaction and replay", async () => {
+  const selected = model("codex", { provider: "custom-codex", id: "gpt-future",
+    baseUrl: "https://custom-codex.example/backend-api", headers: { "x-custom-route": "selected" } });
+  const handlers: Record<string, (event: any, context: any) => any> = {};
+  extension({ on(name: string, handler: any) { handlers[name] = handler; } } as any);
+  const branch = [userEntry("u1", "compact me")];
+  let sent: Record<string, any> | undefined;
+  const credential = fakeJwt();
+  const fetchMock = mock.method(globalThis, "fetch", async (url: any, init: any) => {
+    assert.match(String(url), /^https:\/\/custom-codex.example\//);
+    const headers = new Headers(init.headers);
+    assert.equal(headers.get("authorization"), `Bearer ${credential}`);
+    assert.equal(headers.get("x-custom-route"), "selected");
+    let raw = init.body;
+    if (headers.get("content-encoding") === "zstd") raw = zlib.zstdDecompressSync(raw);
+    sent = JSON.parse(typeof raw === "string" ? raw : Buffer.from(raw).toString());
+    return new Response([
+      { type: "response.output_item.done", output_index: 0, item: COMPACTION_ITEM },
+      { type: "response.completed", response: { status: "completed", output: [COMPACTION_ITEM] } },
+    ].map(event => `data: ${JSON.stringify(event)}\n\n`).join(""),
+    { headers: { "content-type": "text/event-stream" } });
+  });
+  const context = {
+    model: selected, hasUI: true, ui: { notify(message: string) { assert.fail(message); } },
+    getSystemPrompt: () => "BASE", abort() { assert.fail("unexpected abort"); },
+    sessionManager: { getBranch: () => branch, getSessionId: () => "custom-session" },
+    modelRegistry: { async complete(actual: Model<any>, transcript: any, options: any) {
+      assert.equal(actual, selected);
+      return codexResponsesStream(actual, normalizeContext(transcript), { ...options, apiKey: credential }).result();
+    } },
+  };
+  try {
+    const result = await handlers.session_before_compact!({ branchEntries: branch,
+      preparation: { firstKeptEntryId: "u1", tokensBefore: 42 }, signal: new AbortController().signal }, context);
+    assert.ok(result.compaction);
+    assert.equal(sent?.model, "gpt-future");
+    assert.deepEqual(sent?.input.at(-1), { type: "compaction_trigger" });
+    assert.equal(sent?.input.filter((item: any) => item.type === "compaction_trigger").length, 1);
+    assert.equal(sent?.tools, undefined);
+    assert.deepEqual(result.compaction.details.nativeReplayCheckpoint.producer, {
+      modelKey: { provider: "custom-codex", api: "openai-codex-responses", id: "gpt-future" },
+      compactionCompatibilityClass: null,
+    });
+    branch.push(checkpointEntry("c1", "u1", "u1", result.compaction.details,
+      { role: "system", content: "BASE", timestamp: 1 }));
+    branch.push(userEntry("u2", "continue", "c1"));
+  } finally { fetchMock.mock.restore(); }
+  for (const kind of ["direct", "codex"] as const) {
+    const target = model(kind, { provider: `custom-${kind}`, id: "gpt-another" });
+    const payload = await realProviderPayload(kind, target, payloadMessages(branch), undefined,
+      payload => handlers.before_provider_request!({ payload }, { ...context, model: target }));
+    assert.ok(payload.input.some((item: any) => item.encrypted_content === "opaque-item"));
+    assert.equal(indexOfMarker(payload.input), -1);
+  }
+});
+
+test("an ordinary provider rejection surfaces without stripping the replay item or retrying", async () => {
+  const selected = model("direct", { id: "gpt-future" });
+  const branch = replayBranch(model("codex", { provider: "custom-codex", id: "gpt-5.5" }), "continue");
+  const handlers: Record<string, (event: any, context: any) => any> = {};
+  extension({ on(name: string, handler: any) { handlers[name] = handler; } } as any);
+  let requests = 0;
+  const result = await directResponsesStream(selected, normalizeContext({ messages: payloadMessages(branch) }), {
+    apiKey: "sk-fake", maxRetries: 0,
+    onPayload: payload => handlers.before_provider_request!({ payload }, {
+      model: selected, sessionManager: { getBranch: () => branch },
+      hasUI: true, ui: { notify(message: string) { assert.fail(message); } },
+      abort() { assert.fail("unexpected local abort"); },
+    }),
+    fetch: async (_url, init) => {
+      requests++;
+      const payload = JSON.parse(String(init?.body));
+      assert.ok(payload.input.some((item: any) => item.encrypted_content === "opaque-item"));
+      return new Response(JSON.stringify({ error: { message: "rejected compaction item" } }),
+        { status: 400, headers: { "content-type": "application/json" } });
+    },
+  }).result();
+  assert.equal(result.stopReason, "error");
+  assert.match(result.errorMessage ?? "", /rejected compaction item/);
+  assert.equal(requests, 1);
 });
