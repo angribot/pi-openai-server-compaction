@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import * as zlib from "node:zlib";
-import { convertToLlm } from "@earendil-works/pi-agent-core";
 import {
   normalizeContext,
   type AssistantMessage,
@@ -12,7 +11,7 @@ import {
 } from "@earendil-works/pi-ai";
 import { stream as codexResponsesStream } from "@earendil-works/pi-ai/api/openai-codex-responses";
 import { stream as directResponsesStream } from "@earendil-works/pi-ai/api/openai-responses";
-import { buildSessionContext, SessionManager } from "@earendil-works/pi-coding-agent";
+import { buildSessionContext, convertToLlm, SessionManager } from "@earendil-works/pi-coding-agent";
 import {
   compactionInstructions,
   NATIVE_REPLAY_CHECKPOINT_FORMAT,
