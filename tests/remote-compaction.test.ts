@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
-import { test } from "node:test";
-import type { Model, SystemMessage } from "@earendil-works/pi-ai";
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { mock, test } from "node:test";
+import { InMemoryCredentialStore, type Model, type SystemMessage } from "@earendil-works/pi-ai";
+import { ModelRegistry, ModelRuntime, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { attemptDirectResponsesOperation } from "../src/direct-responses-operation.ts";
 import {
   NATIVE_REPLAY_CHECKPOINT_FORMAT,
   REMOTE_COMPACTION_CHECKPOINT_MARKER,
@@ -70,7 +71,7 @@ function makeContext(
     abort() {
       aborts++;
     },
-    modelRegistry: {},
+    modelRegistry: { isUsingOAuth: () => false },
     sessionManager: { getBranch: () => branch, getSessionId: () => "test-session" },
   };
   return { context, notifications, aborts: () => aborts };
@@ -410,4 +411,136 @@ test("terminal unsupported compaction cancels without a text fallback", async ()
   assert.deepEqual(await handler(compactEvent(), state.context), { cancel: true });
   assert.equal(attempts, 1);
   assert.match(state.notifications[0]!.message, /no text fallback/);
+});
+
+// Approved seams: registered lifecycle hooks with Pi's real auth runtime and
+// production direct operation; fetch is the only remote boundary replaced.
+async function openaiAuthRuntime(oauth = true, apiKey?: string) {
+  const credentials = new InMemoryCredentialStore();
+  if (oauth) await credentials.modify("openai", async () => ({
+    type: "oauth", access: "test-oauth", refresh: "test-refresh", expires: 0,
+  }));
+  const runtime = await ModelRuntime.create({ credentials, modelsPath: null, refreshOnCreate: false });
+  if (apiKey) runtime.registerProvider("openai", { apiKey });
+  const refreshed = await runtime.refresh({ providers: ["openai"], allowNetwork: false });
+  assert.equal(refreshed.errors.size, 0);
+  return { runtime, registry: new ModelRegistry(runtime) };
+}
+
+test("OpenAI OAuth defers new compaction before authentication refresh or network dispatch", async () => {
+  const network = mock.method(globalThis, "fetch", async () => { throw new Error("unexpected network"); });
+  try {
+    const { registry } = await openaiAuthRuntime();
+    const selected = model({ provider: "openai" });
+    assert.equal(registry.isUsingOAuth(selected), true);
+    const { context } = makeContext(selected);
+    Object.assign(context as object, { modelRegistry: registry });
+    assert.equal(await install(attemptDirectResponsesOperation)(compactEvent(), context), undefined);
+    assert.equal(network.mock.callCount(), 0);
+  } finally {
+    network.mock.restore();
+  }
+});
+
+test("Pi runtime API-key override enables new and repeated OpenAI compaction; removing it restores OAuth deferral without blocking replay", async () => {
+  const requests: Array<{ authorization: string | null; payload: any }> = [];
+  const network = mock.method(globalThis, "fetch", async (_url: string | URL | Request, init?: RequestInit) => {
+    requests.push({ authorization: new Headers(init?.headers).get("authorization"), payload: JSON.parse(String(init?.body)) });
+    return new Response([
+      { type: "response.output_item.done", item: { type: "compaction", encrypted_content: "new-item" } },
+      { type: "response.completed", response: {} },
+    ].map(event => `data: ${JSON.stringify(event)}\n\n`).join(""));
+  });
+  try {
+    const { runtime, registry } = await openaiAuthRuntime();
+    const selected = model({ provider: "openai" });
+    const producer = model({ provider: "custom-codex", api: "openai-codex-responses" });
+    const branch = snapshotlessBranch(producer);
+    Object.assign(branch[2]!, { systemMessage: { role: "system", content: "saved instructions", timestamp: 1 } });
+    const { context } = makeContext(selected, "system instructions", branch);
+    Object.assign(context as object, { modelRegistry: registry });
+    const handler = install(attemptDirectResponsesOperation);
+
+    await runtime.setRuntimeApiKey("openai", "test-runtime-key");
+    assert.equal(registry.isUsingOAuth(selected), false);
+    assert.ok((await handler(compactEvent(), context))?.compaction);
+    assert.ok((await handler(compactEvent(branch), context))?.compaction);
+    assert.equal(requests.length, 2);
+    assert.equal(requests[0]!.authorization, "Bearer test-runtime-key");
+    assert.equal(requests[1]!.authorization, "Bearer test-runtime-key");
+    assert.deepEqual(requests[1]!.payload.input, [
+      { type: "compaction", encrypted_content: "opaque-item" },
+      { role: "user", content: [{ type: "input_text", text: "after" }] },
+      { type: "compaction_trigger" },
+    ]);
+
+    await runtime.removeRuntimeApiKey("openai");
+    assert.equal(registry.isUsingOAuth(selected), true);
+    const before = structuredClone(branch);
+    assert.equal(await handler(compactEvent(branch), context), undefined);
+    assert.equal(requests.length, 2, "OAuth re-compaction does not dispatch");
+    assert.deepEqual(branch, before, "deferral does not modify the existing checkpoint");
+    const replay = replayHook()({ payload: replayPayload() }, context);
+    assert.deepEqual(replay.input[0], { type: "compaction", encrypted_content: "opaque-item" });
+    assert.equal(replay.input.some((item: any) => item.type === "compaction_trigger"), false);
+  } finally {
+    network.mock.restore();
+  }
+});
+
+test("OpenAI environment and configured API keys permit compaction but do not override stored OAuth", async () => {
+  const previous = process.env.OPENAI_API_KEY;
+  process.env.OPENAI_API_KEY = "test-environment-key";
+  const authorizations: Array<string | null> = [];
+  const network = mock.method(globalThis, "fetch", async (_url: string | URL | Request, init?: RequestInit) => {
+    authorizations.push(new Headers(init?.headers).get("authorization"));
+    return new Response([
+      { type: "response.output_item.done", item: { type: "compaction", encrypted_content: "key-item" } },
+      { type: "response.completed", response: {} },
+    ].map(event => `data: ${JSON.stringify(event)}\n\n`).join(""));
+  });
+  try {
+    for (const configuredKey of [undefined, "test-configured-key"]) {
+      for (const oauth of [false, true]) {
+        const { registry } = await openaiAuthRuntime(oauth, configuredKey);
+        const selected = model({ provider: "openai" });
+        assert.equal(registry.isUsingOAuth(selected), oauth);
+        const { context } = makeContext(selected);
+        Object.assign(context as object, { modelRegistry: registry });
+        const before = authorizations.length;
+        const result = await install(attemptDirectResponsesOperation)(compactEvent(), context);
+        if (oauth) {
+          assert.equal(result, undefined);
+          assert.equal(authorizations.length, before);
+        } else {
+          assert.ok(result?.compaction);
+          assert.equal(authorizations.at(-1), `Bearer ${configuredKey ?? "test-environment-key"}`);
+        }
+      }
+    }
+    assert.equal(authorizations.length, 2);
+  } finally {
+    if (previous === undefined) delete process.env.OPENAI_API_KEY;
+    else process.env.OPENAI_API_KEY = previous;
+    network.mock.restore();
+  }
+});
+
+test("OAuth exclusion is exact-provider-only on either Responses API; unknown auth follows normal operation validation", async () => {
+  for (const api of ["openai-responses", "openai-codex-responses"]) {
+    for (const provider of ["openai", "openai-codex", "custom-provider", "OpenAI"]) {
+      const selected = model({ api, provider });
+      const { attempt, calls } = recordingAttempt();
+      const { context } = makeContext(selected);
+      Object.assign(context as object, { modelRegistry: { isUsingOAuth: () => true } });
+      const result = await install(attempt)(compactEvent(), context);
+      assert.equal(calls(), provider === "openai" ? 0 : 1);
+      if (provider === "openai") assert.equal(result, undefined);
+      else assert.ok(result?.compaction);
+    }
+  }
+  const { context, notifications } = makeContext(model({ provider: "openai" }));
+  const result = await install(async () => ({ kind: "terminal", error: new Error("Authentication unavailable") }))(compactEvent(), context);
+  assert.deepEqual(result, { cancel: true });
+  assert.match(notifications[0]!.message, /Authentication unavailable/);
 });

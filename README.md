@@ -29,9 +29,15 @@ For a global installation, omit `-l`.
 
 Eligibility requires a nonempty structured provider/API/model identity, an exact API type of `openai-responses` or `openai-codex-responses`, and a request model ID beginning with the case-sensitive literal prefix `gpt-`.
 
-Both API types work with any configured provider, including custom Codex providers and relays. Provider identity, credentials, and routing remain unchanged. Newly released GPT IDs need no extension catalog update. Display names and endpoint hostnames do not affect eligibility.
+Both API types work with configured providers, including custom Codex providers and relays. Provider identity, credentials, and routing remain unchanged. Newly released GPT IDs need no extension catalog update. Display names and endpoint hostnames do not affect eligibility.
 
 Matching does not trim, lowercase, strip namespaces, or resolve aliases: `gpt-` passes, but `GPT-example`, `openai/gpt-example`, and `codex-auto-review` do not. Non-GPT catalog exceptions from earlier releases are no longer eligible. Ineligible models leave new compaction to Pi.
+
+For exact provider `openai`, new and repeated Remote compaction are skipped when Pi reports OAuth authentication (including direct-sharing subscriptions). Pi's default compaction proceeds instead; this is not a failed Remote compaction fallback. API-key authentication can attempt compaction, subject to the same GPT/API rules and normal credential validation. Other providers are unchanged.
+
+The gate uses Pi's public `modelRegistry.isUsingOAuth(model)` status, not token shape or a direct `auth.json` read. Under Pi's normal managed lifecycle, a runtime `--api-key` override takes precedence over stored OAuth; stored OAuth takes precedence over configured or environment keys. Removing the runtime override restores OAuth deferral. Unconfigured authentication is not proof of an API key: the normal operation still resolves and validates credentials. The extension adds no auth refresh and does not promise atomicity with concurrent out-of-band credential edits.
+
+**Native replay has no authentication-method restriction.** OpenAI OAuth can still receive a compatible checkpoint from another provider. Skipping repeated Remote compaction does not rewrite the checkpoint; a later ordinary Pi compaction can supersede it under Pi's existing policy.
 
 **Eligibility permits an attempt, not proven backend interoperability.**
 
@@ -51,7 +57,7 @@ An eligible endpoint may reject another model, provider, account, or endpoint's 
 
 ### Failures do not produce a backup text summary
 
-Transient compaction failures may retry, up to three attempts total. Unsupported operations, context overflow, and other terminal failures cancel compaction. The extension does not truncate context to make it fit. A model outside the GPT-prefix/API policy is not an eligible attempt, so Pi's normal summarization runs; that is not a fallback from a failed Remote compaction.
+Transient compaction failures may retry, up to three attempts total. Unsupported operations, context overflow, and other terminal failures cancel compaction. The extension does not truncate context to make it fit. A model outside the GPT-prefix/API policy, or `openai` using OAuth, does not attempt Remote compaction, so Pi's normal summarization runs; that is not a fallback from a failed Remote compaction.
 
 If a checkpoint is broken or cannot be safely replayed, the extension stops the ordinary request rather than silently sending incomplete context. It never generates a portable text fallback.
 

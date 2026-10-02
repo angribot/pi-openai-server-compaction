@@ -29,6 +29,10 @@ On `session_before_compact`, an eligible model receives one read-only logical re
 
 A model outside the eligibility policy is not eligible for an attempt: the handler returns `undefined`, no adapter runs, and Pi's default compaction proceeds.
 
+Exact provider `openai` additionally defers new and repeated compaction when `context.modelRegistry.isUsingOAuth(model)` reports OAuth. The hook returns `undefined` before checkpoint preparation, credential resolution, or adapter dispatch; Native replay and other providers do not use this gate. This is an operation-specific exclusion, not a change to model eligibility or a fallback after a failed operation. Deferral leaves existing checkpoint data untouched, but a later ordinary Pi compaction can supersede it as before.
+
+Pi's public status reflects its managed auth lifecycle: runtime API keys override stored OAuth and removing the override restores OAuth status; stored OAuth wins over configured/environment keys. The gate does not inspect tokens, read credential files, resolve auth twice, or refresh OAuth. A false status does not certify usable API-key credentials; ordinary operation credential validation remains responsible for missing or invalid auth. No additional atomicity is promised for concurrent out-of-band credential-file edits. Direct-sharing subscription evidence supports this split: ordinary Responses and encrypted-item replay succeeded, but the v2 trigger returned HTTP 400 `subscription_sharing_unsupported_capability` at `input`.
+
 The request never includes active tool declarations (`tools`), including any inherited from the provider envelope or declaration-bearing `additional_tools`/`tool_search_*` items inherited from ordinary provider projection. Historical function calls and their outputs remain part of the projected input.
 
 The shared payload builder unconditionally sets `store: false` and `stream: true` for both adapters; these fixed wire fields are not part of the logical request. The direct `openai-responses` adapter sends only that minimal payload. For Codex Responses, the extension runs Pi's public provider operation with the current session ID, forced SSE, and provider retries disabled. Pi continues to own Codex authentication, account headers, endpoint routing, compression, and envelope fields such as `text`, `include`, `prompt_cache_key`, `tool_choice`, and `parallel_tool_calls`; the extension replaces only the model, projected input, instructions, `store`, and `stream` protocol invariants and removes `tools` and competing `messages` and `previous_response_id` fields. The extension performs no local token estimation, truncation, retained-history budgeting, tool-output rewriting, or other context fitting. Endpoint context overflow is terminal.
@@ -74,7 +78,7 @@ Continuity is re-derived from persisted successful assistant turns using the cur
 
 ## Native replay
 
-Both producer and target must be eligible. Neither class equality nor exact Model key equality is required: replay is optimistic across IDs, providers, and the two supported APIs. Credentials, accounts, headers, and resolved endpoints remain routing data. There is no catalog, remote class discovery, user override, or separate legacy eligibility policy.
+Both producer and target must be model-eligible; the `openai` OAuth compaction exclusion does not apply to Native replay. Neither class equality nor exact Model key equality is required: replay is optimistic across IDs, providers, and the two supported APIs. Credentials, accounts, headers, and resolved endpoints remain routing data. There is no catalog, remote class discovery, user override, or separate legacy eligibility policy.
 
 This deliberately trades advance compatibility checks for runtime rejection risk. OpenAI Codex's upstream `comp_hash` still describes compaction compatibility; removing the local gate does not prove those semantics irrelevant or all GPT backends interoperable. Old `2911` items may be submitted to a different eligible target and rejected.
 
@@ -88,7 +92,7 @@ For a compatible ordinary request, the extension:
 6. preserves provider instruction, tool, and reasoning items before and after the span; and
 7. removes competing `messages` and `previous_response_id` fields.
 
-`native-replay-checkpoint/1` records written without a host `systemMessage` snapshot remain readable for ordinary Native replay: the span still begins at the checkpoint marker, and no pre-checkpoint head is inferred or reconstructed. They cannot support a further Remote compaction, because the extension will not guess the instructions that were in effect when they were written. On `session_before_compact`, such a checkpoint produces the distinct `snapshot-unavailable` outcome, cancels before any remote attempt, and reports that a new session is required to compact again, with no text fallback. The boundary is the absence of the snapshot itself, not checkpoint age: a newer record without a snapshot is treated the same way, and a record that carries a snapshot keeps repeated-compaction support. No checkpoint format migration is introduced.
+`native-replay-checkpoint/1` records written without a host `systemMessage` snapshot remain readable for ordinary Native replay: the span still begins at the checkpoint marker, and no pre-checkpoint head is inferred or reconstructed. They cannot support a further Remote compaction, because the extension will not guess the instructions that were in effect when they were written. When Remote compaction is attempted, such a checkpoint produces the distinct `snapshot-unavailable` outcome, cancels before any remote attempt, and reports that a new session is required to compact again, with no text fallback. The boundary is the absence of the snapshot itself, not checkpoint age: a newer record without a snapshot is treated the same way, and a record that carries a snapshot keeps repeated-compaction support. No checkpoint format migration is introduced.
 
 A malformed active state, invalidated branch, non-array input, or missing/ambiguous span stops the ordinary request through `ctx.abort()` and emits an explicit error. It does not throw from the hook and allow Pi to continue with the old payload.
 
@@ -96,7 +100,7 @@ Selecting an incompatible model leaves its ordinary payload and transport untouc
 
 ## Repeated Remote compaction
 
-A repeated request may select any other Eligible model, subject to producer eligibility, continuity, integrity, and the host snapshot requirement. It contains, in order:
+A repeated request may select any other Eligible model, subject to the same `openai` OAuth exclusion as new compaction, producer eligibility, continuity, integrity, and the host snapshot requirement. It contains, in order:
 
 1. the current one-item replacement history;
 2. the projected model-visible branch suffix after the owning `CompactionEntry`; and
@@ -169,7 +173,7 @@ Its focused files are:
 
 - `tests/loader.test.ts` — production loader, package factory, exactly three hooks, and no provider override;
 - `tests/cache-warming-guard.test.ts` — the warming guard through Pi 0.99.1's real `CacheWarmer` decision/dispatch path and the production `ExtensionRunner`: every latest-checkpoint state stops before transport without aborting the main run, host warm and stop decisions pass through unchanged without a checkpoint, and branch changes are re-read without stale state;
-- `tests/remote-compaction.test.ts` — lifecycle-hook eligibility and historical replay matrices, retrospective continuity, repeated compaction, snapshot requirements, unsafe state hard stops, and terminal cancellation without text fallback;
+- `tests/remote-compaction.test.ts` — lifecycle-hook eligibility and historical replay matrices, real Pi auth-status/runtime-override transitions with production direct operations and mocked fetch, OAuth compaction deferral without blocking replay, retrospective continuity, repeated compaction, snapshot requirements, unsafe state hard stops, and terminal cancellation without text fallback;
 - `tests/remote-compaction-operation.test.ts` — direct and Pi-mediated one-attempt SSE operations, payload ownership, raw completion, validation, failure classification, usage, and abort;
 - `tests/native-replay.test.ts` — checkpoint restoration, repeated-compaction input, ordinary span replacement, span matching failures, continuity invalidation from persisted turns, and the snapshot-less read-but-no-recompact separation;
 - `tests/transcript-replay.test.ts` — Pi 0.99.1 transcript behavior checked through the real provider payload with a mocked fetch: leading and mid-conversation system messages, both capability modes and both API contracts, section and tool additions/removals/redefinitions, first and repeated compaction compared against the real provider projection, snapshot-less `/1` ordinary replay, real `SessionManager` restoration and branch navigation with newly created null-class details, production custom Codex compaction and cross-API replay with mocked fetch, call/result and missing-result ordering, and span failure handling.

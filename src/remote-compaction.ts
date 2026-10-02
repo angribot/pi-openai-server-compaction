@@ -120,6 +120,11 @@ export function installRemoteCompaction(
     const model = context.model;
     if (!model || remoteCompactionOperationKind(model) === undefined) return undefined;
     if (event.signal.aborted) return { cancel: true };
+    // Pi's auth status includes runtime key overrides; stored OAuth alone is
+    // not sufficient to identify the selected authentication method.
+    if (model.provider === "openai" && context.modelRegistry.isUsingOAuth(model)) {
+      return undefined;
+    }
 
     const branchEntries = event.branchEntries as BranchEntry[];
     const preparation = prepareCompactionReplay(branchEntries, model);

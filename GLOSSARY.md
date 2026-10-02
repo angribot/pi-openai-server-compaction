@@ -17,7 +17,7 @@ The standalone `/responses/compact` protocol whose response supplies the next co
 _Avoid_: Remote compaction v2
 
 **Eligible model**:
-A model permitted to attempt Remote compaction v2 with a valid nonempty provider identity, exact `openai-responses` or `openai-codex-responses` API, and a request model ID beginning with literal lowercase `gpt-`. Eligibility is provider-independent and does not prove endpoint capability.
+A model with a valid nonempty provider identity, exact `openai-responses` or `openai-codex-responses` API, and a request model ID beginning with literal lowercase `gpt-`. Model eligibility is provider-independent and does not prove endpoint capability; an operation-specific authentication restriction can still exclude Remote compaction without excluding Native replay.
 _Avoid_: Supported provider, compatible model, v2-capable endpoint
 
 **Remote compaction capability**:
