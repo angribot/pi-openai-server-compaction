@@ -1,6 +1,7 @@
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import { convertToLlm } from "@earendil-works/pi-coding-agent";
 import {
+  getDeclaredTools,
   getSystemMessageText,
   normalizeContext,
   renderSystemMessageUpdate,
@@ -12,6 +13,8 @@ import {
   type TextContent,
   type ThinkingContent,
   type ToolCall,
+  type Tool,
+  type SystemMessage,
 } from "@earendil-works/pi-ai";
 
 export type ResponsesItem = Record<string, unknown> & { type?: string };
@@ -34,11 +37,54 @@ export type CompactableContextOptions = {
    * update rather than the leading prompt.
    */
   hasPrecedingItems?: boolean;
+  /**
+   * Checkpoint-owned declarations inherited by a post-checkpoint suffix. Used
+   * only to classify historical tool items; never emitted as prompt or tools.
+   */
+  checkpointSystemMessage?: SystemMessage;
 };
 
 const NON_VISION_USER_IMAGE_PLACEHOLDER = "(image omitted: model does not support images)";
 const NON_VISION_TOOL_IMAGE_PLACEHOLDER = "(tool image omitted: model does not support images)";
 const OPENAI_TOOL_CALL_PROVIDERS = new Set(["openai", "openai-codex", "opencode"]);
+
+// Pi's extension loader cannot resolve api/constrained-sampling. Mirror its
+// grammar selection from all declared tools before transcript collapse, including
+// declarations needed by retained results whose calls precede the checkpoint.
+function grammarInputProperties(tools: readonly Tool[], model: Model<any>): Map<string, string> {
+  const properties = new Map<string, string>();
+  if (!(model.compat as { supportsOpenAIGrammarTools?: boolean } | undefined)?.supportsOpenAIGrammarTools) {
+    return properties;
+  }
+  for (const tool of tools) {
+    const config = tool.constrainedSampling;
+    if (!config || config.type !== "grammar") continue;
+    const variants = [config.variants.openai_lark, config.variants.openai_regex];
+    if (!variants.some((definition) => typeof definition === "string" && definition.trim().length > 0)) {
+      throw new Error(`Tool "${tool.name}" has no supported grammar variant.`);
+    }
+    const schema = tool.parameters as {
+      type?: unknown;
+      required?: unknown;
+      properties?: Record<string, { type?: unknown }>;
+    };
+    const required = schema.required;
+    if (schema.type !== "object" || !Array.isArray(required) || required.length !== 1 ||
+        typeof required[0] !== "string" || schema.properties?.[required[0]]?.type !== "string") {
+      throw new Error(`Grammar tool "${tool.name}" requires exactly one required string parameter.`);
+    }
+    properties.set(tool.name, required[0]);
+  }
+  return properties;
+}
+
+function grammarInput(call: ToolCall, property: string): string {
+  const input = call.arguments[property];
+  if (typeof input !== "string") {
+    throw new Error(`Grammar tool call "${call.name}" requires argument "${property}" to be a string.`);
+  }
+  return sanitizeSurrogates(input);
+}
 
 function sanitizeSurrogates(text: string): string {
   return text.replace(
@@ -303,13 +349,14 @@ function toolResultOutput(
 }
 
 // Mirrors Pi 0.99.1 `convertResponsesMessages` for the tool-free Remote compaction
-// subset: message/function-call items, Pi fallback IDs and phases, foreign
-// item-id normalization, function-call outputs, and API-specific leading-system
+// subset: message/function/custom-tool items, Pi fallback IDs and phases, foreign
+// item-id normalization, tool outputs, and API-specific leading-system
 // placement. It intentionally never emits tool declarations.
 function projectNormalizedMessages(
   messages: readonly Message[],
   model: Model<any>,
   options: CompactableContextOptions,
+  grammarToolInputProperties: ReadonlyMap<string, string>,
 ): ResponsesItem[] {
   const projected: ResponsesItem[] = [];
   const supportsDeveloperRole =
@@ -377,16 +424,20 @@ function projectNormalizedMessages(
         }
         if (block.type === "toolCall") {
           const [callId, rawItemId] = block.id.split("|");
+          const inputProperty = grammarToolInputProperties.get(block.name);
           let itemId: string | undefined = rawItemId;
-          if (!itemId?.startsWith("fc_") || isDifferentModel) {
+          const itemIdPrefix = inputProperty === undefined ? "fc_" : "ctc_";
+          if (isDifferentModel || !itemId?.startsWith(itemIdPrefix)) {
             itemId = undefined;
           }
           output.push({
-            type: "function_call",
+            type: inputProperty === undefined ? "function_call" : "custom_tool_call",
             ...(itemId ? { id: itemId } : {}),
             call_id: callId,
             name: block.name,
-            arguments: JSON.stringify(block.arguments),
+            ...(inputProperty === undefined
+              ? { arguments: JSON.stringify(block.arguments) }
+              : { input: grammarInput(block, inputProperty) }),
             ...(isSameModel && block.namespace !== undefined ? { namespace: block.namespace } : {}),
           });
         }
@@ -396,7 +447,9 @@ function projectNormalizedMessages(
     } else {
       const [callId] = message.toolCallId.split("|");
       projected.push({
-        type: "function_call_output",
+        type: grammarToolInputProperties.has(message.toolName)
+          ? "custom_tool_call_output"
+          : "function_call_output",
         call_id: callId,
         output: toolResultOutput(model, message.content),
       });
@@ -415,9 +468,13 @@ export function projectCompactableContext(
   const supportsMidConvoSystemMessages =
     (model.compat as { supportsMidConvoSystemMessages?: boolean } | undefined)
       ?.supportsMidConvoSystemMessages ?? false;
-  const resolved = resolveTranscript(
-    normalizeContext({ messages: convertToLlm([...messages]) }),
-    supportsMidConvoSystemMessages,
+  const context = normalizeContext({ messages: convertToLlm([...messages]) });
+  const declarationMessages = options.checkpointSystemMessage
+    ? [options.checkpointSystemMessage, ...context.messages]
+    : context.messages;
+  const grammarToolInputProperties = grammarInputProperties(getDeclaredTools(declarationMessages), model);
+  const resolved = resolveTranscript(context, supportsMidConvoSystemMessages);
+  return projectNormalizedMessages(
+    normalizeMessages(resolved.messages, model), model, options, grammarToolInputProperties,
   );
-  return projectNormalizedMessages(normalizeMessages(resolved.messages, model), model, options);
 }
