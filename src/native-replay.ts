@@ -428,6 +428,7 @@ export function prepareCompactionReplay(
           ...state.replacementHistory,
           ...projectCompactableContext(suffixMessages(branch, state), model, {
             includeSystemPrompt: false,
+            checkpointSystemMessage: state.entry.systemMessage,
             // A post-checkpoint system message continues the compacted transcript
             // rather than leading it; only mid-conversation models keep it in place.
             hasPrecedingItems: supportsMidConversationSystemMessages(model),

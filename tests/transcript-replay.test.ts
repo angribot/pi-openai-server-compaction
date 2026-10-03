@@ -822,3 +822,80 @@ test("an ordinary provider rejection surfaces without stripping the replay item 
   assert.match(result.errorMessage ?? "", /rejected compaction item/);
   assert.equal(requests, 1);
 });
+
+// Keep this provider-boundary regression: function-only fixtures cannot detect
+// custom wire types, and a retained result need not retain its originating call.
+test("compaction and native replay preserve grammar-tool wire types", async () => {
+  const grammarTool = {
+    name: "grammar",
+    description: "grammar tool",
+    parameters: { type: "object", properties: { code: { type: "string" } }, required: ["code"] },
+    constrainedSampling: { type: "grammar", variants: { openai_regex: ".*" } },
+  };
+  for (const kind of ["direct", "codex"] as const) {
+    for (const { grammar, retainCall } of [
+      { grammar: false, retainCall: true },
+      { grammar: true, retainCall: true },
+      { grammar: true, retainCall: false },
+    ]) {
+      const selected = model(kind, { compat: { supportsOpenAIGrammarTools: grammar } });
+      const call = assistantEntry("a1", "s1", {
+        provider: selected.provider, api: selected.api, model: selected.id,
+        content: [{ type: "toolCall", id: "call_1|ctc_item_1", name: "grammar", arguments: { code: "hello" } }],
+      });
+      const result = toolResultEntry("t1", "a1");
+      result.message = { ...result.message as any, toolCallId: "call_1|ctc_item_1", toolName: "grammar" };
+      const snapshot = { role: "system", content: "BASE", timestamp: 1, toolsAdded: [grammarTool] } as SystemMessage;
+      const before = [systemEntry("s1", null, snapshot), call, result];
+      const ordinary = await realProviderPayload(kind, selected, payloadMessages(before));
+      // On repeated compaction, only the checkpoint snapshot declares the tool.
+      // The checkpoint and retained user precede the new call/result suffix.
+      for (const update of retainCall ? [undefined, { ...grammarTool, constrainedSampling: false }] : []) {
+        const repeated = [
+          systemEntry("s0", null, snapshot),
+          userEntry("u0", "before", "s0"),
+          checkpointEntry("c0", "u0", "u0", checkpointDetails(selected), snapshot),
+          ...(update ? [systemEntry("s2", "c0", {
+            role: "system", content: "", timestamp: 2, toolsAdded: [update],
+          } as SystemMessage)] : []),
+          { ...call, parentId: update ? "s2" : "c0" }, result,
+        ];
+        const fullPayload = await realProviderPayload(kind, selected, payloadMessages(repeated));
+        const repeatedPreparation = prepareCompactionReplay(repeated, selected);
+        assert.equal(repeatedPreparation.kind, "ready");
+        if (repeatedPreparation.kind !== "ready") continue;
+        const toolItems = (items: readonly any[]) => items.filter((item) => item.call_id === "call_1");
+        assert.deepEqual(
+          repeatedPreparation.buildInput(),
+          [COMPACTION_ITEM, ...toolItems(fullPayload.input), { type: "compaction_trigger" }],
+          `${kind} repeated grammar=${grammar} redefined=${Boolean(update)}`,
+        );
+      }
+      const compaction = prepareCompactionReplay(before, selected);
+      assert.equal(compaction.kind, "ready");
+      if (compaction.kind !== "ready") continue;
+      assert.deepEqual(compaction.buildInput(), [
+        ...stripProviderDeclarations(kind, ordinary.input), { type: "compaction_trigger" },
+      ]);
+      const branch = [
+        ...before,
+        checkpointEntry("c1", "t1", retainCall ? "a1" : "t1", checkpointDetails(selected), snapshot),
+        userEntry("u2", "continue", "c1"),
+      ];
+      const payload = await realProviderPayload(kind, selected, payloadMessages(branch));
+      assert.equal(payload.input.some((item: any) => item.type === (grammar ? "custom_tool_call" : "function_call")), retainCall);
+      assert.ok(payload.input.some((item: any) => item.type === (grammar ? "custom_tool_call_output" : "function_call_output")));
+      const preparation = prepareNativeReplay(branch, selected);
+      assert.equal(preparation.kind, "compatible");
+      if (preparation.kind !== "compatible") continue;
+      const rewrite = preparation.rewrite(payload);
+      assert.equal(rewrite.kind, "patched", `${kind} grammar=${grammar} retainCall=${retainCall}`);
+      if (rewrite.kind !== "patched") continue;
+      const markerIndex = indexOfMarker(payload.input);
+      assert.deepEqual(rewrite.payload.input, [
+        ...payload.input.slice(0, markerIndex), COMPACTION_ITEM,
+        ...payload.input.slice(markerIndex + (retainCall ? 3 : 2)),
+      ]);
+    }
+  }
+});

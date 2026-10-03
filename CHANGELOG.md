@@ -4,6 +4,8 @@ This changelog intentionally starts at **0.1.0**.
 
 ## Unreleased
 
+- preserve grammar-tool call and result wire formats during Remote compaction and Native replay, fixing missing-span aborts on the first continuation after compaction for models with grammar tools enabled; repeated compaction inherits checkpoint-owned tool declarations while honoring later redefinitions
+
 ## 0.14.0 - 2026-10-02
 
 - skip new and repeated Remote compaction for exact provider `openai` when Pi reports OAuth authentication, deferring to Pi before remote dispatch; runtime API-key overrides remain eligible, other providers are unchanged, and Native replay remains available with OAuth
