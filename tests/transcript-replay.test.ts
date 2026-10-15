@@ -1053,12 +1053,12 @@ test("64K retention follows source-backed text and enabled-image boundary fixtur
   }
 });
 
-test("multi-item checkpoints survive reload and branch navigation without resurrecting discarded history", async (t) => {
+test("multi-item checkpoints preserve declarations, replay, and warming protection across reload and navigation", async (t) => {
   const directory = mkdtempSync(join(process.cwd(), ".test-retention-"));
   t.after(() => rmSync(directory, { recursive: true, force: true }));
   for (const kind of ["direct", "codex"] as const) {
     const newest = "n".repeat(256_000);
-    const snapshot = { role: "system", content: "BASE", timestamp: 1 } as SystemMessage;
+    const snapshot: SystemMessage = { role: "system", content: "BASE", toolsAdded: [READ_TOOL], timestamp: 1 };
     const h = compactionHarness(kind, [systemEntry("s0", null, snapshot),
       userEntry("old", "must never resurrect", "s0"), userEntry("new", newest, "old")]);
     const sent: Record<string, any>[] = [];
@@ -1067,13 +1067,20 @@ test("multi-item checkpoints survive reload and branch navigation without resurr
       sent.push(requestBody(init)); return compactionResponse(item(sent.length));
     });
     try {
+      assert.equal(h.handlers.cache_warming_decision!({}, h.context), undefined);
+      const initialPayload = await realProviderPayload(kind, h.context.model,
+        convertToLlm(h.session.buildSessionContext().messages) as Message[]);
       const first = (await h.compact()).compaction;
+      assert.deepEqual(sent[0]!.tools, initialPayload.tools);
       const firstId = h.session.appendCompaction(first.summary, null, first.tokensBefore, first.details, true);
       h.session.appendMessage({ role: "user", content: "later", timestamp: 3 });
       const file = join(directory, `${kind}.jsonl`);
       writeFileSync(file, [h.session.getHeader(), ...h.session.getEntries()].map(e => JSON.stringify(e)).join("\n") + "\n");
       const reloaded = SessionManager.open(file, directory);
       h.context.sessionManager = reloaded;
+      reloaded.appendMessage({ role: "system", content: "",
+        toolsAdded: [{ ...READ_TOOL, description: "redefined after reload" }], timestamp: 4 });
+      assert.deepEqual(h.handlers.cache_warming_decision!({}, h.context), { action: "stop" });
       const replay = async () => {
         const original = await realProviderPayload(kind, h.context.model,
           convertToLlm(reloaded.buildSessionContext().messages) as Message[]);
@@ -1081,6 +1088,7 @@ test("multi-item checkpoints survive reload and branch navigation without resurr
         assert.equal(h.aborts(), 0, h.notifications.join("\n"));
         assert.equal(JSON.stringify(result.input).includes("must never resurrect"), false);
         assert.equal(result.input.filter((i: any) => i.type === "compaction").length, 1);
+        assert.deepEqual(result.tools, original.tools, "replay preserves the provider's current declarations");
         return result;
       };
       const replayed = await replay();
@@ -1089,6 +1097,8 @@ test("multi-item checkpoints survive reload and branch navigation without resurr
         { role: "user", content: [{ type: "input_text", text: "later" }] },
       ]);
       const second = (await h.compact()).compaction;
+      assert.deepEqual(sent[1]!.tools, replayed.tools);
+      assert.equal(sent[1]!.tools[0].description, "redefined after reload");
       assert.deepEqual(sent[1]!.input, [...first.details.nativeReplayCheckpoint.replacementHistory,
         { role: "user", content: [{ type: "input_text", text: "later" }] }, { type: "compaction_trigger" }]);
       const secondId = reloaded.appendCompaction(second.summary, second.firstKeptEntryId, second.tokensBefore, second.details, true);

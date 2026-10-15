@@ -228,9 +228,10 @@ test("every active Remote compaction checkpoint state stops warming regardless o
     ],
     [
       "checkpoint invalidated by a successful incompatible turn",
-      [...checkpoint, assistantEntry("a2", 1_000_000, "gpt-other")],
+      [...checkpoint, assistantEntry("a2", 1_000_000, "non-gpt-model")],
       true,
     ],
+    ["ineligible checkpoint producer", checkpointBranch(nativeDetails({ modelId: "non-gpt-model" })), true],
     ["malformed checkpoint details", checkpointBranch({}), true],
     [
       "checkpoint without details",
@@ -352,10 +353,18 @@ test("Pi's real CacheWarmer stops before transport and leaves its own decisions 
   assert.equal(protectedRun.status.state, "inactive");
   assert.equal(protectedRun.status.extensionOverride, true, "the guard stopped the refresh");
 
-  const warmRun = await runWarmer([userEntry("u1"), assistantEntry("a1")]);
-  assert.ok(warmRun.decisions >= 1, "the ordinary decision must run");
-  assert.equal(warmRun.streamSimpleCalls, 1, "ordinary warming still reaches the provider");
-  assert.equal(warmRun.aborts, 0);
+  for (const branch of [
+    [userEntry("u1"), assistantEntry("a1")],
+    [userEntry("u1"), assistantEntry("a1"),
+      compactionEntry("c1", REMOTE_COMPACTION_CHECKPOINT_MARKER, nativeDetails()),
+      compactionEntry("c2", "ordinary summary")],
+  ]) {
+    const warmRun = await runWarmer(branch);
+    assert.ok(warmRun.decisions >= 1, "the ordinary decision must run");
+    assert.equal(warmRun.streamSimpleCalls, 1, "ordinary warming, including supersession, reaches the provider");
+    assert.equal(warmRun.aborts, 0);
+    assert.equal(warmRun.status.extensionOverride, false, "no stale checkpoint protection");
+  }
 
   // A successful turn with tiny prompt usage makes Pi's own economics decide
   // "stop"; the extension must leave that decision unchanged and still not

@@ -8,7 +8,7 @@ The endpoint returns an opaque compaction item. This extension saves it with bou
 
 ## Quick start
 
-You need Node **22 or newer**, Pi (**1.2.0** is the implementation and validation baseline), and working Pi-managed credentials for an eligible model. The endpoint must support the compaction protocol described below.
+You need Node **22 or newer**, Pi (**1.2.0** is the implementation and validation baseline), and working Pi-managed credentials for an eligible model. The endpoint must support Remote compaction v2, not just ordinary Responses.
 
 Install in your project:
 
@@ -27,21 +27,11 @@ For a global installation, omit `-l`.
 
 ## Which models can use it?
 
-Eligibility requires a nonempty structured provider/API/model identity, an exact API type of `openai-responses` or `openai-codex-responses`, and a request model ID beginning with the case-sensitive literal prefix `gpt-`.
+Use a request model ID beginning with literal lowercase `gpt-` on `openai-responses` or `openai-codex-responses`. Configured providers, including custom Codex providers and relays, retain their Pi-managed credentials and routing. No extension model catalog is required.
 
-Both API types work with configured providers, including custom Codex providers and relays. Provider identity, credentials, and routing remain unchanged. Newly released GPT IDs need no extension catalog update. Display names and endpoint hostnames do not affect eligibility.
+For exact provider `openai` with OAuth, Remote compaction defers to Pi's ordinary compaction; Native replay remains available. See [eligibility and authentication](docs/reference.md#eligibility-and-authentication) for exact matching and credential precedence.
 
-Matching does not trim, lowercase, strip namespaces, or resolve aliases: `gpt-` passes, but `GPT-example`, `openai/gpt-example`, and `codex-auto-review` do not. Non-GPT catalog exceptions from earlier releases are no longer eligible. Ineligible models leave new compaction to Pi.
-
-For exact provider `openai`, new and repeated Remote compaction are skipped when Pi reports OAuth authentication (including direct-sharing subscriptions). Pi's default compaction proceeds instead; this is not a failed Remote compaction fallback. API-key authentication can attempt compaction, subject to the same GPT/API rules and normal credential validation. Other providers are unchanged.
-
-The gate uses Pi's public `modelRegistry.isUsingOAuth(model)` status, not token shape or a direct `auth.json` read. Under Pi's normal managed lifecycle, a runtime `--api-key` override takes precedence over stored OAuth; stored OAuth takes precedence over configured or environment keys. Removing the runtime override restores OAuth deferral. Unconfigured authentication is not proof of an API key: the normal operation still resolves and validates credentials. The extension adds no auth refresh and does not promise atomicity with concurrent out-of-band credential edits.
-
-**Native replay has no authentication-method restriction.** OpenAI OAuth can still receive a compatible checkpoint from another provider. Skipping repeated Remote compaction does not rewrite the checkpoint; a later ordinary Pi compaction can supersede it under Pi's existing policy.
-
-**Eligibility permits an attempt, not proven backend interoperability.**
-
-The endpoint must accept **Remote compaction v2**: a request to `/responses` ending in a `compaction_trigger`, returning a compaction item that can be replayed later. This extension does **not** use `/responses/compact`. Ordinary Responses support alone is insufficient; capability is discovered when compaction is attempted.
+**Eligibility permits an attempt, not proven backend interoperability.** The endpoint must accept the v2 trigger on `/responses` and replay the returned item. This extension does not use `/responses/compact`.
 
 ## Before using it on an important session
 
@@ -49,11 +39,9 @@ The endpoint must accept **Remote compaction v2**: a request to `/responses` end
 
 The saved compaction item is not a portable summary. Any eligible producer's item may be submitted to any eligible target, across model IDs, providers, and both supported API types, without comparing compatibility classes or requiring an exact Model key. See the [optimistic replay policy](docs/reference.md#native-replay).
 
-This policy applies retrospectively to supported checkpoints and successful historical turns. A branch previously invalidated solely by differing classes can replay again. Historical `2911`, `3000`, other nonempty classes, and explicit null classes are readable metadata, not replay gates. New checkpoints write null classes.
-
 Selecting an incompatible model produces a warning and leaves that model's ordinary request unchanged, **without access to detailed pre-checkpoint context**. Merely switching models does not invalidate the checkpoint, but a successful incompatible assistant turn does. After that, Native replay and further Remote compaction stop on that branch.
 
-An eligible endpoint may reject another model, provider, account, or endpoint's opaque item, including old `2911` history. Ordinary provider errors surface without stripping the item and retrying.
+An eligible endpoint may reject another model, provider, account, or endpoint's opaque item. Ordinary provider errors surface without stripping the item and retrying.
 
 ### Recent user wording remains explicit
 
@@ -65,21 +53,19 @@ Compaction includes the tools Pi projects for the selected model, including supp
 
 ### Failures do not produce a backup text summary
 
-Transient compaction failures may retry, up to three attempts total. Unsupported operations, context overflow, and other terminal failures cancel compaction. The extension does not truncate context to make it fit. A model outside the GPT-prefix/API policy, or `openai` using OAuth, does not attempt Remote compaction, so Pi's normal summarization runs; that is not a fallback from a failed Remote compaction.
+A failed Remote compaction is cancelled after bounded retries or a terminal error, including context overflow. The extension does not truncate its input to make it fit; see [retry and failure behavior](docs/reference.md#retry-and-failure-behavior).
 
 If a checkpoint is broken or cannot be safely replayed, the extension stops the ordinary request rather than silently sending incomplete context. It never generates a portable text fallback.
 
-### Legacy checkpoints are not supported
+### Check compatibility before downgrading
 
-New checkpoints use `native-replay-checkpoint/2`; supported `/1` records remain readable without migration or historical-text backfill. A later successful compaction can naturally supersede an old checkpoint. Snapshot-less checkpoints allow ordinary replay but cannot compact again; see [persistence and snapshot compatibility](docs/reference.md#persistence).
+New `/2` checkpoints retain explicit user history; supported `/1` checkpoints remain readable. Older `/1`-only extension releases cannot replay `/2`: start a new session or return to a branch point before the new checkpoint before downgrading.
 
-Older extension releases that only understand `/1` cannot replay new `/2` checkpoints. Before downgrading, start a new session or return to a branch point before the new checkpoint. Legacy `remoteCompaction` records, including those written by v0.8.0 and earlier, remain unsupported with no migration path.
+Legacy `remoteCompaction` checkpoints remain unsupported. See [persistence and snapshot compatibility](docs/reference.md#persistence) for format and repeated-compaction limits.
 
 ### Active checkpoints pause prompt-cache warming
 
-Pi 1.2.0 can refresh a prompt cache during long runs. A warming refresh re-runs the provider-request hook with its own abort controller, so the extension cannot rely on its fail-closed replay path to stop it. While the active branch's latest compaction is a Remote compaction checkpoint, the extension stops those refreshes before dispatch through Pi's `cache_warming_decision` hook, including broken, invalidated, incompatible, and legacy checkpoints. This keeps a protected refresh from bypassing fail-closed replay or disturbing the concurrent run.
-
-When the branch has no such checkpoint, Pi's decision is left unchanged: ordinary prompt caching, warming, and unrelated branches keep working. The trade-off is that proactive prompt-cache refreshes stay paused while a Remote compaction checkpoint is the active branch's latest compaction. Pi may schedule another refresh, but the guard re-evaluates the branch and stops each protected refresh until the checkpoint is superseded. The hook stops a refresh before dispatch only; it does not cancel a refresh already in flight or provide general request-specific cancellation.
+Proactive prompt-cache refreshes pause while a Remote compaction checkpoint is the active branch's latest compaction. Ordinary prompt caching remains available; warming resumes under Pi's policy on branches without that checkpoint or after ordinary compaction supersedes it. See the [warming guard](docs/reference.md#prompt-cache-warming-guard) for the safety boundary.
 
 ## Troubleshooting
 
@@ -87,6 +73,7 @@ When the branch has no such checkpoint, Pi's decision is left unchanged: ordinar
 | --- | --- |
 | Endpoint rejects compaction | Confirm it supports the v2 trigger, not just Responses or `/responses/compact`. |
 | Context overflow or retries exhausted | Compaction was cancelled; no text fallback was used. Start a new session if you cannot continue. |
+| Checkpoint has no system-message snapshot | Ordinary replay still works, but start a new session to compact again. |
 | Replay reports broken state, missing/ambiguous input, or a compatibility turn that cannot be proven | Start a new session or return to a complete branch point before the affected checkpoint. Do not continue with incomplete context. |
 | A different endpoint rejects a supposedly compatible item | Treat that route as unavailable for this session; the extension will not strip the item and retry. |
 
@@ -111,7 +98,7 @@ Run type checking and offline tests (no credentials or network needed):
 npm test
 ```
 
-`npm test` covers the extension loader, the cache-warming guard through Pi's real warmer decision/dispatch path, and the transport/projection contracts, but not credentialed end-to-end compaction or replay continuity. Offline lifecycle and real-provider/mock-fetch tests cover optimistic eligibility, continuity, and custom Codex routing; they also cover bounded retries and retry-delay cancellation, but do not prove live backend interoperability. See [testing coverage](docs/reference.md#testing) and the [test ownership rule](docs/reference.md#test-ownership).
+See [testing coverage](docs/reference.md#testing) for offline acceptance and its limits. These tests do not prove live backend interoperability.
 
 - [Technical reference](docs/reference.md): protocol, checkpoint format, replay, retries, transport limitations, and repository layout.
 - [Domain glossary](GLOSSARY.md) and [architecture decisions](docs/adr/).
