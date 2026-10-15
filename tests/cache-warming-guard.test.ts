@@ -182,7 +182,10 @@ function nativeDetails(options: { modelId?: string; compatibilityClass?: string 
         compactionCompatibilityClass:
           options.compatibilityClass === undefined ? "3000" : options.compatibilityClass,
       },
-      replacementHistory: [{ type: "compaction", encrypted_content: "opaque-item" }],
+      replacementHistory: [
+        { role: "user", content: [{ type: "input_text", text: "explicit retained wording" }] },
+        { type: "compaction", encrypted_content: "opaque-item" },
+      ],
     },
   };
 }
@@ -274,7 +277,7 @@ test("each decision follows the current branch without stale suppression", async
   assert.equal(await decide(harness, "warm"), "stop", "a restored checkpoint protects again");
 });
 
-test("Pi 0.99.1's real CacheWarmer stops before transport and leaves its own decisions unchanged", async () => {
+test("Pi's real CacheWarmer stops before transport and leaves its own decisions unchanged", async () => {
   const harness = await loadHarness();
   const { CacheWarmer } = (await import(cacheWarmerUrl.href)) as {
     CacheWarmer: CacheWarmerConstructor;

@@ -10,6 +10,11 @@ import {
 import { buildSessionContext } from "@earendil-works/pi-coding-agent";
 import type { CompactionItem } from "./remote-compaction-operation.ts";
 import { projectCompactableContext, type ResponsesItem } from "./responses-projection.ts";
+import {
+  isRetainedUserMessage,
+  retainUserHistory,
+  type RetainedUserMessage,
+} from "./retained-user-history.ts";
 
 export const REMOTE_COMPACTION_CHECKPOINT_MARKER =
   "[Remote Responses compaction checkpoint]\n\n" +
@@ -24,16 +29,17 @@ export type RemoteCompactionModelKey = {
   id: string;
 };
 
-export const NATIVE_REPLAY_CHECKPOINT_FORMAT = "native-replay-checkpoint/1";
+export const NATIVE_REPLAY_CHECKPOINT_FORMAT = "native-replay-checkpoint/2";
+const SINGLE_ITEM_CHECKPOINT_FORMAT = "native-replay-checkpoint/1";
 
 export type NativeReplayCheckpointDetails = {
   nativeReplayCheckpoint: {
-    format: typeof NATIVE_REPLAY_CHECKPOINT_FORMAT;
+    format: typeof NATIVE_REPLAY_CHECKPOINT_FORMAT | typeof SINGLE_ITEM_CHECKPOINT_FORMAT;
     producer: {
       modelKey: RemoteCompactionModelKey;
       compactionCompatibilityClass: string | null;
     };
-    replacementHistory: [CompactionItem];
+    replacementHistory: [...RetainedUserMessage[], CompactionItem];
   };
 };
 
@@ -59,8 +65,7 @@ type ValidReplayState = {
   entry: BranchEntry;
   entryIndex: number;
   modelKey: RemoteCompactionModelKey;
-  compactionCompatibilityClass: string | null;
-  replacementHistory: [CompactionItem];
+  replacementHistory: [...RetainedUserMessage[], CompactionItem];
   invalidated: boolean;
 };
 
@@ -179,7 +184,8 @@ function decodeNativeDetails(
   const checkpoint = value.nativeReplayCheckpoint;
   if (
     !isRecord(checkpoint) ||
-    checkpoint.format !== NATIVE_REPLAY_CHECKPOINT_FORMAT ||
+    (checkpoint.format !== NATIVE_REPLAY_CHECKPOINT_FORMAT &&
+      checkpoint.format !== SINGLE_ITEM_CHECKPOINT_FORMAT) ||
     !isRecord(checkpoint.producer) ||
     !isRecord(checkpoint.producer.modelKey)
   ) {
@@ -195,15 +201,17 @@ function decodeNativeDetails(
     !key ||
     (compatibilityClass !== null && !isCompatibilityClass(compatibilityClass)) ||
     !Array.isArray(checkpoint.replacementHistory) ||
-    checkpoint.replacementHistory.length !== 1 ||
-    !isCompactionItem(checkpoint.replacementHistory[0])
+    checkpoint.replacementHistory.length === 0 ||
+    !isCompactionItem(checkpoint.replacementHistory.at(-1)) ||
+    (checkpoint.format === SINGLE_ITEM_CHECKPOINT_FORMAT
+      ? checkpoint.replacementHistory.length !== 1
+      : !checkpoint.replacementHistory.slice(0, -1).every(isRetainedUserMessage))
   ) {
     return undefined;
   }
   return {
     modelKey: key,
-    compactionCompatibilityClass: compatibilityClass,
-    replacementHistory: [checkpoint.replacementHistory[0]],
+    replacementHistory: checkpoint.replacementHistory as [...RetainedUserMessage[], CompactionItem],
   };
 }
 
@@ -334,7 +342,8 @@ function checkpointSpan(
 ): ResponsesItem[] | undefined {
   if (
     typeof state.entry.firstKeptEntryId !== "string" ||
-    !branch.slice(0, state.entryIndex).some((entry) => entry.id === state.entry.firstKeptEntryId)
+    (state.entry.firstKeptEntryId !== state.entry.id &&
+      !branch.slice(0, state.entryIndex).some((entry) => entry.id === state.entry.firstKeptEntryId))
   ) {
     return undefined;
   }
@@ -425,35 +434,54 @@ export function prepareCompactionReplay(
     if (state.entry.systemMessage === undefined) return { kind: "snapshot-unavailable" };
   }
 
+  let prepared: { input: ResponsesItem[]; users: RetainedUserMessage[] } | undefined;
+  const prepare = () => {
+    if (prepared) return prepared;
+    const messages =
+      state.kind === "valid"
+        ? suffixMessages(branch, state)
+        : buildSessionContext(branch as Parameters<typeof buildSessionContext>[0]).messages;
+    // Select provenance before convertToLlm can turn summaries into user roles.
+    const users = projectCompactableContext(
+      messages.filter((message) => message.role === "user"),
+      model,
+      { includeSystemPrompt: false },
+    ).filter(isRetainedUserMessage);
+    const suffix = projectCompactableContext(messages, model, {
+      includeSystemPrompt: false,
+      ...(state.kind === "valid"
+        ? {
+            checkpointSystemMessage: state.entry.systemMessage,
+            // A leading suffix update continues the compacted transcript.
+            hasPrecedingItems: supportsMidConversationSystemMessages(model),
+          }
+        : {}),
+    });
+    prepared = {
+      input: [
+        ...(state.kind === "valid" ? state.replacementHistory : []),
+        ...suffix,
+        { type: "compaction_trigger" },
+      ],
+      users: [
+        ...(state.kind === "valid" ? state.replacementHistory.filter(isRetainedUserMessage) : []),
+        ...users,
+      ],
+    };
+    return prepared;
+  };
+
   return {
     kind: "ready",
     buildInput() {
-      if (state.kind === "valid") {
-        return [
-          ...state.replacementHistory,
-          ...projectCompactableContext(suffixMessages(branch, state), model, {
-            includeSystemPrompt: false,
-            checkpointSystemMessage: state.entry.systemMessage,
-            // A post-checkpoint system message continues the compacted transcript
-            // rather than leading it; only mid-conversation models keep it in place.
-            hasPrecedingItems: supportsMidConversationSystemMessages(model),
-          }),
-          { type: "compaction_trigger" },
-        ];
-      }
-      const messages = projectCompactableContext(
-        buildSessionContext(branch as Parameters<typeof buildSessionContext>[0]).messages,
-        model,
-        { includeSystemPrompt: false },
-      );
-      return [...messages, { type: "compaction_trigger" }];
+      return prepare().input;
     },
     createCheckpointDetails(item) {
       return {
         nativeReplayCheckpoint: {
           format: NATIVE_REPLAY_CHECKPOINT_FORMAT,
           producer,
-          replacementHistory: [item],
+          replacementHistory: [...retainUserHistory(prepare().users), item],
         },
       };
     },

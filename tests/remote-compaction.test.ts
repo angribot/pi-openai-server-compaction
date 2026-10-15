@@ -103,7 +103,7 @@ function systemEntry(id: string, parentId: string | null, message: SystemMessage
 function replayDetails(selected: Model<any>): NativeReplayCheckpointDetails {
   return {
     nativeReplayCheckpoint: {
-      format: NATIVE_REPLAY_CHECKPOINT_FORMAT,
+      format: "native-replay-checkpoint/1",
       producer: {
         modelKey: {
           provider: selected.provider,

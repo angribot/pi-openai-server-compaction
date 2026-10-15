@@ -2,7 +2,7 @@
 
 A Pi extension that lets a Responses endpoint compact older conversation context and reuse the result in later requests, instead of creating a text summary.
 
-The endpoint returns an opaque compaction item. This extension saves it with your session and sends it back when you continue with a compatible model (**Native replay**).
+The endpoint returns an opaque compaction item. This extension saves it with bounded recent user history and sends that replacement history back when you continue with a compatible model (**Native replay**).
 
 > **Experimental.** Try a project-local installation and a new session first. Compacted context is not portable to every model.
 
@@ -55,6 +55,10 @@ Selecting an incompatible model produces a warning and leaves that model's ordin
 
 An eligible endpoint may reject another model, provider, account, or endpoint's opaque item, including old `2911` history. Ordinary provider errors surface without stripping the item and retrying.
 
+### Recent user wording remains explicit
+
+Successful compaction retains recent original user messages and supported images beside the opaque item, using a fixed 64K approximate-token budget independent of Pi's `keepRecentTokens`. Newer messages take priority; an oversized boundary may be truncated. The full supported compactable context still reaches the compaction endpoint first. This budget does not guarantee fit on small-window targets; see [retention details](docs/reference.md#bounded-explicit-user-history).
+
 ### Failures do not produce a backup text summary
 
 Transient compaction failures may retry, up to three attempts total. Unsupported operations, context overflow, and other terminal failures cancel compaction. The extension does not truncate context to make it fit. A model outside the GPT-prefix/API policy, or `openai` using OAuth, does not attempt Remote compaction, so Pi's normal summarization runs; that is not a fallback from a failed Remote compaction.
@@ -63,7 +67,9 @@ If a checkpoint is broken or cannot be safely replayed, the extension stops the 
 
 ### Legacy checkpoints are not supported
 
-Only `nativeReplayCheckpoint` records with format `native-replay-checkpoint/1` are supported. Records in that format without a host `systemMessage` snapshot remain readable for ordinary Native replay, but the extension cannot reconstruct their instructions, so it cancels a further Remote compaction before any attempt and asks for a new session. Legacy `remoteCompaction` records, including those written by v0.8.0 and earlier, have no migration path. Start a new session or return to a branch point before the old checkpoint.
+New checkpoints use `native-replay-checkpoint/2`; supported `/1` records remain readable without migration or historical-text backfill. A later successful compaction can naturally supersede an old checkpoint. Snapshot-less checkpoints allow ordinary replay but cannot compact again; see [persistence and snapshot compatibility](docs/reference.md#persistence).
+
+Older extension releases that only understand `/1` cannot replay new `/2` checkpoints. Before downgrading, start a new session or return to a branch point before the new checkpoint. Legacy `remoteCompaction` records, including those written by v0.8.0 and earlier, remain unsupported with no migration path.
 
 ### Active checkpoints pause prompt-cache warming
 

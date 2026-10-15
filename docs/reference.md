@@ -6,7 +6,7 @@ Eligible models have a valid structured identity, either exact case-sensitive AP
 
 > **Status:** experimental. Install project-local first and keep rollback easy.
 
-> **Persisted-session compatibility:** only self-describing `nativeReplayCheckpoint` records with format `native-replay-checkpoint/1` are supported, preserving the producer's creation-time Compaction compatibility class or explicit `null`. Records in that format written without a host `systemMessage` snapshot remain readable for ordinary Native replay, but a further Remote compaction is cancelled before any attempt because the extension cannot reconstruct their instructions. Legacy `remoteCompaction` records, including the structured version 2 records written by v0.8.0 and all earlier formats, are no longer readable. If the active branch's latest compaction is a legacy checkpoint, ordinary requests abort and Remote compaction on an Eligible model is cancelled. Start a new session or return to a point before that checkpoint. No in-place migration or text fallback is provided.
+> **Persisted-session compatibility:** self-describing `nativeReplayCheckpoint` records with formats `native-replay-checkpoint/1` and `/2` are supported. New records use `/2` for bounded retained user history followed by one compaction item; `/1` keeps its original single-item integrity checks and historical class validation. Either format without a host `systemMessage` snapshot remains readable for ordinary Native replay, but further Remote compaction is cancelled before dispatch because its instructions cannot be reconstructed. Older extension releases that understand only `/1` cannot replay newly written `/2` checkpoints; downgrading requires a new session or a branch point before that checkpoint. Legacy `remoteCompaction` records, including the structured version 2 records written by v0.8.0 and all earlier formats, are no longer readable. If the active branch's latest compaction is a legacy checkpoint, ordinary requests abort and Remote compaction on an Eligible model is cancelled. Start a new session or return to a point before that checkpoint. No in-place migration or text fallback is provided.
 
 ## Requirements
 
@@ -35,11 +35,21 @@ Pi's public status reflects its managed auth lifecycle: runtime API keys overrid
 
 The request never includes active tool declarations (`tools`), including any inherited from the provider envelope or declaration-bearing `additional_tools`/`tool_search_*` items inherited from ordinary provider projection. Historical function calls and their outputs remain part of the projected input.
 
-The shared payload builder unconditionally sets `store: false` and `stream: true` for both adapters; these fixed wire fields are not part of the logical request. The direct `openai-responses` adapter sends only that minimal payload. For Codex Responses, the extension runs Pi's public provider operation with the current session ID, forced SSE, and provider retries disabled. Pi continues to own Codex authentication, account headers, endpoint routing, compression, and envelope fields such as `text`, `include`, `prompt_cache_key`, `tool_choice`, and `parallel_tool_calls`; the extension replaces only the model, projected input, instructions, `store`, and `stream` protocol invariants and removes `tools` and competing `messages` and `previous_response_id` fields. The extension performs no local token estimation, truncation, retained-history budgeting, tool-output rewriting, or other context fitting. Endpoint context overflow is terminal.
+The shared payload builder unconditionally sets `store: false` and `stream: true` for both adapters; these fixed wire fields are not part of the logical request. The direct `openai-responses` adapter sends only that minimal payload. For Codex Responses, the extension runs Pi's public provider operation with the current session ID, forced SSE, and provider retries disabled. Pi continues to own Codex authentication, account headers, endpoint routing, compression, and envelope fields such as `text`, `include`, `prompt_cache_key`, `tool_choice`, and `parallel_tool_calls`; the extension replaces only the model, projected input, instructions, `store`, and `stream` protocol invariants and removes `tools` and competing `messages` and `previous_response_id` fields. The extension performs no preflight context fitting or tool-output rewriting. The complete supported compactable context reaches the endpoint; only successful replacement history is retention-budgeted afterward. Endpoint context overflow remains terminal.
 
 Success requires an explicit raw `response.completed` or `response.done` event, Pi's Codex provider completion when applicable, and exactly one output item with `type: "compaction"` and string `encrypted_content`. Empty ciphertext is valid, an item `id` is optional, unknown item fields are preserved, and unrelated output items are ignored. Parseable usage is returned only through Pi's standard compaction usage field.
 
 A successful operation returns one atomic custom compaction. It never calls `appendEntry()`, generates a second text summary, persists intermediate state, or falls back to Pi's text compactor.
+
+## Bounded explicit user history
+
+After validated Remote compaction, replacement history contains eligible original user messages followed by exactly one newly accepted compaction item. Eligibility is selected from Pi's compaction-aware context before provider conversion: synthetic compaction/branch summaries, checkpoint markers, assistant/tool history, and triggers are not reclassified as original user messages merely because conversion assigns a user role.
+
+The fixed retention budget is **64,000 approximate tokens**, independent of Pi's `keepRecentTokens`, with no extension setting. Newer messages take priority; retained messages return to chronological order. Text is charged at one token per four UTF-8 bytes, rounded up per content part, with a minimum one-token charge per message. An over-budget text-only boundary preserves earlier content parts and middle-truncates the final text part on UTF-8 boundaries, preserving both ends. Its `…N tokens truncated…` notice is outside the retained-text budget, following upstream behavior.
+
+Pi-supported inline `detail: "auto"` images cost 1,844 approximate tokens each, independent of base64 length. Image-containing boundary messages prioritize later content parts; images remain atomic, and an image that cannot fit stops older-content backfill. No Codex-only image labels or metadata are synthesized. Non-vision models retain Pi's normal image placeholders instead.
+
+This follows [Codex's retained-history policy](https://github.com/openai/codex/blob/e89b7c442c0433ad5167e72a5a25bb6d0712766a/codex-rs/core/src/compact_remote_v2.rs#L480), [enabled image budgeting](https://github.com/openai/codex/blob/e89b7c442c0433ad5167e72a5a25bb6d0712766a/codex-rs/core/src/compact_remote_v2_images.rs), and UTF-8 token truncation at that audited revision for item kinds Pi represents. It does not retain Codex agent messages or enable default-disabled client-authored developer/tool-output retention. The budget is not guaranteed remaining capacity in the target model's window: small-window targets may still reject a later request. Neither overflow nor retention permits preflight loss, progressive truncation retries, or a portable summary fallback.
 
 ## Persistence
 
@@ -56,7 +66,7 @@ The matching `CompactionEntry.details` written by this release contains exactly:
 ```ts
 {
   nativeReplayCheckpoint: {
-    format: "native-replay-checkpoint/1",
+    format: "native-replay-checkpoint/2",
     producer: {
       modelKey: {
         provider: string,
@@ -65,12 +75,12 @@ The matching `CompactionEntry.details` written by this release contains exactly:
       },
       compactionCompatibilityClass: string | null,
     },
-    replacementHistory: [compactionItem],
+    replacementHistory: [...retainedUserMessages, compactionItem],
   },
 }
 ```
 
-New checkpoints write an explicit null class. Existing nonempty string classes (including `2911`, `3000`, and unknown values) and null remain readable historical metadata and are never compared or recalculated. Replacement history contains only the newly accepted opaque compaction item. It does not contain retained user or assistant messages, the marker, a trigger, endpoint or routing data, response IDs, implementation tags, or duplicated usage. Custom Codex producer keys retain their actual provider identity. Valid historical non-GPT producer records are incompatible, not malformed.
+New checkpoints write an explicit null class. Existing nonempty string classes (including `2911`, `3000`, and unknown values) and null remain readable historical metadata and are never compared or recalculated. The `/2` decoder requires zero or more user messages containing supported input-text or inline auto-detail image parts, then exactly one valid compaction item. It rejects other roles/kinds, invalid ordering, and extra compaction items, while preserving unknown fields on the opaque compaction item. Replacement history excludes assistant/tool history, the marker, triggers, routing data, and duplicated usage. `/1` remains restricted to its original single compaction item: no bulk migration, raw pre-checkpoint user-history backfill, or legacy reader is added. A successful later compaction can naturally supersede a snapshot-bearing `/1` checkpoint with `/2`. Custom Codex producer keys retain their actual provider identity. Valid historical non-GPT producer records are incompatible, not malformed.
 
 Only the active branch's latest `CompactionEntry` can define replay state. The extension reconstructs that state from the branch on every hook; it keeps no replay cache, request-shape cache, invalidation tombstone, or lifecycle synchronization listener. A later ordinary compaction supersedes an older checkpoint. A fixed marker with missing, unknown-format, or malformed details is a broken checkpoint and fails closed.
 
@@ -88,11 +98,11 @@ For a compatible ordinary request, the extension:
 2. projects those historical entries using the current ordinary transcript's declaration environment, including persisted post-checkpoint redefinitions, so function/grammar call and result wire forms agree with the real selected provider;
 3. anchors the replay replacement span on the checkpoint marker rather than the first projected item, so leading provider instructions stay outside the span;
 4. requires a full-array `payload.input` with exactly one contiguous wire-equivalent replay replacement span;
-5. replaces only that span with the one-item replacement history;
+5. replaces only that span with the complete validated replacement history;
 6. preserves provider instruction, tool, and reasoning items before and after the span; and
 7. removes competing `messages` and `previous_response_id` fields.
 
-`native-replay-checkpoint/1` records written without a host `systemMessage` snapshot remain readable for ordinary Native replay: the span still begins at the checkpoint marker, and no pre-checkpoint head is inferred or reconstructed. They cannot support a further Remote compaction, because the extension will not guess the instructions that were in effect when they were written. When Remote compaction is attempted, such a checkpoint produces the distinct `snapshot-unavailable` outcome, cancels before any remote attempt, and reports that a new session is required to compact again, with no text fallback. The boundary is the absence of the snapshot itself, not checkpoint age: a newer record without a snapshot is treated the same way, and a record that carries a snapshot keeps repeated-compaction support. No checkpoint format migration is introduced.
+`native-replay-checkpoint/1` records written without a host `systemMessage` snapshot remain readable for ordinary Native replay: the span still begins at the checkpoint marker, and no pre-checkpoint head is inferred or reconstructed. They cannot support a further Remote compaction, because the extension will not guess the instructions that were in effect when they were written. When Remote compaction is attempted, such a checkpoint produces the distinct `snapshot-unavailable` outcome, cancels before any remote attempt, and reports that a new session is required to compact again, with no text fallback. The boundary is the absence of the snapshot itself, not checkpoint age: a newer record without a snapshot is treated the same way, and a record that carries a snapshot keeps repeated-compaction support. Reading never rewrites a checkpoint or recovers discarded explicit user history from raw pre-checkpoint entries.
 
 A malformed active state, invalidated branch, non-array input, or missing/ambiguous span stops the ordinary request through `ctx.abort()` and emits an explicit error. It does not throw from the hook and allow Pi to continue with the old payload.
 
@@ -102,11 +112,11 @@ Selecting an incompatible model leaves its ordinary payload and transport untouc
 
 A repeated request may select any other Eligible model, subject to the same `openai` OAuth exclusion as new compaction, producer eligibility, continuity, integrity, and the host snapshot requirement. It contains, in order:
 
-1. the current one-item replacement history;
+1. the latest complete replacement history (retained eligible user messages plus its compaction item);
 2. the projected model-visible branch suffix after the owning `CompactionEntry`; and
 3. one new terminal compaction trigger.
 
-It excludes the checkpoint marker, Pi-retained pre-compaction entries, previous triggers, duplicate old compaction items, and retained explicit history. A newly accepted compaction item atomically supersedes the previous replacement history and records the newly selected producer's Model key and an explicit null class.
+It excludes the checkpoint marker, raw Pi-retained pre-compaction entries, previous triggers, and duplicate old compaction items. Retention is reapplied to the logical current context: previously retained users plus eligible post-checkpoint users, never discarded raw history. A successful result atomically installs that newly bounded user history followed by the new compaction item, records the selected producer's Model key and an explicit null class, and discards the previous compaction item.
 
 ## Retry and failure behavior
 
@@ -139,6 +149,8 @@ Protection covers every latest Remote checkpoint state, including compatible, in
 This hook stops a refresh before provider dispatch only. It does not cancel a refresh that is already in flight, disable warming globally, or provide general request-specific cancellation; full safe warming integration is outside the current contract.
 
 Architecture decisions:
+
+- [ADR 0008: Version bounded replacement history](adr/0008-version-bounded-replacement-history.md) — supersedes ADR 0002's single-item history and ADR 0007's unchanged-writer-format assumption while retaining native continuity and optimistic replay
 
 - [ADR 0007: Attempt optimistic GPT replay](adr/0007-attempt-optimistic-gpt-replay.md) — supersedes the eligibility and class policies in ADRs 0001 and 0005; updates ADRs 0003 and 0006
 
@@ -178,7 +190,7 @@ Its focused files are:
 - `tests/remote-compaction.test.ts` — lifecycle-hook eligibility and historical replay matrices, real Pi auth-status/runtime-override transitions with production direct operations and mocked fetch, OAuth compaction deferral without blocking replay, retrospective continuity, repeated compaction, snapshot requirements, unsafe state hard stops, and terminal cancellation without text fallback;
 - `tests/remote-compaction-operation.test.ts` — direct and Pi-mediated one-attempt SSE operations, payload ownership, raw completion, validation, failure classification, usage, and abort;
 - `tests/native-replay.test.ts` — checkpoint restoration, repeated-compaction input, ordinary span replacement, span matching failures, continuity invalidation from persisted turns, and the snapshot-less read-but-no-recompact separation;
-- `tests/transcript-replay.test.ts` — Pi 1.2.0 transcript behavior checked through the real provider payload with a mocked fetch: leading and mid-conversation system messages, both capability modes and both API contracts, section and tool additions/removals/redefinitions, first and repeated compaction compared against the real provider projection, snapshot-less `/1` ordinary replay, real `SessionManager` restoration and branch navigation with newly created null-class details, production custom Codex compaction and cross-API replay with mocked fetch, call/result and missing-result ordering, and span failure handling.
+- `tests/transcript-replay.test.ts` — Pi 1.2.0 transcript behavior checked through the real provider payload with a mocked fetch: leading and mid-conversation system messages, both capability modes and both API contracts, section and tool additions/removals/redefinitions, first and repeated compaction compared against the real provider projection, snapshot-less `/1` ordinary replay, real `SessionManager` reload/navigation with multi-item `/2` history, strict `/1` compatibility and natural supersession, source-backed UTF-8/image retention fixtures, repeated compaction without backfill, terminal overflow without input fitting, production custom Codex compaction and cross-API replay with mocked fetch, call/result and missing-result ordering, and span failure handling.
 
 The offline suite exercises hook-level terminal cancellation, the three-attempt retry budget with unchanged requests, capped `Retry-After`, and cancellation during fallback delay. It also compares Native replay and compaction projection against Pi's real provider conversion output and exercises Pi's real cache-warming decision/dispatch path. Credentialed end-to-end backend interoperability remains outside the offline suite.
 
@@ -202,6 +214,7 @@ The offline suite exercises hook-level terminal cancellation, the three-attempt 
 | `src/remote-compaction.ts`          | Pi hook orchestration, warming guard, notifications, cancel/abort, persistence  |
 | `src/native-replay.ts`              | checkpoint records, branch continuity, context reconstruction, span replacement |
 | `src/responses-projection.ts`       | narrow Pi `1.2.0` ordinary Responses projection adapter                        |
+| `src/retained-user-history.ts`      | retained-user validation and source-backed text/image budgeting                |
 | `src/direct-responses-operation.ts` | one-attempt direct HTTP/SSE capability-gap adapter                              |
 | `src/codex-responses-operation.ts`  | one-attempt Pi-mediated Codex SSE capture adapter                               |
 | `tests/`                            | six offline contract files                                                      |

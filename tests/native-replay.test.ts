@@ -2,7 +2,6 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { AssistantMessage, Model, SystemMessage } from "@earendil-works/pi-ai";
 import {
-  NATIVE_REPLAY_CHECKPOINT_FORMAT,
   prepareCompactionReplay,
   prepareNativeReplay,
   REMOTE_COMPACTION_CHECKPOINT_MARKER,
@@ -117,7 +116,7 @@ function checkpointDetails(
 ): NativeReplayCheckpointDetails {
   return {
     nativeReplayCheckpoint: {
-      format: NATIVE_REPLAY_CHECKPOINT_FORMAT,
+      format: "native-replay-checkpoint/1",
       producer: { modelKey, compactionCompatibilityClass },
       replacementHistory: [COMPACTION_ITEM],
     },
@@ -191,12 +190,15 @@ test("repeated compaction sends replacement history plus the post-checkpoint suf
     preparation.createCheckpointDetails({ type: "compaction", encrypted_content: "new-item" }),
     {
       nativeReplayCheckpoint: {
-        format: "native-replay-checkpoint/1",
+        format: "native-replay-checkpoint/2",
         producer: {
           modelKey: { provider: "example-provider", api: "openai-responses", id: "gpt-test" },
           compactionCompatibilityClass: null,
         },
-        replacementHistory: [{ type: "compaction", encrypted_content: "new-item" }],
+        replacementHistory: [
+          { role: "user", content: [{ type: "input_text", text: "after checkpoint" }] },
+          { type: "compaction", encrypted_content: "new-item" },
+        ],
       },
     },
   );
