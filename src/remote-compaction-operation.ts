@@ -68,6 +68,7 @@ const TERMINAL_ERROR_CODES = new Set([
   "context_window_exceeded",
   "cyber_policy",
   "insufficient_quota",
+  "invalid_function_parameters",
   "invalid_prompt",
   "invalid_request",
   "invalid_request_error",

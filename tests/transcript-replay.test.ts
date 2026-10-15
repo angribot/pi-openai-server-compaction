@@ -777,6 +777,19 @@ function requestBody(init?: RequestInit): Record<string, any> {
   return JSON.parse(typeof raw === "string" ? raw : Buffer.from(raw as Buffer).toString("utf8"));
 }
 
+async function captureCompactionRequests<T>(run: () => T) {
+  const requests: Record<string, any>[] = [];
+  const network = mock.method(globalThis, "fetch", async (_url: unknown, init?: RequestInit) => {
+    requests.push(requestBody(init));
+    return compactionResponse();
+  });
+  try {
+    return { result: await run(), requests };
+  } finally {
+    network.mock.restore();
+  }
+}
+
 test("Remote compaction sends Pi-projected active declarations without repairing regex lookahead schemas", async () => {
   const tool = { name: "tasks", description: "Synthetic lookahead declaration", parameters: {
     type: "object", properties: { title: { type: "string", pattern: "^(?!.*blocked).+$" } }, required: ["title"],
@@ -786,18 +799,14 @@ test("Remote compaction sends Pi-projected active declarations without repairing
     const branch = [systemEntry("s1", null, { role: "system", content: "BASE", toolsAdded: [tool], timestamp: 1 }),
       userEntry("u1", "compact with tools", "s1")];
     const ordinary = await realProviderPayload(kind, selected, payloadMessages(branch));
-    let body: Record<string, any> | undefined;
-    const network = mock.method(globalThis, "fetch", async (_url: unknown, init?: RequestInit) => {
-      body = requestBody(init); return compactionResponse();
-    });
-    try {
-      const h = compactionHarness(kind, branch, selected);
-      const result = await h.compact();
-      assert.ok(result.compaction, h.notifications.join("\n"));
-      assert.deepEqual(body?.tools, ordinary.tools, kind);
-      assert.equal(body?.tools[0].parameters.properties.title.pattern, "^(?!.*blocked).+$");
-      assert.deepEqual(body?.input.at(-1), { type: "compaction_trigger" });
-    } finally { network.mock.restore(); }
+    const h = compactionHarness(kind, branch, selected);
+    const { result, requests } = await captureCompactionRequests(() => h.compact());
+    assert.ok(result.compaction, h.notifications.join("\n"));
+    assert.equal(requests.length, 1);
+    const body = requests[0]!;
+    assert.deepEqual(body.tools, ordinary.tools, kind);
+    assert.equal(body.tools[0].parameters.properties.title.pattern, "^(?!.*blocked).+$");
+    assert.deepEqual(body.input.at(-1), { type: "compaction_trigger" });
   }
 });
 
@@ -824,21 +833,17 @@ test("declaration deltas match real Pi payloads for first and repeated compactio
             // The logical repeated context excludes Pi's marker and retained raw entries.
             const ordinary = await realProviderPayload(kind, selected,
               repeated ? [snapshot, ...branchSuffixMessages(branch)] : payloadMessages(branch));
-            let body: Record<string, any> | undefined;
-            const network = mock.method(globalThis, "fetch", async (_url: unknown, init?: RequestInit) => {
-              body = requestBody(init); return compactionResponse();
-            });
-            try {
-              const h = compactionHarness(kind, branch, selected);
-              const result = await h.compact();
-              const label = `${kind} mid=${mid} ${placement} ${change} repeated=${repeated}`;
-              assert.ok(result.compaction, `${label}: ${h.notifications.join("\n")}`);
-              assert.deepEqual(body?.tools, ordinary.tools, label);
-              assert.deepEqual(body?.input, [
-                ...(repeated ? [COMPACTION_ITEM] : []), ...withoutLeadingPrompt(kind, ordinary.input),
-                { type: "compaction_trigger" },
-              ], label);
-            } finally { network.mock.restore(); }
+            const h = compactionHarness(kind, branch, selected);
+            const { result, requests } = await captureCompactionRequests(() => h.compact());
+            const label = `${kind} mid=${mid} ${placement} ${change} repeated=${repeated}`;
+            assert.ok(result.compaction, `${label}: ${h.notifications.join("\n")}`);
+            assert.equal(requests.length, 1, label);
+            const body = requests[0]!;
+            assert.deepEqual(body.tools, ordinary.tools, label);
+            assert.deepEqual(body.input, [
+              ...(repeated ? [COMPACTION_ITEM] : []), ...withoutLeadingPrompt(kind, ordinary.input),
+              { type: "compaction_trigger" },
+            ], label);
           }
         }
       }
@@ -858,17 +863,12 @@ test("constrained JSON-schema declarations retain Pi strict-mode projection and 
         userEntry("u1", "compact", "s1")];
       const original = JSON.stringify(tool);
       const ordinary = await realProviderPayload(kind, selected, payloadMessages(branch));
-      let body: Record<string, any> | undefined;
-      const network = mock.method(globalThis, "fetch", async (_url: unknown, init?: RequestInit) => {
-        body = requestBody(init); return compactionResponse();
-      });
-      try {
-        const h = compactionHarness(kind, branch, selected);
-        const result = await h.compact();
-        assert.ok(result.compaction, h.notifications.join("\n"));
-        assert.deepEqual(body?.tools, ordinary.tools, `${kind} strict=${strict}`);
-        assert.equal(JSON.stringify(tool), original, "projection must not mutate persisted schemas");
-      } finally { network.mock.restore(); }
+      const h = compactionHarness(kind, branch, selected);
+      const { result, requests } = await captureCompactionRequests(() => h.compact());
+      assert.ok(result.compaction, h.notifications.join("\n"));
+      assert.equal(requests.length, 1);
+      assert.deepEqual(requests[0]!.tools, ordinary.tools, `${kind} strict=${strict}`);
+      assert.equal(JSON.stringify(tool), original, "projection must not mutate persisted schemas");
     }
   }
 });
@@ -889,17 +889,12 @@ test("removed grammar declarations retain Pi's capability-dependent historical w
       const before = [systemEntry("s0", null, snapshot), call, result];
       const branch = [...before, removal, userEntry("u1", "after removal", "s2")];
       const ordinary = await realProviderPayload(kind, selected, payloadMessages(branch));
-      let body: Record<string, any> | undefined;
-      const network = mock.method(globalThis, "fetch", async (_url: unknown, init?: RequestInit) => {
-        body = requestBody(init); return compactionResponse();
-      });
-      try {
-        const h = compactionHarness(kind, branch, selected);
-        const compacted = await h.compact();
-        assert.ok(compacted.compaction, h.notifications.join("\n"));
-        assert.deepEqual(body?.input, [...withoutLeadingPrompt(kind, ordinary.input), { type: "compaction_trigger" }]);
-        assert.deepEqual(body?.tools, ordinary.tools);
-      } finally { network.mock.restore(); }
+      const h = compactionHarness(kind, branch, selected);
+      const { result: compacted, requests } = await captureCompactionRequests(() => h.compact());
+      assert.ok(compacted.compaction, h.notifications.join("\n"));
+      assert.equal(requests.length, 1);
+      assert.deepEqual(requests[0]!.input, [...withoutLeadingPrompt(kind, ordinary.input), { type: "compaction_trigger" }]);
+      assert.deepEqual(requests[0]!.tools, ordinary.tools);
       const replay = [...before, checkpointEntry("c1", "t1", "a1", checkpointDetails(selected), snapshot),
         { ...removal, parentId: "c1" }, userEntry("u1", "after removal", "s2")];
       const payload = await realProviderPayload(kind, selected, payloadMessages(replay));
@@ -945,7 +940,7 @@ test("required constrained sampling fails before dispatch while preferred unsupp
 
 test("schema and unsupported-operation rejections are terminal with declarations on both APIs", async () => {
   for (const kind of ["direct", "codex"] as const) {
-    for (const code of ["invalid_request_error", "unsupported_operation"]) {
+    for (const code of ["invalid_request_error", "invalid_function_parameters", "unsupported_operation"]) {
       for (const transport of ["http", "flat", "nested", "failed"]) {
         const branch = [systemEntry("s1", null, { role: "system", content: "BASE", toolsAdded: [READ_TOOL], timestamp: 1 }),
           userEntry("u1", "compact", "s1")];

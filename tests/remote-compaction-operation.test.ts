@@ -743,12 +743,14 @@ test("keeps unrecognized SSE failures retryable and unrecognized HTTP failures t
 test("equivalent flat and nested wire errors retain classification and diagnostics", async () => {
   for (const [code, kind] of [
     ["invalid_request_error", "terminal"],
+    ["invalid_function_parameters", "terminal"],
     ["context_length_exceeded", "terminal"],
     ["insufficient_quota", "terminal"],
     ["policy_violation", "terminal"],
     ["misalignment_policy_violation", "terminal"],
     ["server_error", "retryable"],
     ["unknown_error", "retryable"],
+    ["unknown_schema_error", "retryable"],
   ] as const) {
     const failure = { code, message: `Provider diagnostic: ${code}` };
     for (const envelope of [
