@@ -116,15 +116,7 @@ async function realProviderPayload(
   });
   let body: Record<string, any> | undefined;
   const fetchMock = (async (_input: RequestInfo | URL, init?: RequestInit) => {
-    const headers = new Headers(init?.headers);
-    let raw: unknown = init?.body;
-    if (headers.get("content-encoding") === "zstd") {
-      const decompress = (zlib as { zstdDecompressSync?: (value: Buffer) => Buffer })
-        .zstdDecompressSync;
-      assert.ok(decompress, "the provider compressed the body without zstd decompression support");
-      raw = decompress(Buffer.from(raw as Buffer));
-    }
-    body = JSON.parse(typeof raw === "string" ? raw : Buffer.from(raw as Buffer).toString("utf8"));
+    body = requestBody(init);
     return terminalResponse();
   }) as typeof globalThis.fetch;
 
@@ -777,9 +769,14 @@ function compactionResponse(item: Record<string, unknown> = COMPACTION_ITEM): Re
 }
 
 function requestBody(init?: RequestInit): Record<string, any> {
-  let raw = init!.body;
-  if (new Headers(init?.headers).get("content-encoding") === "zstd") raw = zlib.zstdDecompressSync(raw as Buffer);
-  return JSON.parse(typeof raw === "string" ? raw : Buffer.from(raw as Buffer).toString());
+  let raw: unknown = init?.body;
+  if (new Headers(init?.headers).get("content-encoding") === "zstd") {
+    const decompress = (zlib as { zstdDecompressSync?: (value: Buffer) => Buffer })
+      .zstdDecompressSync;
+    assert.ok(decompress, "the provider compressed the body without zstd decompression support");
+    raw = decompress(Buffer.from(raw as Buffer));
+  }
+  return JSON.parse(typeof raw === "string" ? raw : Buffer.from(raw as Buffer).toString("utf8"));
 }
 
 test("successful compaction retains only model-visible original users before a new-format opaque item", async () => {
@@ -1047,9 +1044,7 @@ test("production hooks preserve custom Codex routing and credentials through rea
     const headers = new Headers(init.headers);
     assert.equal(headers.get("authorization"), `Bearer ${credential}`);
     assert.equal(headers.get("x-custom-route"), "selected");
-    let raw = init.body;
-    if (headers.get("content-encoding") === "zstd") raw = zlib.zstdDecompressSync(raw);
-    sent = JSON.parse(typeof raw === "string" ? raw : Buffer.from(raw).toString());
+    sent = requestBody(init);
     return new Response([
       { type: "response.output_item.done", output_index: 0, item: COMPACTION_ITEM },
       { type: "response.completed", response: { status: "completed", output: [COMPACTION_ITEM] } },
