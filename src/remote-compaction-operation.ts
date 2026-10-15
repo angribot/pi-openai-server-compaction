@@ -233,6 +233,7 @@ async function readBodyText(response: Response, signal: AbortSignal): Promise<st
     }
     return text + decoder.decode();
   } finally {
+    void reader.cancel().catch(() => {});
     reader.releaseLock();
   }
 }
@@ -323,7 +324,6 @@ async function readUntilTerminal(
       append(decoder.decode(chunk.value, { stream: true }));
       const terminalEvent = drain();
       if (terminalEvent !== undefined) {
-        await reader.cancel().catch(() => {});
         return { compaction, terminal: terminalEvent };
       }
     }
@@ -331,6 +331,9 @@ async function readUntilTerminal(
     const terminalEvent = drain();
     return { compaction, terminal: terminalEvent };
   } finally {
+    // A cloned response shares cancellation with the provider reader. Waiting
+    // here would prevent the attempt owner from cancelling that other reader.
+    void reader.cancel().catch(() => {});
     reader.releaseLock();
   }
 }

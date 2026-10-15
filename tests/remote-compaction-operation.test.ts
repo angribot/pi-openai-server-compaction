@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { mock, test } from "node:test";
-import type { AssistantMessage, Model } from "@earendil-works/pi-ai";
+import { normalizeContext, type AssistantMessage, type Model } from "@earendil-works/pi-ai";
+import { stream as codexStream } from "@earendil-works/pi-ai/api/openai-codex-responses";
 import { attemptCodexResponsesOperation } from "../src/codex-responses-operation.ts";
 import { attemptDirectResponsesOperation } from "../src/direct-responses-operation.ts";
 import {
@@ -260,7 +261,9 @@ test("runs built-in Codex without tool declarations while preserving Pi controls
   assert.equal(operationOptions?.transport, "sse");
   assert.equal(operationOptions?.maxRetries, 0);
   assert.equal(operationOptions?.sessionId, "codex-session");
-  assert.equal(operationOptions?.signal, signal);
+  assert.ok(operationOptions?.signal instanceof AbortSignal);
+  assert.notEqual(operationOptions?.signal, signal, "cancellation belongs to this attempt");
+  assert.equal(signal.aborted, false);
   assert.deepEqual(patchedPayload, {
     model: "gpt-codex",
     input: compactionRequest.input,
@@ -842,6 +845,105 @@ test("stream idle timeout is retryable", async (t) => {
       assertOutcome(outcome, "retryable");
     },
   );
+});
+
+function realCodexContext(signal = new AbortController().signal): RemoteCompactionAttemptContext {
+  const encode = (value: unknown) => Buffer.from(JSON.stringify(value)).toString("base64");
+  const apiKey = `${encode({})}.${encode({ "https://api.openai.com/auth": { chatgpt_account_id: "test" } })}.sig`;
+  return codexContext(async (selected, transcript, options) =>
+    codexStream(selected as Model<"openai-codex-responses">, normalizeContext(transcript), { ...options, apiKey } as any).result(), signal);
+}
+
+test("real Codex HTTP failures retain raw classification, messages, and Retry-After", async () => {
+  for (const [code, kind] of [["invalid_request_error", "terminal"], ["server_error", "retryable"]] as const) {
+    await withFetch(async () => new Response(JSON.stringify({ error: { code, message: "original diagnostic" } }), {
+      status: 503, headers: { "retry-after": "2" },
+    }), async () => {
+      const outcome = await attemptCodexResponsesOperation(request(codexModel()), realCodexContext());
+      assertOutcome(outcome, kind);
+      if (outcome.kind !== "accepted") assert.match(outcome.error.message, /original diagnostic/);
+      if (outcome.kind === "retryable") assert.equal(outcome.retryAfterMs, 2_000);
+    });
+  }
+});
+
+test("a real Codex normalization failure releases the other reader without EOF", async () => {
+  const controller = new AbortController();
+  let outcome: RemoteCompactionAttemptOutcome | undefined;
+  await withFetch(async () => new Response(new ReadableStream({
+    start(source) { source.enqueue(new TextEncoder().encode('data: {"type":"response.created"}\n\n')); },
+  })), async () => {
+    const pending = attemptCodexResponsesOperation(request(codexModel()), realCodexContext(controller.signal))
+      .then(result => { outcome = result; });
+    try {
+      for (let i = 0; i < 5; i++) await new Promise(setImmediate);
+      assert.ok(outcome, "provider normalization failure must not wait for the raw-reader idle timeout");
+      assertOutcome(outcome, "terminal");
+    } finally { controller.abort(); await pending; }
+  });
+});
+
+test("real Codex consumers settle malformed open streams and cancel their owned source", async () => {
+  let cancelled = false;
+  await withFetch(async () => new Response(new ReadableStream({
+    start(controller) { controller.enqueue(new TextEncoder().encode("data: {invalid JSON}\n\n")); },
+    cancel() { cancelled = true; },
+  })), async () => {
+    const outcome = await settleWithin(attemptCodexResponsesOperation(request(codexModel()), realCodexContext()), 1_000);
+    assertOutcome(outcome, "retryable");
+    await new Promise(setImmediate);
+    assert.equal(cancelled, true);
+  });
+});
+
+test("real Codex consumers settle idle open streams without waiting for server EOF", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  let cancelled = false;
+  await withFetch(async () => new Response(new ReadableStream({ cancel() { cancelled = true; } })), async () => {
+    const pending = attemptCodexResponsesOperation(request(codexModel()), realCodexContext());
+    await new Promise(setImmediate);
+    t.mock.timers.tick(300_000);
+    await new Promise(setImmediate);
+    const outcome = await pending;
+    assertOutcome(outcome, "retryable");
+    if (outcome.kind !== "accepted") assert.match(outcome.error.message, /idle timeout/);
+    assert.equal(cancelled, true);
+  });
+});
+
+test("Codex cancellation settles during authentication, fetch, and success or error reads", async () => {
+  for (const phase of ["auth", "fetch", "success", "error"] as const) {
+    const controller = new AbortController();
+    let releaseAuth: (() => void) | undefined;
+    let cancelled = false;
+    let fetches = 0;
+    const ctx = realCodexContext(controller.signal);
+    if (phase === "auth") {
+      const complete = ctx.modelRegistry.complete;
+      ctx.modelRegistry.complete = async (...args) => {
+        await new Promise<void>(resolve => { releaseAuth = resolve; });
+        return complete(...args);
+      };
+    }
+    await withFetch(async (_url, init) => {
+      fetches++;
+      if (phase === "fetch") return await new Promise<Response>((_resolve, reject) => {
+        init?.signal?.addEventListener("abort", () => reject(init.signal!.reason), { once: true });
+      });
+      return new Response(new ReadableStream({ cancel() { cancelled = true; } }), {
+        status: phase === "error" ? 503 : 200,
+      });
+    }, async () => {
+      const pending = attemptCodexResponsesOperation(request(codexModel()), ctx);
+      await new Promise(setImmediate);
+      controller.abort();
+      assertOutcome(await settleWithin(pending, 1_000), "terminal");
+      releaseAuth?.();
+      await new Promise(setImmediate);
+      assert.equal(fetches, phase === "auth" ? 0 : 1);
+      if (phase === "success" || phase === "error") assert.equal(cancelled, true, phase);
+    });
+  }
 });
 
 test("caller abort is terminal before fetch and during success or error body reads", async () => {

@@ -741,6 +741,54 @@ test("native replay reads a snapshot-less /1 checkpoint through the real provide
   assert.equal(preparation.rewrite(withoutMarker).kind, "span-missing-or-ambiguous");
 });
 
+test("settled real Codex failures return to the hook retry owner and persist only complete results", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const selected = model("codex");
+  const branch = [userEntry("u1", "compact me")];
+  const handlers: Record<string, (event: any, context: any) => any> = {};
+  extension({ on(name: string, handler: any) { handlers[name] = handler; } } as any);
+  const requests: string[] = [];
+  let cancelled = 0;
+  const item = { type: "compaction", encrypted_content: "", future_field: { preserved: true } };
+  const network = mock.method(globalThis, "fetch", async (_url: unknown, init?: RequestInit) => {
+    requests.push(Buffer.from(init!.body as any).toString("base64"));
+    const wire = requests.length === 1 ? "" : requests.length === 2 ? "data: {bad JSON}\n\n" : [
+      { type: "response.output_item.done", output_index: 0, item },
+      { type: "response.done", response: { status: "completed", usage: { input_tokens: 10, output_tokens: 2 } } },
+    ].map(event => `data: ${JSON.stringify(event)}\n\n`).join("");
+    return new Response(new ReadableStream({
+      start(controller) { if (wire) controller.enqueue(new TextEncoder().encode(wire)); },
+      cancel() { cancelled++; },
+    }));
+  });
+  try {
+    const context = { model: selected, sessionManager: { getSessionId: () => "retry-test" },
+      hasUI: true, ui: { notify(message: string) { assert.fail(message); } }, getSystemPrompt: () => "BASE",
+      modelRegistry: { async complete(actual: any, transcript: any, options: any) {
+        assert.equal(options.maxRetries, 0);
+        return codexResponsesStream(actual, normalizeContext(transcript), { ...options, apiKey: fakeJwt() }).result();
+      } },
+    };
+    const pending = handlers.session_before_compact!({ branchEntries: branch,
+      preparation: { firstKeptEntryId: "u1", tokensBefore: 42 }, signal: new AbortController().signal }, context);
+    await new Promise(setImmediate);
+    assert.equal(requests.length, 1);
+    t.mock.timers.tick(300_000);
+    await new Promise(setImmediate);
+    t.mock.timers.tick(1_000);
+    await new Promise(setImmediate);
+    assert.equal(requests.length, 2);
+    t.mock.timers.tick(1_000);
+    await new Promise(setImmediate);
+    const result = await pending;
+    assert.equal(requests.length, 3);
+    assert.equal(new Set(requests).size, 1);
+    assert.deepEqual(result.compaction.details.nativeReplayCheckpoint.replacementHistory, [item]);
+    assert.equal(result.compaction.usage.totalTokens, 12);
+    assert.equal(cancelled, 3);
+  } finally { network.mock.restore(); }
+});
+
 test("production hooks preserve custom Codex routing and credentials through real Pi compaction and replay", async () => {
   const selected = model("codex", { provider: "custom-codex", id: "gpt-future",
     baseUrl: "https://custom-codex.example/backend-api", headers: { "x-custom-route": "selected" } });

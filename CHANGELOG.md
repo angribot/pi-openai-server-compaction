@@ -4,6 +4,7 @@ This changelog intentionally starts at **0.1.0**.
 
 ## Unreleased
 
+- settle failed or cancelled Codex compaction attempts without server EOF by cancelling attempt-owned readers together, preserving the shared retry budget and preventing partial checkpoint persistence
 - preserve Native replay after persisted function/grammar tool redefinitions by reconstructing historical spans under the current declaration environment, while still rejecting missing or ambiguous spans
 - normalize nested Remote compaction error envelopes so invalid-request, overflow, quota, and policy failures retain their diagnostics and stop without retries or checkpoint persistence
 - use Pi ^1.2.0 development dependencies and validate production extension loading at that baseline, keeping host packages as unbundled * peers and the existing Node >=22 package requirement
