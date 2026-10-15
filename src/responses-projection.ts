@@ -6,10 +6,12 @@ import {
   normalizeContext,
   renderSystemMessageUpdate,
   resolveTranscript,
+  resolveTranscriptTools,
   type AssistantMessage,
   type ImageContent,
   type Message,
   type Model,
+  type OpenAIResponsesCompat,
   type TextContent,
   type ThinkingContent,
   type ToolCall,
@@ -17,7 +19,10 @@ import {
   type SystemMessage,
 } from "@earendil-works/pi-ai";
 
+import { projectJsonSchemaTool } from "./responses-tool-schema.ts";
+
 export type ResponsesItem = Record<string, unknown> & { type?: string };
+export type ProjectedContext = { input: ResponsesItem[]; tools: ResponsesItem[] };
 
 /**
  * Projection controls mirroring the subset of Pi's Responses conversion this
@@ -39,7 +44,7 @@ export type CompactableContextOptions = {
   hasPrecedingItems?: boolean;
   /**
    * Checkpoint-owned declarations inherited by a post-checkpoint suffix. Used
-   * only to classify historical tool items; never emitted as prompt or tools.
+   * to project inherited active tools and classify historical call/result items.
    */
   checkpointSystemMessage?: SystemMessage;
   /** Current ordinary transcript's declaration environment, separate from the span being projected. */
@@ -51,31 +56,34 @@ const NON_VISION_TOOL_IMAGE_PLACEHOLDER = "(tool image omitted: model does not s
 const OPENAI_TOOL_CALL_PROVIDERS = new Set(["openai", "openai-codex", "opencode"]);
 
 // Pi's extension loader cannot resolve api/constrained-sampling. Mirror its
-// grammar selection from all declared tools before transcript collapse, including
+// grammar selection after capability-dependent transcript resolution, including
 // declarations needed by retained results whose calls precede the checkpoint.
+function grammarDefinition(tool: Tool, model: Model<any>) {
+  const config = tool.constrainedSampling;
+  if (!config || config.type !== "grammar" ||
+      !(model.compat as OpenAIResponsesCompat | undefined)?.supportsOpenAIGrammarTools) return undefined;
+  const lark = config.variants.openai_lark;
+  const regex = config.variants.openai_regex;
+  const hasLark = typeof lark === "string" && lark.trim().length > 0;
+  if (!hasLark && !(typeof regex === "string" && regex.trim().length > 0)) {
+    throw new Error(`Tool "${tool.name}" has no supported grammar variant.`);
+  }
+  const schema = tool.parameters as {
+    type?: unknown; required?: unknown; properties?: Record<string, { type?: unknown }>;
+  };
+  const required = schema.required;
+  if (schema.type !== "object" || !Array.isArray(required) || required.length !== 1 ||
+      typeof required[0] !== "string" || schema.properties?.[required[0]]?.type !== "string") {
+    throw new Error(`Grammar tool "${tool.name}" requires exactly one required string parameter.`);
+  }
+  return { syntax: hasLark ? "lark" : "regex", definition: hasLark ? lark : regex, inputProperty: required[0] };
+}
+
 function grammarInputProperties(tools: readonly Tool[], model: Model<any>): Map<string, string> {
   const properties = new Map<string, string>();
-  if (!(model.compat as { supportsOpenAIGrammarTools?: boolean } | undefined)?.supportsOpenAIGrammarTools) {
-    return properties;
-  }
   for (const tool of tools) {
-    const config = tool.constrainedSampling;
-    if (!config || config.type !== "grammar") continue;
-    const variants = [config.variants.openai_lark, config.variants.openai_regex];
-    if (!variants.some((definition) => typeof definition === "string" && definition.trim().length > 0)) {
-      throw new Error(`Tool "${tool.name}" has no supported grammar variant.`);
-    }
-    const schema = tool.parameters as {
-      type?: unknown;
-      required?: unknown;
-      properties?: Record<string, { type?: unknown }>;
-    };
-    const required = schema.required;
-    if (schema.type !== "object" || !Array.isArray(required) || required.length !== 1 ||
-        typeof required[0] !== "string" || schema.properties?.[required[0]]?.type !== "string") {
-      throw new Error(`Grammar tool "${tool.name}" requires exactly one required string parameter.`);
-    }
-    properties.set(tool.name, required[0]);
+    const grammar = grammarDefinition(tool, model);
+    if (grammar) properties.set(tool.name, grammar.inputProperty);
   }
   return properties;
 }
@@ -350,15 +358,16 @@ function toolResultOutput(
   return output;
 }
 
-// Mirrors Pi 0.99.1 `convertResponsesMessages` for the tool-free Remote compaction
-// subset: message/function/custom-tool items, Pi fallback IDs and phases, foreign
+// Mirrors Pi 1.2.0 `convertResponsesMessages` for Remote compaction:
+// message/function/custom-tool items, Pi fallback IDs and phases, foreign
 // item-id normalization, tool outputs, and API-specific leading-system
-// placement. It intentionally never emits tool declarations.
+// placement, including model-supported in-place tool additions.
 function projectNormalizedMessages(
   messages: readonly Message[],
   model: Model<any>,
   options: CompactableContextOptions,
   grammarToolInputProperties: ReadonlyMap<string, string>,
+  anchorsAdditions: boolean,
 ): ResponsesItem[] {
   const projected: ResponsesItem[] = [];
   const supportsDeveloperRole =
@@ -373,6 +382,20 @@ function projectNormalizedMessages(
     const isLeadingSystemMessage =
       !options.hasPrecedingItems && isFirstMessage && message.role === "system";
     if (message.role === "system") {
+      if (!isLeadingSystemMessage && anchorsAdditions && message.toolsAdded?.length) {
+        const compat = model.compat as OpenAIResponsesCompat | undefined;
+        if (compat?.supportsAdditionalTools) {
+          projected.push({ type: "additional_tools", role: "developer",
+            tools: projectToolDeclarations(message.toolsAdded, model) });
+        } else if (compat?.supportsToolSearch) {
+          const names = message.toolsAdded.map(tool => tool.name);
+          const callId = `pi_tool_load_${shortHash(`system:${messageIndex}:${names.join(",")}`)}`;
+          projected.push({ type: "tool_search_call", call_id: callId, execution: "client", status: "completed",
+            arguments: { query: names.join(" "), limit: names.length } },
+          { type: "tool_search_output", call_id: callId, execution: "client", status: "completed",
+            tools: projectToolDeclarations(message.toolsAdded, model, true) });
+        }
+      }
       if (!isLeadingSystemMessage || options.includeSystemPrompt) {
         const text = isLeadingSystemMessage
           ? getSystemMessageText(message)
@@ -462,11 +485,26 @@ function projectNormalizedMessages(
   return projected;
 }
 
+function projectToolDeclarations(tools: readonly Tool[], model: Model<any>, toolSearchResult = false): ResponsesItem[] {
+  const codex = model.api === "openai-codex-responses";
+  const supportsStrict = (model.compat as OpenAIResponsesCompat | undefined)?.supportsStrictMode ?? codex;
+  return tools.map(tool => {
+    const grammar = grammarDefinition(tool, model);
+    if (grammar) return {
+      type: "custom", name: tool.name, description: tool.description,
+      format: { type: "grammar", syntax: grammar.syntax, definition: grammar.definition },
+      ...(toolSearchResult ? { defer_loading: true } : {}),
+    };
+    return { ...projectJsonSchemaTool(tool, supportsStrict, codex ? null : false),
+      ...(toolSearchResult ? { defer_loading: true } : {}) };
+  });
+}
+
 export function projectCompactableContext(
   messages: readonly AgentMessage[],
   model: Model<any>,
   options: CompactableContextOptions = { includeSystemPrompt: true },
-): ResponsesItem[] {
+): ProjectedContext {
   const supportsMidConvoSystemMessages =
     (model.compat as { supportsMidConvoSystemMessages?: boolean } | undefined)
       ?.supportsMidConvoSystemMessages ?? false;
@@ -476,9 +514,16 @@ export function projectCompactableContext(
     : options.checkpointSystemMessage
       ? [options.checkpointSystemMessage, ...context.messages]
       : context.messages;
-  const grammarToolInputProperties = grammarInputProperties(getDeclaredTools(declarationMessages), model);
   const resolved = resolveTranscript(context, supportsMidConvoSystemMessages);
-  return projectNormalizedMessages(
-    normalizeMessages(resolved.messages, model), model, options, grammarToolInputProperties,
-  );
+  const toolContext = resolveTranscript(normalizeContext({ messages: declarationMessages }), supportsMidConvoSystemMessages);
+  const grammarToolInputProperties = grammarInputProperties(getDeclaredTools(toolContext.messages), model);
+  const compat = model.compat as OpenAIResponsesCompat | undefined;
+  const transcriptTools = resolveTranscriptTools(toolContext.messages,
+    (compat?.supportsAdditionalTools ?? false) || (compat?.supportsToolSearch ?? false));
+  return {
+    input: projectNormalizedMessages(
+      normalizeMessages(resolved.messages, model), model, options, grammarToolInputProperties, transcriptTools.anchorsAdditions,
+    ),
+    tools: projectToolDeclarations(transcriptTools.requestTools, model),
+  };
 }

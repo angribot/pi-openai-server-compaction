@@ -9,7 +9,7 @@ import {
 } from "@earendil-works/pi-ai";
 import { buildSessionContext } from "@earendil-works/pi-coding-agent";
 import type { CompactionItem } from "./remote-compaction-operation.ts";
-import { projectCompactableContext, type ResponsesItem } from "./responses-projection.ts";
+import { projectCompactableContext, type ProjectedContext, type ResponsesItem } from "./responses-projection.ts";
 import {
   isRetainedUserMessage,
   retainUserHistory,
@@ -83,7 +83,7 @@ type CompactionReplayPreparation =
   | { kind: "ineligible" }
   | {
       kind: "ready";
-      buildInput(): ResponsesItem[];
+      buildContext(): ProjectedContext;
       createCheckpointDetails(item: CompactionItem): NativeReplayCheckpointDetails;
     };
 
@@ -364,8 +364,8 @@ function checkpointSpan(
         branch as Parameters<typeof buildSessionContext>[0],
       ).messages,
     });
-    const markerIndex = projected.findIndex((item) => containsCheckpointMarker(item));
-    return markerIndex < 0 ? undefined : projected.slice(markerIndex);
+    const markerIndex = projected.input.findIndex((item) => containsCheckpointMarker(item));
+    return markerIndex < 0 ? undefined : projected.input.slice(markerIndex);
   } catch {
     return undefined;
   }
@@ -434,7 +434,7 @@ export function prepareCompactionReplay(
     if (state.entry.systemMessage === undefined) return { kind: "snapshot-unavailable" };
   }
 
-  let prepared: { input: ResponsesItem[]; users: RetainedUserMessage[] } | undefined;
+  let prepared: ProjectedContext & { users: RetainedUserMessage[] } | undefined;
   const prepare = () => {
     if (prepared) return prepared;
     const messages =
@@ -446,7 +446,7 @@ export function prepareCompactionReplay(
       messages.filter((message) => message.role === "user"),
       model,
       { includeSystemPrompt: false },
-    ).filter(isRetainedUserMessage);
+    ).input.filter(isRetainedUserMessage);
     const suffix = projectCompactableContext(messages, model, {
       includeSystemPrompt: false,
       ...(state.kind === "valid"
@@ -460,9 +460,10 @@ export function prepareCompactionReplay(
     prepared = {
       input: [
         ...(state.kind === "valid" ? state.replacementHistory : []),
-        ...suffix,
+        ...suffix.input,
         { type: "compaction_trigger" },
       ],
+      tools: suffix.tools,
       users: [
         ...(state.kind === "valid" ? state.replacementHistory.filter(isRetainedUserMessage) : []),
         ...users,
@@ -473,8 +474,9 @@ export function prepareCompactionReplay(
 
   return {
     kind: "ready",
-    buildInput() {
-      return prepare().input;
+    buildContext() {
+      const { input, tools } = prepare();
+      return { input, tools };
     },
     createCheckpointDetails(item) {
       return {

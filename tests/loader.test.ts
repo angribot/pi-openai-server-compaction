@@ -49,7 +49,17 @@ test("the production extension loader installs only the Remote compaction protoc
     const notifications: string[] = [];
     let reachedAuth = false;
     const branch = [{
-      type: "message", id: "u1", parentId: null,
+      type: "message", id: "s1", parentId: null,
+      message: { role: "system", content: "Be concise.", timestamp: 0, toolsAdded: [
+        { name: "structured", description: "Strict tool", parameters: {
+          type: "object", properties: { value: { type: "string" } },
+        }, constrainedSampling: { type: "json_schema", strict: "prefer" } },
+        { name: "grammar", description: "Grammar tool", parameters: {
+          type: "object", properties: { input: { type: "string" } }, required: ["input"],
+        }, constrainedSampling: { type: "grammar", variants: { openai_lark: "start: /.+/s" } } },
+      ] },
+    }, {
+      type: "message", id: "u1", parentId: "s1",
       message: { role: "user", content: "compact me", timestamp: 1 },
     }];
     const handler = extension.handlers.get("session_before_compact")![0]!;
@@ -96,6 +106,7 @@ test("the production extension loader installs only the Remote compaction protoc
           baseUrl: "https://codex.example/backend-api", reasoning: true,
           input: ["text"], contextWindow: 100_000, maxTokens: 4096,
           cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+          compat: { supportsStrictMode: true, supportsOpenAIGrammarTools: true },
         },
         hasUI: true, ui: { notify: (message: string) => notifications.push(message) },
         getSystemPrompt: () => "Be concise.",

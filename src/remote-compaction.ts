@@ -164,12 +164,9 @@ export function installRemoteCompaction(
 
     let request: RemoteCompactionRequest;
     try {
-      // Remote compaction is a Responses protocol operation, not a model turn.
-      // Do not send Pi's active tools: some built-in tool schemas use regex
-      // lookaround, which OpenAI's Responses schema validator rejects.
       request = {
         model,
-        input: preparation.buildInput(),
+        ...preparation.buildContext(),
         instructions: compactionInstructions(
           branchEntries,
           model,

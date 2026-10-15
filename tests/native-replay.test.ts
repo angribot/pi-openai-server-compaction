@@ -162,7 +162,7 @@ test("gpt-6.1-sol compacts and replays existing 3000 checkpoints across supporte
     const repeated = prepareCompactionReplay(branch, target);
     assert.equal(repeated.kind, "ready");
     if (repeated.kind === "ready") {
-      assert.equal(repeated.buildInput()[0], COMPACTION_ITEM);
+      assert.equal(repeated.buildContext().input[0], COMPACTION_ITEM);
     }
     assert.equal(prepareNativeReplay(branch, target).kind, "compatible");
   }
@@ -180,7 +180,7 @@ test("repeated compaction sends replacement history plus the post-checkpoint suf
   assert.equal(preparation.kind, "ready");
   if (preparation.kind !== "ready") return;
 
-  assert.deepEqual(preparation.buildInput(), [
+  assert.deepEqual(preparation.buildContext().input, [
     COMPACTION_ITEM,
     { role: "user", content: [{ type: "input_text", text: "after checkpoint" }] },
     { type: "compaction_trigger" },

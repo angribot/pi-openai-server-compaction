@@ -59,6 +59,10 @@ An eligible endpoint may reject another model, provider, account, or endpoint's 
 
 Successful compaction retains recent original user messages and supported images beside the opaque item, using a fixed 64K approximate-token budget independent of Pi's `keepRecentTokens`. Newer messages take priority; an oversized boundary may be truncated. The full supported compactable context still reaches the compaction endpoint first. This budget does not guarantee fit on small-window targets; see [retention details](docs/reference.md#bounded-explicit-user-history).
 
+### Tool declarations follow Pi
+
+Compaction includes the tools Pi projects for the selected model, including supported grammar tools; it never executes returned tool calls. Endpoint schema rejection remains visible and cancels compaction rather than retrying without tools. This does not guarantee every tool schema works on every backend; see the [tool declaration contract](docs/reference.md#remote-compaction-contract).
+
 ### Failures do not produce a backup text summary
 
 Transient compaction failures may retry, up to three attempts total. Unsupported operations, context overflow, and other terminal failures cancel compaction. The extension does not truncate context to make it fit. A model outside the GPT-prefix/API policy, or `openai` using OAuth, does not attempt Remote compaction, so Pi's normal summarization runs; that is not a fallback from a failed Remote compaction.

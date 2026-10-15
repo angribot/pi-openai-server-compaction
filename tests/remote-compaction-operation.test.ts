@@ -193,9 +193,12 @@ function assertOutcome(
   assert.equal(outcome.kind, kind, outcome.error.message);
 }
 
-test("runs built-in Codex without tool declarations while preserving Pi controls and raw capture", async () => {
+test("runs built-in Codex with logical tool declarations while preserving Pi controls and observation", async () => {
   const selectedModel = codexModel();
-  const compactionRequest = request(selectedModel);
+  const compactionRequest = { ...request(selectedModel), tools: [{
+    type: "function", name: "persisted-tool", description: "Active persisted tool",
+    parameters: { type: "object", properties: {} }, strict: null,
+  }] };
   const providerPayload = {
     model: "provider-model",
     input: [{ role: "user", content: "provider input" }],
@@ -276,6 +279,7 @@ test("runs built-in Codex without tool declarations while preserving Pi controls
     model: "gpt-codex",
     input: compactionRequest.input,
     instructions: "system instructions",
+    tools: compactionRequest.tools,
     store: false,
     stream: true,
     text: { verbosity: "low" },
@@ -286,7 +290,7 @@ test("runs built-in Codex without tool declarations while preserving Pi controls
   });
   assert.equal(String(forwardedInput), "https://provider-owned.example/codex/responses");
   assert.deepEqual(JSON.parse(String(forwardedInit?.body)), patchedPayload);
-  assert.equal(Object.hasOwn(JSON.parse(String(forwardedInit?.body)), "tools"), false);
+  assert.deepEqual(JSON.parse(String(forwardedInit?.body)).tools, compactionRequest.tools);
   assert.equal(new Headers(forwardedInit?.headers).get("x-provider-owned"), "yes");
 });
 

@@ -14,6 +14,7 @@ export type CompactionItem = ResponsesItem & {
 export type RemoteCompactionRequest = Readonly<{
   model: Model<any>;
   input: readonly ResponsesItem[];
+  tools?: readonly ResponsesItem[];
   instructions: string;
 }>;
 
@@ -33,8 +34,10 @@ export function remoteCompactionPayload(
     store: false,
     stream: true,
   };
-  // Active tool schemas are not part of Remote compaction, including inherited ones.
-  delete payload.tools;
+  // Persisted model-visible declarations own tool state, not a provider's
+  // unrelated envelope or the registry of discoverable tools.
+  if (request.tools?.length) payload.tools = request.tools;
+  else delete payload.tools;
   delete payload.messages;
   delete payload.previous_response_id;
   return payload;
