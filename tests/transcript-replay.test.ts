@@ -823,6 +823,64 @@ test("an ordinary provider rejection surfaces without stripping the replay item 
   assert.equal(requests, 1);
 });
 
+test("installed replay hooks use current declarations for retained historical tool spans", async () => {
+  const grammar = {
+    name: "grammar", description: "grammar tool",
+    parameters: { type: "object", properties: { code: { type: "string" } }, required: ["code"] },
+    constrainedSampling: { type: "grammar", variants: { openai_regex: ".*" } },
+  };
+  const fn = { ...grammar, constrainedSampling: false };
+  for (const kind of ["direct", "codex"] as const) {
+    for (const mid of [false, true]) {
+      for (const inverse of [false, true]) {
+        for (const retainCall of [false, true]) {
+          const selected = model(kind, { compat: {
+            supportsOpenAIGrammarTools: true, supportsMidConvoSystemMessages: mid,
+          } });
+          const snapshot = { role: "system", content: "BASE", timestamp: 1,
+            toolsAdded: [inverse ? fn : grammar] } as SystemMessage;
+          const call = assistantEntry("a1", "s1", {
+            provider: selected.provider, api: selected.api, model: selected.id,
+            content: [{ type: "toolCall", id: "call_1|ctc_1", name: "grammar", arguments: { code: "hello" } }],
+          });
+          const result = toolResultEntry("t1", "a1");
+          result.message = { ...result.message as any, toolCallId: "call_1|ctc_1", toolName: "grammar" };
+          const branch = [systemEntry("s1", null, snapshot), call, result,
+            checkpointEntry("c1", "t1", retainCall ? "a1" : "t1", checkpointDetails(selected), snapshot),
+            systemEntry("s2", "c1", { role: "system", content: "UPDATED", timestamp: 2,
+              toolsAdded: [inverse ? grammar : fn] } as SystemMessage),
+            userEntry("u2", "later user context", "s2"),
+          ];
+          const session = SessionManager.inMemory(process.cwd(), undefined, branch as never);
+          const messages = convertToLlm(session.buildSessionContext().messages) as Message[];
+          const original = await realProviderPayload(kind, selected, messages);
+          const marker = indexOfMarker(original.input);
+          assert.ok(marker >= 0);
+          assert.ok(original.input.some((item: any) => item.type === (inverse ? "custom_tool_call_output" : "function_call_output")));
+          const handlers: Record<string, (event: any, context: any) => any> = {};
+          extension({ on(name: string, handler: any) { handlers[name] = handler; } } as any);
+          let aborts = 0;
+          const context = { model: selected, sessionManager: session, hasUI: true,
+            ui: { notify() {} }, abort() { aborts++; } };
+          const payload = await realProviderPayload(kind, selected, messages, undefined,
+            payload => handlers.before_provider_request!({ payload }, context));
+          assert.equal(aborts, 0, `${kind} mid=${mid} inverse=${inverse} retainCall=${retainCall}`);
+          assert.deepEqual(payload.input, [
+            ...original.input.slice(0, marker), COMPACTION_ITEM,
+            ...original.input.slice(marker + (retainCall ? 3 : 2)),
+          ]);
+          assert.match(JSON.stringify(payload.input), /later user context/);
+          for (const input of [original.input.filter((_: unknown, i: number) => i !== marker),
+            [...original.input, ...original.input]]) {
+            assert.equal(handlers.before_provider_request!({ payload: { ...original, input } }, context), undefined);
+          }
+          assert.equal(aborts, 2, "missing and ambiguous spans remain fail-closed");
+        }
+      }
+    }
+  }
+});
+
 // Keep this provider-boundary regression: function-only fixtures cannot detect
 // custom wire types, and a retained result need not retain its originating call.
 test("compaction and native replay preserve grammar-tool wire types", async () => {

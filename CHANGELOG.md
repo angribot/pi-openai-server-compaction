@@ -4,6 +4,7 @@ This changelog intentionally starts at **0.1.0**.
 
 ## Unreleased
 
+- preserve Native replay after persisted function/grammar tool redefinitions by reconstructing historical spans under the current declaration environment, while still rejecting missing or ambiguous spans
 - normalize nested Remote compaction error envelopes so invalid-request, overflow, quota, and policy failures retain their diagnostics and stop without retries or checkpoint persistence
 - use Pi ^1.2.0 development dependencies and validate production extension loading at that baseline, keeping host packages as unbundled * peers and the existing Node >=22 package requirement
 - preserve grammar-tool call and result wire formats during Remote compaction and Native replay, fixing missing-span aborts on the first continuation after compaction for models with grammar tools enabled; repeated compaction inherits checkpoint-owned tool declarations while honoring later redefinitions

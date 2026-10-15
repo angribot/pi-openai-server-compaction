@@ -349,6 +349,11 @@ function checkpointSpan(
     // marker instead of assuming it is the first projected item.
     const projected = projectCompactableContext(context.messages, model, {
       includeSystemPrompt: false,
+      // Pi selects historical function/custom wire forms from all declarations
+      // in the current request, including persisted post-checkpoint redefinitions.
+      declarationMessages: buildSessionContext(
+        branch as Parameters<typeof buildSessionContext>[0],
+      ).messages,
     });
     const markerIndex = projected.findIndex((item) => containsCheckpointMarker(item));
     return markerIndex < 0 ? undefined : projected.slice(markerIndex);
