@@ -4,6 +4,7 @@ This changelog intentionally starts at **0.1.0**.
 
 ## Unreleased
 
+- use Pi ^1.2.0 development dependencies and validate production extension loading at that baseline, keeping host packages as unbundled * peers and the existing Node >=22 package requirement
 - preserve grammar-tool call and result wire formats during Remote compaction and Native replay, fixing missing-span aborts on the first continuation after compaction for models with grammar tools enabled; repeated compaction inherits checkpoint-owned tool declarations while honoring later redefinitions
 
 ## 0.14.0 - 2026-10-02
