@@ -4,6 +4,9 @@ This changelog intentionally starts at **0.1.0**.
 
 ## Unreleased
 
+- include Pi-projected active function and grammar tool declarations in Remote compaction, preserving supported in-place additions, removals, redefinitions, and constrained-sampling semantics; schema rejection, including `invalid_function_parameters` without a generic invalid-request type, is terminal with no tool-free retry or tool execution
+- match Pi's capability-dependent historical function/custom wire forms after grammar-tool removal, preventing false Native replay span mismatches on collapsed transcripts
+- capture Codex compaction items and usage through Pi's public per-call stream observer, requiring agreement with raw completion and provider success while retaining narrow HTTP/error and idle-stream supervision
 - retain bounded original user wording and supported images before the compaction item using the fixed upstream 64K approximate-token budget, independently of keepRecentTokens and without fitting or truncating the request sent for compaction
 - write versioned /2 Native replay checkpoints with multi-item replacement history that survives reload and branch navigation; retain strict /1 read compatibility without migration or historical-text backfill, but /1-only extension releases cannot replay new /2 checkpoints
 - settle failed or cancelled Codex compaction attempts without server EOF by cancelling attempt-owned readers together, preserving the shared retry budget and preventing partial checkpoint persistence

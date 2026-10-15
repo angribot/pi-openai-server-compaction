@@ -25,7 +25,7 @@ import {
 } from "../src/native-replay.ts";
 
 // ---------------------------------------------------------------------------
-// Pi 0.99.1 public-behavior oracle
+// Pi 1.2.0 public-behavior oracle
 //
 // These helpers drive Pi's real Responses providers with a mocked fetch. The
 // captured body is what Pi would send on the wire, so projection and replay
@@ -141,14 +141,11 @@ async function realProviderPayload(
 /**
  * Remove only the documented differences between an ordinary provider payload
  * and a Remote compaction input: the leading prompt item (ordinary Responses
- * carries it in the input; Codex carries it in `instructions`) and any tool
- * declaration items. Everything else must be wire-equivalent.
+ * carries it in the input; Codex carries it in `instructions`). Tool declaration
+ * items must remain wire-equivalent, including their placement.
  */
-function stripProviderDeclarations(kind: ApiKind, input: readonly any[]): any[] {
-  const items = [...input];
-  const withoutLeading =
-    kind === "direct" && items[0]?.role === "developer" ? items.slice(1) : items;
-  return withoutLeading.filter((item) => !TOOL_DECLARATION_TYPES.has(String(item.type)));
+function withoutLeadingPrompt(kind: ApiKind, input: readonly any[]): any[] {
+  return kind === "direct" && input[0]?.role === "developer" ? input.slice(1) : [...input];
 }
 
 function leadingText(kind: ApiKind, payload: Record<string, any>): string {
@@ -430,8 +427,8 @@ test("Remote compaction input matches the real provider projection for both API 
       if (preparation.kind !== "ready") continue;
 
       assert.deepEqual(
-        preparation.buildInput(),
-        [...stripProviderDeclarations(kind, ordinary.input), { type: "compaction_trigger" }],
+        preparation.buildContext().input,
+        [...withoutLeadingPrompt(kind, ordinary.input), { type: "compaction_trigger" }],
         label,
       );
       assert.equal(compactionInstructions(branch, selectedModel, undefined, ""), leading, label);
@@ -472,10 +469,10 @@ test("repeated Remote compaction matches the real provider projection of the pos
       assert.equal(preparation.kind, "ready", label);
       if (preparation.kind !== "ready") continue;
       assert.deepEqual(
-        preparation.buildInput(),
+        preparation.buildContext().input,
         [
           COMPACTION_ITEM,
-          ...stripProviderDeclarations(kind, suffix.input),
+          ...withoutLeadingPrompt(kind, suffix.input),
           { type: "compaction_trigger" },
         ],
         label,
@@ -485,7 +482,7 @@ test("repeated Remote compaction matches the real provider projection of the pos
   }
 });
 
-test("tool additions, removals, and redefinitions project like Pi and stay out of compaction input", async () => {
+test("tool additions, removals, and redefinitions preserve Pi declaration placement", async () => {
   const selectedModel = model("codex", {
     compat: { supportsMidConvoSystemMessages: true, supportsAdditionalTools: true },
   });
@@ -551,17 +548,18 @@ test("tool additions, removals, and redefinitions project like Pi and stay out o
     const preparation = prepareCompactionReplay(branch, selectedModel);
     assert.equal(preparation.kind, "ready", name);
     if (preparation.kind !== "ready") continue;
-    const input = preparation.buildInput();
+    const input = preparation.buildContext().input;
     assert.deepEqual(
       input,
-      [...stripProviderDeclarations("codex", ordinary.input), { type: "compaction_trigger" }],
+      [...withoutLeadingPrompt("codex", ordinary.input), { type: "compaction_trigger" }],
       name,
     );
     assert.equal(
       input.some((item) => TOOL_DECLARATION_TYPES.has(String(item.type))),
-      false,
+      anchorsAddition,
       name,
     );
+    assert.deepEqual(preparation.buildContext().tools, ordinary.tools ?? []);
   }
 });
 
@@ -596,12 +594,12 @@ test("a system message between a function call and its result is ordered like Pi
     assert.equal(preparation.kind, "ready", `withResult=${withResult}`);
     if (preparation.kind !== "ready") continue;
     assert.deepEqual(
-      preparation.buildInput(),
-      [...stripProviderDeclarations("codex", ordinary.input), { type: "compaction_trigger" }],
+      preparation.buildContext().input,
+      [...withoutLeadingPrompt("codex", ordinary.input), { type: "compaction_trigger" }],
       `withResult=${withResult}`,
     );
     if (!withResult) {
-      assert.equal(JSON.stringify(preparation.buildInput()).includes("No result provided"), true);
+      assert.equal(JSON.stringify(preparation.buildContext().input).includes("No result provided"), true);
     }
   }
 });
@@ -689,10 +687,10 @@ test("native replay follows a reloaded SessionManager branch after navigation", 
     const repeated = prepareCompactionReplay(branch, model("direct", { id: "gpt-another" }));
     assert.equal(repeated.kind, "ready");
     if (repeated.kind === "ready") {
-      assert.deepEqual(repeated.buildInput().slice(0, 2), [
+      assert.deepEqual(repeated.buildContext().input.slice(0, 2), [
         { role: "user", content: [{ type: "input_text", text: "old" }] }, COMPACTION_ITEM,
       ]);
-      assert.deepEqual(repeated.buildInput().at(-1), { type: "compaction_trigger" });
+      assert.deepEqual(repeated.buildContext().input.at(-1), { type: "compaction_trigger" });
     }
     const payload = await realProviderPayload("codex", selectedModel, messages);
     const preparation = prepareNativeReplay(branch, selectedModel);
@@ -778,6 +776,221 @@ function requestBody(init?: RequestInit): Record<string, any> {
   }
   return JSON.parse(typeof raw === "string" ? raw : Buffer.from(raw as Buffer).toString("utf8"));
 }
+
+async function captureCompactionRequests<T>(run: () => T) {
+  const requests: Record<string, any>[] = [];
+  const network = mock.method(globalThis, "fetch", async (_url: unknown, init?: RequestInit) => {
+    requests.push(requestBody(init));
+    return compactionResponse();
+  });
+  try {
+    return { result: await run(), requests };
+  } finally {
+    network.mock.restore();
+  }
+}
+
+test("Remote compaction sends Pi-projected active declarations without repairing regex lookahead schemas", async () => {
+  const tool = { name: "tasks", description: "Synthetic lookahead declaration", parameters: {
+    type: "object", properties: { title: { type: "string", pattern: "^(?!.*blocked).+$" } }, required: ["title"],
+  } };
+  for (const kind of ["direct", "codex"] as const) {
+    const selected = model(kind);
+    const branch = [systemEntry("s1", null, { role: "system", content: "BASE", toolsAdded: [tool], timestamp: 1 }),
+      userEntry("u1", "compact with tools", "s1")];
+    const ordinary = await realProviderPayload(kind, selected, payloadMessages(branch));
+    const h = compactionHarness(kind, branch, selected);
+    const { result, requests } = await captureCompactionRequests(() => h.compact());
+    assert.ok(result.compaction, h.notifications.join("\n"));
+    assert.equal(requests.length, 1);
+    const body = requests[0]!;
+    assert.deepEqual(body.tools, ordinary.tools, kind);
+    assert.equal(body.tools[0].parameters.properties.title.pattern, "^(?!.*blocked).+$");
+    assert.deepEqual(body.input.at(-1), { type: "compaction_trigger" });
+  }
+});
+
+test("declaration deltas match real Pi payloads for first and repeated compaction across API capabilities", async () => {
+  const grammar = { name: "grammar", description: "Grammar addition", parameters: {
+    type: "object", properties: { input: { type: "string" } }, required: ["input"],
+  }, constrainedSampling: { type: "grammar", variants: { openai_lark: "start: /.+/s", openai_regex: ".*" } } };
+  for (const kind of ["direct", "codex"] as const) {
+    for (const mid of [false, true]) {
+      for (const placement of ["top-level", "additional", "search"] as const) {
+        for (const change of ["addition", "removal", "redefinition"] as const) {
+          for (const repeated of [false, true]) {
+            const selected = model(kind, { compat: { supportsMidConvoSystemMessages: mid,
+              supportsAdditionalTools: placement === "additional", supportsToolSearch: placement !== "top-level",
+              supportsOpenAIGrammarTools: true } });
+            const snapshot = { role: "system", content: "BASE", toolsAdded: [READ_TOOL], timestamp: 1 } as SystemMessage;
+            const delta = { role: "system", content: "DELTA", timestamp: 2,
+              toolsAdded: [change === "redefinition" ? { ...grammar, name: "read" } : grammar],
+              ...(change === "removal" ? { toolsRemoved: [{ name: "read" }] } : {}),
+            } as SystemMessage;
+            const branch = [systemEntry("s0", null, snapshot), userEntry("u0", "before", "s0"),
+              ...(repeated ? [checkpointEntry("c0", "u0", "u0", checkpointDetails(selected), snapshot)] : []),
+              systemEntry("s2", repeated ? "c0" : "u0", delta), userEntry("u1", "after", "s2")];
+            // The logical repeated context excludes Pi's marker and retained raw entries.
+            const ordinary = await realProviderPayload(kind, selected,
+              repeated ? [snapshot, ...branchSuffixMessages(branch)] : payloadMessages(branch));
+            const h = compactionHarness(kind, branch, selected);
+            const { result, requests } = await captureCompactionRequests(() => h.compact());
+            const label = `${kind} mid=${mid} ${placement} ${change} repeated=${repeated}`;
+            assert.ok(result.compaction, `${label}: ${h.notifications.join("\n")}`);
+            assert.equal(requests.length, 1, label);
+            const body = requests[0]!;
+            assert.deepEqual(body.tools, ordinary.tools, label);
+            assert.deepEqual(body.input, [
+              ...(repeated ? [COMPACTION_ITEM] : []), ...withoutLeadingPrompt(kind, ordinary.input),
+              { type: "compaction_trigger" },
+            ], label);
+          }
+        }
+      }
+    }
+  }
+});
+
+test("constrained JSON-schema declarations retain Pi strict-mode projection and capability fallback", async () => {
+  for (const kind of ["direct", "codex"] as const) {
+    for (const strict of [false, true]) {
+      const selected = model(kind, { compat: { supportsStrictMode: strict } });
+      const tool = { name: "structured", description: "Structured arguments", parameters: {
+        type: "object", properties: { title: { type: "string" }, tags: { type: "array", items: { type: "string" } } },
+        required: ["title"],
+      }, constrainedSampling: { type: "json_schema", strict: "prefer" } };
+      const branch = [systemEntry("s1", null, { role: "system", content: "BASE", toolsAdded: [tool], timestamp: 1 } as SystemMessage),
+        userEntry("u1", "compact", "s1")];
+      const original = JSON.stringify(tool);
+      const ordinary = await realProviderPayload(kind, selected, payloadMessages(branch));
+      const h = compactionHarness(kind, branch, selected);
+      const { result, requests } = await captureCompactionRequests(() => h.compact());
+      assert.ok(result.compaction, h.notifications.join("\n"));
+      assert.equal(requests.length, 1);
+      assert.deepEqual(requests[0]!.tools, ordinary.tools, `${kind} strict=${strict}`);
+      assert.equal(JSON.stringify(tool), original, "projection must not mutate persisted schemas");
+    }
+  }
+});
+
+test("removed grammar declarations retain Pi's capability-dependent historical wire forms", async () => {
+  const tool = { name: "grammar", description: "Removed grammar", parameters: {
+    type: "object", properties: { code: { type: "string" } }, required: ["code"],
+  }, constrainedSampling: { type: "grammar", variants: { openai_regex: ".*" } } };
+  for (const kind of ["direct", "codex"] as const) {
+    for (const mid of [false, true]) {
+      const selected = model(kind, { compat: { supportsMidConvoSystemMessages: mid, supportsOpenAIGrammarTools: true } });
+      const snapshot = { role: "system", content: "BASE", toolsAdded: [tool], timestamp: 1 } as SystemMessage;
+      const call = assistantEntry("a1", "s0", { provider: selected.provider, api: selected.api, model: selected.id,
+        content: [{ type: "toolCall", id: "call_1|ctc_item_1", name: "grammar", arguments: { code: "hello" } }] });
+      const result = toolResultEntry("t1", "a1");
+      result.message = { ...result.message as any, toolCallId: "call_1|ctc_item_1", toolName: "grammar" };
+      const removal = systemEntry("s2", "t1", { role: "system", content: "", toolsRemoved: [{ name: "grammar" }], timestamp: 3 });
+      const before = [systemEntry("s0", null, snapshot), call, result];
+      const branch = [...before, removal, userEntry("u1", "after removal", "s2")];
+      const ordinary = await realProviderPayload(kind, selected, payloadMessages(branch));
+      const h = compactionHarness(kind, branch, selected);
+      const { result: compacted, requests } = await captureCompactionRequests(() => h.compact());
+      assert.ok(compacted.compaction, h.notifications.join("\n"));
+      assert.equal(requests.length, 1);
+      assert.deepEqual(requests[0]!.input, [...withoutLeadingPrompt(kind, ordinary.input), { type: "compaction_trigger" }]);
+      assert.deepEqual(requests[0]!.tools, ordinary.tools);
+      const replay = [...before, checkpointEntry("c1", "t1", "a1", checkpointDetails(selected), snapshot),
+        { ...removal, parentId: "c1" }, userEntry("u1", "after removal", "s2")];
+      const payload = await realProviderPayload(kind, selected, payloadMessages(replay));
+      const native = prepareNativeReplay(replay, selected);
+      assert.equal(native.kind, "compatible");
+      if (native.kind === "compatible") assert.equal(native.rewrite(payload).kind, "patched", `${kind} mid=${mid}`);
+    }
+  }
+});
+
+test("required constrained sampling fails before dispatch while preferred unsupported schemas match Pi unchanged", async () => {
+  for (const kind of ["direct", "codex"] as const) {
+    for (const supportsStrictMode of [false, true]) {
+      for (const strict of ["prefer", "require"] as const) {
+        const selected = model(kind, { compat: { supportsStrictMode } });
+        const tool = { name: "structured", description: "Unsupported strict union", parameters: {
+          type: "object", properties: { value: { oneOf: [{ type: "string" }, { type: "number" }] } },
+        }, constrainedSampling: { type: "json_schema", strict } };
+        const branch = [systemEntry("s1", null, { role: "system", content: "BASE", toolsAdded: [tool], timestamp: 1 } as SystemMessage),
+          userEntry("u1", "compact", "s1")];
+        const ordinary = strict === "prefer" ? await realProviderPayload(kind, selected, payloadMessages(branch)) : undefined;
+        const bodies: Record<string, any>[] = [];
+        const network = mock.method(globalThis, "fetch", async (_url: unknown, init?: RequestInit) => {
+          bodies.push(requestBody(init)); return compactionResponse();
+        });
+        try {
+          const h = compactionHarness(kind, branch, selected);
+          const result = await h.compact();
+          if (strict === "require") {
+            assert.deepEqual(result, { cancel: true });
+            assert.equal(bodies.length, 0);
+            assert.match(h.notifications.join("\n"), /requires JSON-schema constrained sampling/);
+          } else {
+            assert.ok(result.compaction, h.notifications.join("\n"));
+            assert.deepEqual(bodies[0]?.tools, ordinary?.tools);
+            assert.deepEqual(bodies[0]?.tools[0].parameters, tool.parameters);
+          }
+        } finally { network.mock.restore(); }
+      }
+    }
+  }
+});
+
+test("schema and unsupported-operation rejections are terminal with declarations on both APIs", async () => {
+  for (const kind of ["direct", "codex"] as const) {
+    for (const code of ["invalid_request_error", "invalid_function_parameters", "unsupported_operation"]) {
+      for (const transport of ["http", "flat", "nested", "failed"]) {
+        const branch = [systemEntry("s1", null, { role: "system", content: "BASE", toolsAdded: [READ_TOOL], timestamp: 1 }),
+          userEntry("u1", "compact", "s1")];
+        const bodies: Record<string, any>[] = [];
+        const network = mock.method(globalThis, "fetch", async (_url: unknown, init?: RequestInit) => {
+          bodies.push(requestBody(init));
+          const error = { code, message: `schema rejected: ${code}` };
+          if (transport === "http") return new Response(JSON.stringify({ error }), { status: 503 });
+          const event = transport === "flat" ? { type: "error", ...error }
+            : transport === "nested" ? { type: "error", error }
+            : { type: "response.failed", response: { error } };
+          return new Response(`data: ${JSON.stringify(event)}\n\n`);
+        });
+        try {
+          const h = compactionHarness(kind, branch);
+          assert.deepEqual(await h.compact(), { cancel: true });
+          assert.equal(bodies.length, 1, `${kind} ${code} ${transport}: no tool-free retry`);
+          assert.equal(bodies[0]?.tools[0].name, "read");
+          assert.match(h.notifications.join("\n"), /schema rejected:/);
+          assert.equal(h.session.getBranch().some(e => e.type === "compaction"), false);
+        } finally { network.mock.restore(); }
+      }
+    }
+  }
+});
+
+test("returned tool calls never turn compaction into a tool-executing agent run", async () => {
+  for (const kind of ["direct", "codex"] as const) {
+    for (const withCompaction of [false, true]) {
+      const branch = [systemEntry("s1", null, { role: "system", content: "BASE", toolsAdded: [READ_TOOL], timestamp: 1 }),
+        userEntry("u1", "compact", "s1")];
+      const network = mock.method(globalThis, "fetch", async () => new Response([
+        { type: "response.output_item.done", output_index: 0, item: {
+          type: "function_call", id: "fc_returned", call_id: "call_returned", name: "read", arguments: "{}",
+        } },
+        ...(withCompaction ? [{ type: "response.output_item.done", output_index: 1, item: COMPACTION_ITEM }] : []),
+        { type: "response.completed", response: { status: "completed", output: [] } },
+      ].map(event => `data: ${JSON.stringify(event)}\n\n`).join("")));
+      try {
+        const h = compactionHarness(kind, branch);
+        const result = await h.compact();
+        if (withCompaction) {
+          assert.deepEqual(result.compaction.details.nativeReplayCheckpoint.replacementHistory.at(-1), COMPACTION_ITEM);
+        } else assert.deepEqual(result, { cancel: true });
+        assert.equal(network.mock.callCount(), 1, "no tool results or agent continuation dispatched");
+        assert.equal(h.session.getBranch().some(e => e.type === "message" && e.message.role === "toolResult"), false);
+      } finally { network.mock.restore(); }
+    }
+  }
+});
 
 test("successful compaction retains only model-visible original users before a new-format opaque item", async () => {
   for (const kind of ["direct", "codex"] as const) {
@@ -1210,9 +1423,11 @@ test("compaction and native replay preserve grammar-tool wire types", async () =
         const repeatedPreparation = prepareCompactionReplay(repeated, selected);
         assert.equal(repeatedPreparation.kind, "ready");
         if (repeatedPreparation.kind !== "ready") continue;
+        assert.deepEqual(repeatedPreparation.buildContext().tools, fullPayload.tools ?? [],
+          `${kind} repeated declarations grammar=${grammar} redefined=${Boolean(update)}`);
         const toolItems = (items: readonly any[]) => items.filter((item) => item.call_id === "call_1");
         assert.deepEqual(
-          repeatedPreparation.buildInput(),
+          repeatedPreparation.buildContext().input,
           [COMPACTION_ITEM, ...toolItems(fullPayload.input), { type: "compaction_trigger" }],
           `${kind} repeated grammar=${grammar} redefined=${Boolean(update)}`,
         );
@@ -1220,8 +1435,9 @@ test("compaction and native replay preserve grammar-tool wire types", async () =
       const compaction = prepareCompactionReplay(before, selected);
       assert.equal(compaction.kind, "ready");
       if (compaction.kind !== "ready") continue;
-      assert.deepEqual(compaction.buildInput(), [
-        ...stripProviderDeclarations(kind, ordinary.input), { type: "compaction_trigger" },
+      assert.deepEqual(compaction.buildContext().tools, ordinary.tools ?? [], `${kind} grammar=${grammar}`);
+      assert.deepEqual(compaction.buildContext().input, [
+        ...withoutLeadingPrompt(kind, ordinary.input), { type: "compaction_trigger" },
       ]);
       const branch = [
         ...before,
