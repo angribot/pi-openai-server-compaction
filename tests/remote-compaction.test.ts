@@ -413,6 +413,78 @@ test("terminal unsupported compaction cancels without a text fallback", async ()
   assert.match(state.notifications[0]!.message, /no text fallback/);
 });
 
+test("nested terminal errors cancel at the hook after one dispatch without a checkpoint", async () => {
+  for (const code of ["invalid_request_error", "context_length_exceeded", "insufficient_quota", "policy_violation", "misalignment_policy_violation"]) {
+    const network = mock.method(globalThis, "fetch", async () => new Response(
+      `data: ${JSON.stringify({ type: "error", error: { code, message: `Rejected: ${code}` } })}\n\n`,
+    ));
+    try {
+      const state = makeContext(model());
+      Object.assign(state.context as object, { modelRegistry: {
+        isUsingOAuth: () => false,
+        getApiKeyAndHeaders: async () => ({ ok: true, apiKey: "test-key" }),
+      } });
+      assert.deepEqual(await install(attemptDirectResponsesOperation)(compactEvent(), state.context), { cancel: true });
+      assert.equal(network.mock.callCount(), 1);
+      assert.match(state.notifications[0]!.message, new RegExp(`Rejected: ${code}`));
+    } finally { network.mock.restore(); }
+  }
+});
+
+test("hook retries share one unchanged request and cap Retry-After delays and attempts", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const requests: string[] = [];
+  const network = mock.method(globalThis, "fetch", async (_url: unknown, init?: RequestInit) => {
+    requests.push(String(init?.body));
+    return new Response(JSON.stringify({ error: { error: { code: "server_error", message: "busy" } } }), {
+      status: 503, headers: { "retry-after": "3600" },
+    });
+  });
+  try {
+    const state = makeContext(model());
+    Object.assign(state.context as object, { modelRegistry: {
+      isUsingOAuth: () => false,
+      getApiKeyAndHeaders: async () => ({ ok: true, apiKey: "test-key" }),
+    } });
+    const result = install(attemptDirectResponsesOperation)(compactEvent(), state.context);
+    await new Promise(setImmediate);
+    assert.equal(requests.length, 1);
+    for (let attempt = 2; attempt <= 3; attempt++) {
+      t.mock.timers.tick(59_999);
+      await new Promise(setImmediate);
+      assert.equal(requests.length, attempt - 1);
+      t.mock.timers.tick(1);
+      await new Promise(setImmediate);
+      assert.equal(requests.length, attempt);
+    }
+    assert.deepEqual(await result, { cancel: true });
+    assert.equal(new Set(requests).size, 1);
+    assert.match(state.notifications[0]!.message, /busy/);
+  } finally { network.mock.restore(); }
+});
+
+test("cancelling a fallback retry delay prevents later dispatch and checkpoint installation", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const network = mock.method(globalThis, "fetch", async () => { throw new Error("connection reset"); });
+  try {
+    const controller = new AbortController();
+    const state = makeContext(model());
+    Object.assign(state.context as object, { modelRegistry: {
+      isUsingOAuth: () => false,
+      getApiKeyAndHeaders: async () => ({ ok: true, apiKey: "test-key" }),
+    } });
+    const event = { ...compactEvent() as object, signal: controller.signal };
+    const pending = install(attemptDirectResponsesOperation)(event, state.context);
+    await new Promise(setImmediate);
+    assert.equal(network.mock.callCount(), 1);
+    controller.abort();
+    assert.deepEqual(await pending, { cancel: true });
+    t.mock.timers.tick(60_000);
+    await new Promise(setImmediate);
+    assert.equal(network.mock.callCount(), 1);
+  } finally { network.mock.restore(); }
+});
+
 // Approved seams: registered lifecycle hooks with Pi's real auth runtime and
 // production direct operation; fetch is the only remote boundary replaced.
 async function openaiAuthRuntime(oauth = true, apiKey?: string) {

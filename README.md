@@ -101,7 +101,7 @@ Run type checking and offline tests (no credentials or network needed):
 npm test
 ```
 
-`npm test` covers the extension loader, the cache-warming guard through Pi's real warmer decision/dispatch path, and the transport/projection contracts, but not credentialed end-to-end compaction or replay continuity. Offline lifecycle and real-provider/mock-fetch tests cover optimistic eligibility, continuity, and custom Codex routing; they do not prove live backend interoperability or comprehensively exercise retry orchestration. See [testing coverage](docs/reference.md#testing) and the [test ownership rule](docs/reference.md#test-ownership).
+`npm test` covers the extension loader, the cache-warming guard through Pi's real warmer decision/dispatch path, and the transport/projection contracts, but not credentialed end-to-end compaction or replay continuity. Offline lifecycle and real-provider/mock-fetch tests cover optimistic eligibility, continuity, and custom Codex routing; they also cover bounded retries and retry-delay cancellation, but do not prove live backend interoperability. See [testing coverage](docs/reference.md#testing) and the [test ownership rule](docs/reference.md#test-ownership).
 
 - [Technical reference](docs/reference.md): protocol, checkpoint format, replay, retries, transport limitations, and repository layout.
 - [Domain glossary](GLOSSARY.md) and [architecture decisions](docs/adr/).

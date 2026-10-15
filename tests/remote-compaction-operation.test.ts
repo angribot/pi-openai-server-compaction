@@ -704,6 +704,41 @@ test("keeps unrecognized SSE failures retryable and unrecognized HTTP failures t
   );
 });
 
+test("equivalent flat and nested wire errors retain classification and diagnostics", async () => {
+  for (const [code, kind] of [
+    ["invalid_request_error", "terminal"],
+    ["context_length_exceeded", "terminal"],
+    ["insufficient_quota", "terminal"],
+    ["policy_violation", "terminal"],
+    ["misalignment_policy_violation", "terminal"],
+    ["server_error", "retryable"],
+    ["unknown_error", "retryable"],
+  ] as const) {
+    const failure = { code, message: `Provider diagnostic: ${code}` };
+    for (const envelope of [
+      { type: "error", ...failure },
+      { type: "error", error: failure },
+      { type: "error", error: { error: failure } },
+      { type: "response.failed", response: { error: failure } },
+      { type: "response.failed", response: { error: { error: failure } } },
+    ]) {
+      const outcome = await validateRemoteCompactionResponse(
+        request(), streamResponse([sse(envelope)]), new AbortController().signal,
+      );
+      assertOutcome(outcome, kind);
+      assert.notEqual(outcome.kind, "accepted");
+      if (outcome.kind !== "accepted") assert.match(outcome.error.message, new RegExp(failure.message));
+    }
+    for (const envelope of [failure, { error: failure }, { error: { error: failure } }]) {
+      const outcome = await validateRemoteCompactionResponse(
+        request(), new Response(JSON.stringify(envelope), { status: 503 }), new AbortController().signal,
+      );
+      assertOutcome(outcome, kind);
+      if (outcome.kind !== "accepted") assert.match(outcome.error.message, new RegExp(failure.message));
+    }
+  }
+});
+
 test("returns standard Retry-After values on retryable HTTP outcomes", async () => {
   const future = new Date(Date.now() + 60_000).toUTCString();
   const cases: Array<[string, number | undefined]> = [
