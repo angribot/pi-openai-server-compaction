@@ -42,6 +42,8 @@ export type CompactableContextOptions = {
    * only to classify historical tool items; never emitted as prompt or tools.
    */
   checkpointSystemMessage?: SystemMessage;
+  /** Current ordinary transcript's declaration environment, separate from the span being projected. */
+  declarationMessages?: readonly AgentMessage[];
 };
 
 const NON_VISION_USER_IMAGE_PLACEHOLDER = "(image omitted: model does not support images)";
@@ -469,9 +471,11 @@ export function projectCompactableContext(
     (model.compat as { supportsMidConvoSystemMessages?: boolean } | undefined)
       ?.supportsMidConvoSystemMessages ?? false;
   const context = normalizeContext({ messages: convertToLlm([...messages]) });
-  const declarationMessages = options.checkpointSystemMessage
-    ? [options.checkpointSystemMessage, ...context.messages]
-    : context.messages;
+  const declarationMessages = options.declarationMessages
+    ? convertToLlm([...options.declarationMessages])
+    : options.checkpointSystemMessage
+      ? [options.checkpointSystemMessage, ...context.messages]
+      : context.messages;
   const grammarToolInputProperties = grammarInputProperties(getDeclaredTools(declarationMessages), model);
   const resolved = resolveTranscript(context, supportsMidConvoSystemMessages);
   return projectNormalizedMessages(

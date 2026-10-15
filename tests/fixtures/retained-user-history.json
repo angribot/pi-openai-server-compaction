@@ -1,0 +1,59 @@
+{
+  "sourceRevision": "e89b7c442c0433ad5167e72a5a25bb6d0712766a",
+  "sources": [
+    "codex-rs/core/src/compact_remote_v2.rs:truncate_retained_messages",
+    "codex-rs/core/src/compact_remote_v2_images.rs:truncate_message_to_token_budget",
+    "codex-rs/core/src/context_manager/history.rs:RESIZED_IMAGE_BYTES_ESTIMATE",
+    "codex-rs/utils/string/src/truncate.rs:plan_token_truncation"
+  ],
+  "cases": [
+    {
+      "name": "boundary truncation omits empty text parts",
+      "remainingTokens": 2,
+      "content": [{ "type": "text", "text": "" }, { "type": "text", "text": "abcdefghijklmnopqrst" }],
+      "expected": [{ "type": "input_text", "text": "abcd…3 tokens truncated…qrst" }]
+    },
+    {
+      "name": "text-only boundary preserves both ends and charges UTF-8 bytes",
+      "remainingTokens": 4,
+      "content": [{ "type": "text", "text": "abcdefghijklmnopqrst" }],
+      "expected": [{ "type": "input_text", "text": "abcdefgh…1 tokens truncated…mnopqrst" }]
+    },
+    {
+      "name": "UTF-8 truncation stays on character boundaries",
+      "remainingTokens": 3,
+      "content": [{ "type": "text", "text": "🙂ab🙂cd🙂ef🙂gh" }],
+      "expected": [{ "type": "input_text", "text": "🙂ab…3 tokens truncated…🙂gh" }]
+    },
+    {
+      "name": "text-only boundary traverses parts from the beginning",
+      "remainingTokens": 2,
+      "content": [{ "type": "text", "text": "abcdefgh" }, { "type": "text", "text": "later" }],
+      "expected": [{ "type": "input_text", "text": "abcdefgh" }]
+    },
+    {
+      "name": "auto image costs 1844 approximate tokens independent of base64 size",
+      "remainingTokens": 1844,
+      "content": [{ "type": "image", "mimeType": "image/png", "data": "abc" }],
+      "expected": [{ "type": "input_image", "image_url": "data:image/png;base64,abc", "detail": "auto" }]
+    },
+    {
+      "name": "oversized image is dropped atomically without backfilling older users",
+      "remainingTokens": 1843,
+      "content": [{ "type": "image", "mimeType": "image/png", "data": "abc" }],
+      "expected": null
+    },
+    {
+      "name": "image-containing boundary prioritizes later parts",
+      "remainingTokens": 1845,
+      "content": [{ "type": "text", "text": "earlier" }, { "type": "image", "mimeType": "image/png", "data": "abc" }, { "type": "text", "text": "keep" }],
+      "expected": [{ "type": "input_image", "image_url": "data:image/png;base64,abc", "detail": "auto" }, { "type": "input_text", "text": "keep" }]
+    },
+    {
+      "name": "later text survives when the preceding image cannot fit",
+      "remainingTokens": 1844,
+      "content": [{ "type": "text", "text": "earlier" }, { "type": "image", "mimeType": "image/png", "data": "abc" }, { "type": "text", "text": "keep" }],
+      "expected": [{ "type": "input_text", "text": "keep" }]
+    }
+  ]
+}

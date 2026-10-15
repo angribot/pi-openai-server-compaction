@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import assert from "node:assert/strict";
 import { mock, test } from "node:test";
@@ -17,7 +17,6 @@ import { buildSessionContext, convertToLlm, SessionManager } from "@earendil-wor
 import extension from "../index.ts";
 import {
   compactionInstructions,
-  NATIVE_REPLAY_CHECKPOINT_FORMAT,
   prepareCompactionReplay,
   prepareNativeReplay,
   REMOTE_COMPACTION_CHECKPOINT_MARKER,
@@ -117,15 +116,7 @@ async function realProviderPayload(
   });
   let body: Record<string, any> | undefined;
   const fetchMock = (async (_input: RequestInfo | URL, init?: RequestInit) => {
-    const headers = new Headers(init?.headers);
-    let raw: unknown = init?.body;
-    if (headers.get("content-encoding") === "zstd") {
-      const decompress = (zlib as { zstdDecompressSync?: (value: Buffer) => Buffer })
-        .zstdDecompressSync;
-      assert.ok(decompress, "the provider compressed the body without zstd decompression support");
-      raw = decompress(Buffer.from(raw as Buffer));
-    }
-    body = JSON.parse(typeof raw === "string" ? raw : Buffer.from(raw as Buffer).toString("utf8"));
+    body = requestBody(init);
     return terminalResponse();
   }) as typeof globalThis.fetch;
 
@@ -256,7 +247,7 @@ function checkpointDetails(
 ): NativeReplayCheckpointDetails {
   return {
     nativeReplayCheckpoint: {
-      format: NATIVE_REPLAY_CHECKPOINT_FORMAT,
+      format: "native-replay-checkpoint/1",
       producer: {
         modelKey: {
           provider: selectedModel.provider,
@@ -698,7 +689,9 @@ test("native replay follows a reloaded SessionManager branch after navigation", 
     const repeated = prepareCompactionReplay(branch, model("direct", { id: "gpt-another" }));
     assert.equal(repeated.kind, "ready");
     if (repeated.kind === "ready") {
-      assert.deepEqual(repeated.buildInput()[0], COMPACTION_ITEM);
+      assert.deepEqual(repeated.buildInput().slice(0, 2), [
+        { role: "user", content: [{ type: "input_text", text: "old" }] }, COMPACTION_ITEM,
+      ]);
       assert.deepEqual(repeated.buildInput().at(-1), { type: "compaction_trigger" });
     }
     const payload = await realProviderPayload("codex", selectedModel, messages);
@@ -741,6 +734,303 @@ test("native replay reads a snapshot-less /1 checkpoint through the real provide
   assert.equal(preparation.rewrite(withoutMarker).kind, "span-missing-or-ambiguous");
 });
 
+function compactionHarness(kind: ApiKind, branch: BranchEntry[], selected = model(kind)) {
+  const handlers: Record<string, (event: any, context: any) => any> = {};
+  extension({ on(name: string, handler: any) { handlers[name] = handler; } } as any);
+  const session = SessionManager.inMemory(process.cwd(), undefined, branch as never);
+  const notifications: string[] = [];
+  let aborts = 0;
+  const context = { model: selected, sessionManager: session, hasUI: true,
+    ui: { notify(message: string) { notifications.push(message); } },
+    getSystemPrompt: () => "BASE", abort() { aborts++; },
+    modelRegistry: { isUsingOAuth: () => false,
+      async getApiKeyAndHeaders() { return { ok: true, apiKey: "test-key" }; },
+      async complete(actual: any, transcript: any, options: any) {
+        return codexResponsesStream(actual, normalizeContext(transcript), { ...options, apiKey: fakeJwt() }).result();
+      },
+    },
+  };
+  return { handlers, context, session, notifications, aborts: () => aborts,
+    compact(keepRecentTokens = 20_000) {
+      const active = context.sessionManager.getBranch();
+      return handlers.session_before_compact!({ branchEntries: active,
+        preparation: { firstKeptEntryId: [...active].reverse().find(e => e.type === "message" && e.message.role === "user")!.id,
+          tokensBefore: 123, settings: { keepRecentTokens } },
+        signal: new AbortController().signal }, context);
+    },
+  };
+}
+
+function compactionResponse(item: Record<string, unknown> = COMPACTION_ITEM): Response {
+  return new Response([
+    { type: "response.output_item.done", output_index: 0, item },
+    { type: "response.completed", response: { status: "completed", output: [item] } },
+  ].map(event => `data: ${JSON.stringify(event)}\n\n`).join(""));
+}
+
+function requestBody(init?: RequestInit): Record<string, any> {
+  let raw: unknown = init?.body;
+  if (new Headers(init?.headers).get("content-encoding") === "zstd") {
+    const decompress = (zlib as { zstdDecompressSync?: (value: Buffer) => Buffer })
+      .zstdDecompressSync;
+    assert.ok(decompress, "the provider compressed the body without zstd decompression support");
+    raw = decompress(Buffer.from(raw as Buffer));
+  }
+  return JSON.parse(typeof raw === "string" ? raw : Buffer.from(raw as Buffer).toString("utf8"));
+}
+
+test("successful compaction retains only model-visible original users before a new-format opaque item", async () => {
+  for (const kind of ["direct", "codex"] as const) {
+    const branch: BranchEntry[] = [userEntry("u0", "discarded by ordinary compaction"),
+      userEntry("u1", "kept wording", "u0"),
+      { type: "compaction", id: "ordinary", parentId: "u1", firstKeptEntryId: "u1", summary: "synthetic summary" },
+      { type: "branch_summary", id: "bs", parentId: "ordinary", summary: "synthetic branch summary" },
+      userEntry("u2", "new wording", "bs")];
+    const requests: Record<string, any>[] = [];
+    const network = mock.method(globalThis, "fetch", async (_url: unknown, init?: RequestInit) => {
+      requests.push(requestBody(init)); return compactionResponse();
+    });
+    try {
+      const h = compactionHarness(kind, branch);
+      for (const keepRecentTokens of [0, 99_999]) {
+        const result = await h.compact(keepRecentTokens);
+        assert.equal(result.compaction.details.nativeReplayCheckpoint.format, "native-replay-checkpoint/2");
+        assert.deepEqual(result.compaction.details.nativeReplayCheckpoint.replacementHistory, [
+          { role: "user", content: [{ type: "input_text", text: "kept wording" }] },
+          { role: "user", content: [{ type: "input_text", text: "new wording" }] }, COMPACTION_ITEM,
+        ]);
+        assert.equal(result.compaction.details.nativeReplayCheckpoint.producer.compactionCompatibilityClass, null);
+        assert.match(JSON.stringify(requests.at(-1)!.input), /synthetic summary/);
+        assert.equal(JSON.stringify(requests.at(-1)!.input).includes("discarded by ordinary compaction"), false);
+      }
+    } finally { network.mock.restore(); }
+  }
+});
+
+test("64K retention follows source-backed text and enabled-image boundary fixtures without fitting input", async () => {
+  const fixtures = JSON.parse(readFileSync(new URL("./fixtures/retained-user-history.json", import.meta.url), "utf8"));
+  for (const fixture of fixtures.cases) {
+    const newest = "n".repeat((64_000 - fixture.remainingTokens) * 4);
+    const boundary = userEntry("boundary", "unused", "old");
+    boundary.message = { role: "user", content: fixture.content, timestamp: 2 };
+    const h = compactionHarness("direct", [userEntry("old", "never backfill me"), boundary,
+      userEntry("new", newest, "boundary")], model("direct", { input: ["text", "image"], contextWindow: 1000 }));
+    let sent: Record<string, any> | undefined;
+    const network = mock.method(globalThis, "fetch", async (_url: unknown, init?: RequestInit) => {
+      sent = requestBody(init); return compactionResponse();
+    });
+    try {
+      const result = await h.compact();
+      const expected = [...(fixture.expected ? [{ role: "user", content: fixture.expected }] : []),
+        { role: "user", content: [{ type: "input_text", text: newest }] }, COMPACTION_ITEM];
+      assert.deepEqual(result.compaction.details.nativeReplayCheckpoint.replacementHistory, expected, fixture.name);
+      assert.equal(JSON.stringify(sent!.input).includes("never backfill me"), true);
+      assert.equal(sent!.input[1].content.length, fixture.content.length, "full boundary reaches compaction endpoint");
+      assert.equal(JSON.stringify(sent!.input).includes("tokens truncated"), false);
+      assert.equal(h.notifications.length, 0);
+      const c = result.compaction;
+      h.session.appendCompaction(c.summary, c.firstKeptEntryId, c.tokensBefore, c.details, true);
+      const replay = await realProviderPayload("direct", h.context.model,
+        convertToLlm(h.session.buildSessionContext().messages) as Message[], undefined,
+        payload => h.handlers.before_provider_request!({ payload }, h.context));
+      assert.equal(h.aborts(), 0, fixture.name);
+      assert.deepEqual(replay.input.filter((i: any) => i.role === "user"), expected.slice(0, -1), fixture.name);
+      assert.equal(indexOfMarker(replay.input), -1);
+    } finally { network.mock.restore(); }
+  }
+});
+
+test("multi-item checkpoints survive reload and branch navigation without resurrecting discarded history", async (t) => {
+  const directory = mkdtempSync(join(process.cwd(), ".test-retention-"));
+  t.after(() => rmSync(directory, { recursive: true, force: true }));
+  for (const kind of ["direct", "codex"] as const) {
+    const newest = "n".repeat(256_000);
+    const snapshot = { role: "system", content: "BASE", timestamp: 1 } as SystemMessage;
+    const h = compactionHarness(kind, [systemEntry("s0", null, snapshot),
+      userEntry("old", "must never resurrect", "s0"), userEntry("new", newest, "old")]);
+    const sent: Record<string, any>[] = [];
+    const item = (n: number) => ({ type: "compaction", encrypted_content: `opaque-${n}`, unknown: { n } });
+    const network = mock.method(globalThis, "fetch", async (_url: unknown, init?: RequestInit) => {
+      sent.push(requestBody(init)); return compactionResponse(item(sent.length));
+    });
+    try {
+      const first = (await h.compact()).compaction;
+      const firstId = h.session.appendCompaction(first.summary, null, first.tokensBefore, first.details, true);
+      h.session.appendMessage({ role: "user", content: "later", timestamp: 3 });
+      const file = join(directory, `${kind}.jsonl`);
+      writeFileSync(file, [h.session.getHeader(), ...h.session.getEntries()].map(e => JSON.stringify(e)).join("\n") + "\n");
+      const reloaded = SessionManager.open(file, directory);
+      h.context.sessionManager = reloaded;
+      const replay = async () => {
+        const original = await realProviderPayload(kind, h.context.model,
+          convertToLlm(reloaded.buildSessionContext().messages) as Message[]);
+        const result = h.handlers.before_provider_request!({ payload: original }, h.context);
+        assert.equal(h.aborts(), 0, h.notifications.join("\n"));
+        assert.equal(JSON.stringify(result.input).includes("must never resurrect"), false);
+        assert.equal(result.input.filter((i: any) => i.type === "compaction").length, 1);
+        return result;
+      };
+      const replayed = await replay();
+      assert.deepEqual(replayed.input.filter((i: any) => i.role === "user"), [
+        { role: "user", content: [{ type: "input_text", text: newest }] },
+        { role: "user", content: [{ type: "input_text", text: "later" }] },
+      ]);
+      const second = (await h.compact()).compaction;
+      assert.deepEqual(sent[1]!.input, [...first.details.nativeReplayCheckpoint.replacementHistory,
+        { role: "user", content: [{ type: "input_text", text: "later" }] }, { type: "compaction_trigger" }]);
+      const secondId = reloaded.appendCompaction(second.summary, second.firstKeptEntryId, second.tokensBefore, second.details, true);
+      reloaded.appendMessage({ role: "user", content: "end", timestamp: 4 });
+      assert.ok((await replay()).input.some((i: any) => i.encrypted_content === "opaque-2"));
+      const third = (await h.compact()).compaction;
+      assert.deepEqual(sent[2]!.input, [...second.details.nativeReplayCheckpoint.replacementHistory,
+        { role: "user", content: [{ type: "input_text", text: "end" }] }, { type: "compaction_trigger" }]);
+      assert.equal(third.details.nativeReplayCheckpoint.replacementHistory.filter((i: any) => i.type === "compaction").length, 1);
+      assert.equal(JSON.stringify(sent[2]!.input).includes("opaque-1"), false);
+      assert.equal(JSON.stringify(sent[2]!.input).includes("must never resurrect"), false);
+      assert.deepEqual(h.handlers.cache_warming_decision!({}, h.context), { action: "stop" });
+      reloaded.branch(firstId);
+      assert.ok((await replay()).input.some((i: any) => i.encrypted_content === "opaque-1"));
+      reloaded.branch(secondId);
+      assert.ok((await replay()).input.some((i: any) => i.encrypted_content === "opaque-2"));
+      // Pi's retain-none boundary is the compaction entry itself.
+      reloaded.appendCompaction("ordinary summary", null, 1);
+      assert.equal(h.handlers.cache_warming_decision!({}, h.context), undefined);
+      const ordinary = await realProviderPayload(kind, h.context.model, convertToLlm(reloaded.buildSessionContext().messages) as Message[]);
+      assert.equal(h.handlers.before_provider_request!({ payload: ordinary }, h.context), undefined);
+    } finally { network.mock.restore(); }
+  }
+});
+
+test("old checkpoint readers retain single-item integrity and new checkpoints validate retained kinds and ordering", async (t) => {
+  const network = t.mock.method(globalThis, "fetch", async () => { throw new Error("unexpected dispatch"); });
+  const selected = model("direct");
+  const user = { role: "user", content: [{ type: "input_text", text: "retained explicit wording" }] };
+  for (const format of ["native-replay-checkpoint/1", "native-replay-checkpoint/2"]) {
+    for (const history of [[], [COMPACTION_ITEM, COMPACTION_ITEM], [COMPACTION_ITEM, user],
+      [{ role: "assistant", content: [{ type: "output_text", text: "not eligible" }] }, COMPACTION_ITEM],
+      [{ ...user, content: [{ type: "input_image", image_url: "invalid", detail: "auto" }] }, COMPACTION_ITEM],
+      [{ type: "compaction_trigger" }, COMPACTION_ITEM],
+      [{ ...user, content: [] }, COMPACTION_ITEM], [user, COMPACTION_ITEM]]) {
+      if (format.endsWith("/2") && history.length === 2 && history[0] === user) continue;
+      const details = checkpointDetails(selected);
+      Object.assign(details.nativeReplayCheckpoint, { format, replacementHistory: history });
+      const branch = [userEntry("u0", "raw old wording"),
+        checkpointEntry("c1", "u0", "u0", details, { role: "system", content: "BASE", timestamp: 1 }),
+        userEntry("u1", "after", "c1")];
+      const h = compactionHarness("direct", branch);
+      assert.deepEqual(await h.compact(), { cancel: true });
+      assert.equal(h.handlers.before_provider_request!({ payload: { input: [] } }, h.context), undefined);
+      assert.equal(h.aborts(), 1);
+      assert.deepEqual(h.handlers.cache_warming_decision!({}, h.context), { action: "stop" });
+    }
+  }
+  assert.equal(network.mock.callCount(), 0);
+});
+
+test("overflow keeps the full compactable input and cancels without retaining partial history", async () => {
+  for (const kind of ["direct", "codex"] as const) {
+    const call = toolCallAssistantEntry("a1", "u1");
+    const result = toolResultEntry("t1", "a1");
+    const output = "unmodified tool output ".repeat(20_000);
+    result.message = { ...result.message as any, content: [{ type: "text", text: output }] };
+    const h = compactionHarness(kind, [userEntry("u1", "old user wording"), call, result,
+      userEntry("u2", "latest", "t1")], model(kind, { contextWindow: 100 }));
+    let sent: Record<string, any> | undefined;
+    const network = mock.method(globalThis, "fetch", async (_url: unknown, init?: RequestInit) => {
+      sent = requestBody(init);
+      return new Response(JSON.stringify({ error: { error: { code: "context_length_exceeded", message: "full input too large" } } }), { status: 503 });
+    });
+    try {
+      const before = JSON.stringify(h.session.getEntries());
+      assert.deepEqual(await h.compact(), { cancel: true });
+      assert.equal(network.mock.callCount(), 1);
+      assert.equal(sent!.input.find((i: any) => i.type === "function_call_output").output, output);
+      assert.equal(JSON.stringify(h.session.getEntries()), before);
+      assert.match(h.notifications.at(-1)!, /full input too large/);
+    } finally { network.mock.restore(); }
+  }
+});
+
+test("snapshot-bearing /1 records upgrade naturally without backfill and snapshot-less records replay only", async () => {
+  const selected = model("direct");
+  const original = checkpointDetails(selected, "2911");
+  const before = JSON.stringify(original);
+  for (const hasSnapshot of [false, true]) {
+    const branch = [userEntry("u0", "do not backfill this"),
+      checkpointEntry("c1", "u0", "u0", original,
+        hasSnapshot ? { role: "system", content: "BASE", timestamp: 1 } : undefined),
+      userEntry("u1", "later", "c1")];
+    const h = compactionHarness("direct", branch);
+    const network = mock.method(globalThis, "fetch", async () => compactionResponse());
+    try {
+      const payload = await realProviderPayload("direct", selected, payloadMessages(branch));
+      assert.ok(h.handlers.before_provider_request!({ payload }, h.context));
+      const result = await h.compact();
+      if (hasSnapshot) {
+        assert.equal(result.compaction.details.nativeReplayCheckpoint.format, "native-replay-checkpoint/2");
+        assert.deepEqual(result.compaction.details.nativeReplayCheckpoint.replacementHistory, [
+          { role: "user", content: [{ type: "input_text", text: "later" }] }, COMPACTION_ITEM,
+        ]);
+        assert.equal(network.mock.callCount(), 1);
+      } else {
+        assert.deepEqual(result, { cancel: true });
+        assert.equal(network.mock.callCount(), 0);
+      }
+      assert.equal(JSON.stringify(original), before, "old records are never rewritten");
+    } finally { network.mock.restore(); }
+  }
+});
+
+test("settled real Codex failures return to the hook retry owner and persist only complete results", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const selected = model("codex");
+  const branch = [userEntry("u1", "compact me")];
+  const handlers: Record<string, (event: any, context: any) => any> = {};
+  extension({ on(name: string, handler: any) { handlers[name] = handler; } } as any);
+  const requests: string[] = [];
+  let cancelled = 0;
+  const item = { type: "compaction", encrypted_content: "", future_field: { preserved: true } };
+  const network = mock.method(globalThis, "fetch", async (_url: unknown, init?: RequestInit) => {
+    requests.push(Buffer.from(init!.body as any).toString("base64"));
+    const wire = requests.length === 1 ? "" : requests.length === 2 ? "data: {bad JSON}\n\n" : [
+      { type: "response.output_item.done", output_index: 0, item },
+      { type: "response.done", response: { status: "completed", usage: { input_tokens: 10, output_tokens: 2 } } },
+    ].map(event => `data: ${JSON.stringify(event)}\n\n`).join("");
+    return new Response(new ReadableStream({
+      start(controller) { if (wire) controller.enqueue(new TextEncoder().encode(wire)); },
+      cancel() { cancelled++; },
+    }));
+  });
+  try {
+    const context = { model: selected, sessionManager: { getSessionId: () => "retry-test" },
+      hasUI: true, ui: { notify(message: string) { assert.fail(message); } }, getSystemPrompt: () => "BASE",
+      modelRegistry: { async complete(actual: any, transcript: any, options: any) {
+        assert.equal(options.maxRetries, 0);
+        return codexResponsesStream(actual, normalizeContext(transcript), { ...options, apiKey: fakeJwt() }).result();
+      } },
+    };
+    const pending = handlers.session_before_compact!({ branchEntries: branch,
+      preparation: { firstKeptEntryId: "u1", tokensBefore: 42 }, signal: new AbortController().signal }, context);
+    await new Promise(setImmediate);
+    assert.equal(requests.length, 1);
+    t.mock.timers.tick(300_000);
+    await new Promise(setImmediate);
+    t.mock.timers.tick(1_000);
+    await new Promise(setImmediate);
+    assert.equal(requests.length, 2);
+    t.mock.timers.tick(1_000);
+    await new Promise(setImmediate);
+    const result = await pending;
+    assert.equal(requests.length, 3);
+    assert.equal(new Set(requests).size, 1);
+    assert.deepEqual(result.compaction.details.nativeReplayCheckpoint.replacementHistory, [
+      { role: "user", content: [{ type: "input_text", text: "compact me" }] }, item,
+    ]);
+    assert.equal(result.compaction.usage.totalTokens, 12);
+    assert.equal(cancelled, 3);
+  } finally { network.mock.restore(); }
+});
+
 test("production hooks preserve custom Codex routing and credentials through real Pi compaction and replay", async () => {
   const selected = model("codex", { provider: "custom-codex", id: "gpt-future",
     baseUrl: "https://custom-codex.example/backend-api", headers: { "x-custom-route": "selected" } });
@@ -754,9 +1044,7 @@ test("production hooks preserve custom Codex routing and credentials through rea
     const headers = new Headers(init.headers);
     assert.equal(headers.get("authorization"), `Bearer ${credential}`);
     assert.equal(headers.get("x-custom-route"), "selected");
-    let raw = init.body;
-    if (headers.get("content-encoding") === "zstd") raw = zlib.zstdDecompressSync(raw);
-    sent = JSON.parse(typeof raw === "string" ? raw : Buffer.from(raw).toString());
+    sent = requestBody(init);
     return new Response([
       { type: "response.output_item.done", output_index: 0, item: COMPACTION_ITEM },
       { type: "response.completed", response: { status: "completed", output: [COMPACTION_ITEM] } },
@@ -821,6 +1109,64 @@ test("an ordinary provider rejection surfaces without stripping the replay item 
   assert.equal(result.stopReason, "error");
   assert.match(result.errorMessage ?? "", /rejected compaction item/);
   assert.equal(requests, 1);
+});
+
+test("installed replay hooks use current declarations for retained historical tool spans", async () => {
+  const grammar = {
+    name: "grammar", description: "grammar tool",
+    parameters: { type: "object", properties: { code: { type: "string" } }, required: ["code"] },
+    constrainedSampling: { type: "grammar", variants: { openai_regex: ".*" } },
+  };
+  const fn = { ...grammar, constrainedSampling: false };
+  for (const kind of ["direct", "codex"] as const) {
+    for (const mid of [false, true]) {
+      for (const inverse of [false, true]) {
+        for (const retainCall of [false, true]) {
+          const selected = model(kind, { compat: {
+            supportsOpenAIGrammarTools: true, supportsMidConvoSystemMessages: mid,
+          } });
+          const snapshot = { role: "system", content: "BASE", timestamp: 1,
+            toolsAdded: [inverse ? fn : grammar] } as SystemMessage;
+          const call = assistantEntry("a1", "s1", {
+            provider: selected.provider, api: selected.api, model: selected.id,
+            content: [{ type: "toolCall", id: "call_1|ctc_1", name: "grammar", arguments: { code: "hello" } }],
+          });
+          const result = toolResultEntry("t1", "a1");
+          result.message = { ...result.message as any, toolCallId: "call_1|ctc_1", toolName: "grammar" };
+          const branch = [systemEntry("s1", null, snapshot), call, result,
+            checkpointEntry("c1", "t1", retainCall ? "a1" : "t1", checkpointDetails(selected), snapshot),
+            systemEntry("s2", "c1", { role: "system", content: "UPDATED", timestamp: 2,
+              toolsAdded: [inverse ? grammar : fn] } as SystemMessage),
+            userEntry("u2", "later user context", "s2"),
+          ];
+          const session = SessionManager.inMemory(process.cwd(), undefined, branch as never);
+          const messages = convertToLlm(session.buildSessionContext().messages) as Message[];
+          const original = await realProviderPayload(kind, selected, messages);
+          const marker = indexOfMarker(original.input);
+          assert.ok(marker >= 0);
+          assert.ok(original.input.some((item: any) => item.type === (inverse ? "custom_tool_call_output" : "function_call_output")));
+          const handlers: Record<string, (event: any, context: any) => any> = {};
+          extension({ on(name: string, handler: any) { handlers[name] = handler; } } as any);
+          let aborts = 0;
+          const context = { model: selected, sessionManager: session, hasUI: true,
+            ui: { notify() {} }, abort() { aborts++; } };
+          const payload = await realProviderPayload(kind, selected, messages, undefined,
+            payload => handlers.before_provider_request!({ payload }, context));
+          assert.equal(aborts, 0, `${kind} mid=${mid} inverse=${inverse} retainCall=${retainCall}`);
+          assert.deepEqual(payload.input, [
+            ...original.input.slice(0, marker), COMPACTION_ITEM,
+            ...original.input.slice(marker + (retainCall ? 3 : 2)),
+          ]);
+          assert.match(JSON.stringify(payload.input), /later user context/);
+          for (const input of [original.input.filter((_: unknown, i: number) => i !== marker),
+            [...original.input, ...original.input]]) {
+            assert.equal(handlers.before_provider_request!({ payload: { ...original, input } }, context), undefined);
+          }
+          assert.equal(aborts, 2, "missing and ambiguous spans remain fail-closed");
+        }
+      }
+    }
+  }
 });
 
 // Keep this provider-boundary regression: function-only fixtures cannot detect

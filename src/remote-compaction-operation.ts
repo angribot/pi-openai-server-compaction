@@ -80,18 +80,27 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-function errorMessage(value: unknown, fallback: string): string {
-  if (isRecord(value) && typeof value.message === "string" && value.message) {
-    return value.message;
+function normalizeFailure(value: unknown): { message?: string; semantics: string[] } {
+  const semantics: string[] = [];
+  const visited = new Set<unknown>();
+  let message: string | undefined;
+  while (isRecord(value) && !visited.has(value)) {
+    visited.add(value);
+    if (typeof value.message === "string" && value.message) message = value.message;
+    for (const candidate of [value.code, value.type, value.reason]) {
+      if (typeof candidate === "string") semantics.push(candidate.toLowerCase());
+    }
+    value = isRecord(value.error) ? value.error : value.response;
   }
-  return fallback;
+  return { message, semantics };
+}
+
+function errorMessage(value: unknown, fallback: string): string {
+  return normalizeFailure(value).message ?? fallback;
 }
 
 function errorSemantics(value: unknown): string[] {
-  if (!isRecord(value)) return [];
-  return [value.code, value.type, value.reason]
-    .filter((candidate): candidate is string => typeof candidate === "string")
-    .map((candidate) => candidate.toLowerCase());
+  return normalizeFailure(value).semantics;
 }
 
 function outcomeError(message: string): Error {
@@ -155,8 +164,7 @@ function parseRetryAfter(value: string | null, now = Date.now()): number | undef
 function parseErrorPayload(text: string): unknown {
   if (!text.trim()) return undefined;
   try {
-    const parsed = JSON.parse(text) as unknown;
-    return isRecord(parsed) && isRecord(parsed.error) ? parsed.error : parsed;
+    return JSON.parse(text) as unknown;
   } catch {
     return { message: text };
   }
@@ -225,6 +233,7 @@ async function readBodyText(response: Response, signal: AbortSignal): Promise<st
     }
     return text + decoder.decode();
   } finally {
+    void reader.cancel().catch(() => {});
     reader.releaseLock();
   }
 }
@@ -315,7 +324,6 @@ async function readUntilTerminal(
       append(decoder.decode(chunk.value, { stream: true }));
       const terminalEvent = drain();
       if (terminalEvent !== undefined) {
-        await reader.cancel().catch(() => {});
         return { compaction, terminal: terminalEvent };
       }
     }
@@ -323,6 +331,9 @@ async function readUntilTerminal(
     const terminalEvent = drain();
     return { compaction, terminal: terminalEvent };
   } finally {
+    // A cloned response shares cancellation with the provider reader. Waiting
+    // here would prevent the attempt owner from cancelling that other reader.
+    void reader.cancel().catch(() => {});
     reader.releaseLock();
   }
 }
@@ -430,10 +441,6 @@ export async function validateRemoteCompactionResponse(
       : retryable("response was incomplete");
   }
 
-  let failure: unknown = event;
-  if (event.type === "response.failed") {
-    failure = isRecord(event.response) ? event.response.error : undefined;
-  }
-  const message = errorMessage(failure, "endpoint returned a failed response");
-  return classifyFailure(failure) === "terminal" ? terminal(message) : retryable(message);
+  const message = errorMessage(event, "endpoint returned a failed response");
+  return classifyFailure(event) === "terminal" ? terminal(message) : retryable(message);
 }

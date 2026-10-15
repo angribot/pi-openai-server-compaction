@@ -1,12 +1,22 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { mkdir, mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { discoverAndLoadExtensions } from "@earendil-works/pi-coding-agent";
 
 const repoRoot = fileURLToPath(new URL("..", import.meta.url));
+
+test("Pi packages use the 1.2 development baseline and unbundled host peers", async () => {
+  const manifest = JSON.parse(await readFile(join(repoRoot, "package.json"), "utf8"));
+  for (const name of ["pi-agent-core", "pi-ai", "pi-coding-agent"]) {
+    const pkg = `@earendil-works/${name}`;
+    assert.equal(manifest.devDependencies[pkg], "^1.2.0");
+    assert.equal(manifest.peerDependencies[pkg], "*");
+    assert.equal(manifest.dependencies?.[pkg], undefined);
+  }
+});
 
 test("the production extension loader installs only the Remote compaction protocol hooks", async () => {
   const isolatedRoot = await mkdtemp(join(tmpdir(), "pi-remote-compaction-loader-"));

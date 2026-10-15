@@ -4,6 +4,12 @@ This changelog intentionally starts at **0.1.0**.
 
 ## Unreleased
 
+- retain bounded original user wording and supported images before the compaction item using the fixed upstream 64K approximate-token budget, independently of keepRecentTokens and without fitting or truncating the request sent for compaction
+- write versioned /2 Native replay checkpoints with multi-item replacement history that survives reload and branch navigation; retain strict /1 read compatibility without migration or historical-text backfill, but /1-only extension releases cannot replay new /2 checkpoints
+- settle failed or cancelled Codex compaction attempts without server EOF by cancelling attempt-owned readers together, preserving the shared retry budget and preventing partial checkpoint persistence
+- preserve Native replay after persisted function/grammar tool redefinitions by reconstructing historical spans under the current declaration environment, while still rejecting missing or ambiguous spans
+- normalize nested Remote compaction error envelopes so invalid-request, overflow, quota, and policy failures retain their diagnostics and stop without retries or checkpoint persistence
+- use Pi ^1.2.0 development dependencies and validate production extension loading at that baseline, keeping host packages as unbundled * peers and the existing Node >=22 package requirement
 - preserve grammar-tool call and result wire formats during Remote compaction and Native replay, fixing missing-span aborts on the first continuation after compaction for models with grammar tools enabled; repeated compaction inherits checkpoint-owned tool declarations while honoring later redefinitions
 
 ## 0.14.0 - 2026-10-02

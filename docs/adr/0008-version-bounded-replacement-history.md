@@ -1,0 +1,5 @@
+# Version bounded replacement history
+
+Write `native-replay-checkpoint/2` with bounded original user history followed by exactly one compaction item, superseding ADR-0002's single-item policy and ADR-0007's unchanged-writer-format assumption. Keeping recent wording explicit costs replay capacity but reduces dependence on opaque context; use the audited Codex fixed 64K approximate-token policy, including enabled image budgeting, without repurposing Pi's retained-history setting or claiming guaranteed endpoint fit. The [technical contract](../reference.md#bounded-explicit-user-history) owns the budgeting details.
+
+Read `/1` with its original single-item integrity checks, without migration or raw-history backfill; a successful later compaction may naturally write `/2`. This deliberately makes new records unreadable by old `/1`-only extension releases. Preserve native continuity, optimistic replay, atomic persistence after validated completion, host-snapshot requirements, provider-owned transport, and terminal overflow without lossy input fitting.

@@ -2,13 +2,13 @@
 
 A Pi extension that lets a Responses endpoint compact older conversation context and reuse the result in later requests, instead of creating a text summary.
 
-The endpoint returns an opaque compaction item. This extension saves it with your session and sends it back when you continue with a compatible model (**Native replay**).
+The endpoint returns an opaque compaction item. This extension saves it with bounded recent user history and sends that replacement history back when you continue with a compatible model (**Native replay**).
 
 > **Experimental.** Try a project-local installation and a new session first. Compacted context is not portable to every model.
 
 ## Quick start
 
-You need Node **22 or newer**, Pi (**0.99.1** is the implementation and validation baseline), and working Pi-managed credentials for an eligible model. The endpoint must support the compaction protocol described below.
+You need Node **22 or newer**, Pi (**1.2.0** is the implementation and validation baseline), and working Pi-managed credentials for an eligible model. The endpoint must support the compaction protocol described below.
 
 Install in your project:
 
@@ -55,6 +55,10 @@ Selecting an incompatible model produces a warning and leaves that model's ordin
 
 An eligible endpoint may reject another model, provider, account, or endpoint's opaque item, including old `2911` history. Ordinary provider errors surface without stripping the item and retrying.
 
+### Recent user wording remains explicit
+
+Successful compaction retains recent original user messages and supported images beside the opaque item, using a fixed 64K approximate-token budget independent of Pi's `keepRecentTokens`. Newer messages take priority; an oversized boundary may be truncated. The full supported compactable context still reaches the compaction endpoint first. This budget does not guarantee fit on small-window targets; see [retention details](docs/reference.md#bounded-explicit-user-history).
+
 ### Failures do not produce a backup text summary
 
 Transient compaction failures may retry, up to three attempts total. Unsupported operations, context overflow, and other terminal failures cancel compaction. The extension does not truncate context to make it fit. A model outside the GPT-prefix/API policy, or `openai` using OAuth, does not attempt Remote compaction, so Pi's normal summarization runs; that is not a fallback from a failed Remote compaction.
@@ -63,11 +67,13 @@ If a checkpoint is broken or cannot be safely replayed, the extension stops the 
 
 ### Legacy checkpoints are not supported
 
-Only `nativeReplayCheckpoint` records with format `native-replay-checkpoint/1` are supported. Records in that format without a host `systemMessage` snapshot remain readable for ordinary Native replay, but the extension cannot reconstruct their instructions, so it cancels a further Remote compaction before any attempt and asks for a new session. Legacy `remoteCompaction` records, including those written by v0.8.0 and earlier, have no migration path. Start a new session or return to a branch point before the old checkpoint.
+New checkpoints use `native-replay-checkpoint/2`; supported `/1` records remain readable without migration or historical-text backfill. A later successful compaction can naturally supersede an old checkpoint. Snapshot-less checkpoints allow ordinary replay but cannot compact again; see [persistence and snapshot compatibility](docs/reference.md#persistence).
+
+Older extension releases that only understand `/1` cannot replay new `/2` checkpoints. Before downgrading, start a new session or return to a branch point before the new checkpoint. Legacy `remoteCompaction` records, including those written by v0.8.0 and earlier, remain unsupported with no migration path.
 
 ### Active checkpoints pause prompt-cache warming
 
-Pi 0.99.1 can refresh a prompt cache during long runs. A warming refresh re-runs the provider-request hook with its own abort controller, so the extension cannot rely on its fail-closed replay path to stop it. While the active branch's latest compaction is a Remote compaction checkpoint, the extension stops those refreshes before dispatch through Pi's `cache_warming_decision` hook, including broken, invalidated, incompatible, and legacy checkpoints. This keeps a protected refresh from bypassing fail-closed replay or disturbing the concurrent run.
+Pi 1.2.0 can refresh a prompt cache during long runs. A warming refresh re-runs the provider-request hook with its own abort controller, so the extension cannot rely on its fail-closed replay path to stop it. While the active branch's latest compaction is a Remote compaction checkpoint, the extension stops those refreshes before dispatch through Pi's `cache_warming_decision` hook, including broken, invalidated, incompatible, and legacy checkpoints. This keeps a protected refresh from bypassing fail-closed replay or disturbing the concurrent run.
 
 When the branch has no such checkpoint, Pi's decision is left unchanged: ordinary prompt caching, warming, and unrelated branches keep working. The trade-off is that proactive prompt-cache refreshes stay paused while a Remote compaction checkpoint is the active branch's latest compaction. Pi may schedule another refresh, but the guard re-evaluates the branch and stops each protected refresh until the checkpoint is superseded. The hook stops a refresh before dispatch only; it does not cancel a refresh already in flight or provide general request-specific cancellation.
 
@@ -101,7 +107,7 @@ Run type checking and offline tests (no credentials or network needed):
 npm test
 ```
 
-`npm test` covers the extension loader, the cache-warming guard through Pi's real warmer decision/dispatch path, and the transport/projection contracts, but not credentialed end-to-end compaction or replay continuity. Offline lifecycle and real-provider/mock-fetch tests cover optimistic eligibility, continuity, and custom Codex routing; they do not prove live backend interoperability or comprehensively exercise retry orchestration. See [testing coverage](docs/reference.md#testing) and the [test ownership rule](docs/reference.md#test-ownership).
+`npm test` covers the extension loader, the cache-warming guard through Pi's real warmer decision/dispatch path, and the transport/projection contracts, but not credentialed end-to-end compaction or replay continuity. Offline lifecycle and real-provider/mock-fetch tests cover optimistic eligibility, continuity, and custom Codex routing; they also cover bounded retries and retry-delay cancellation, but do not prove live backend interoperability. See [testing coverage](docs/reference.md#testing) and the [test ownership rule](docs/reference.md#test-ownership).
 
 - [Technical reference](docs/reference.md): protocol, checkpoint format, replay, retries, transport limitations, and repository layout.
 - [Domain glossary](GLOSSARY.md) and [architecture decisions](docs/adr/).
