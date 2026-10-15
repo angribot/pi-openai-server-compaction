@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
-import { test } from "node:test";
+import { mock, test } from "node:test";
+import { normalizeContext, type Model } from "@earendil-works/pi-ai";
+import { stream as codexStream } from "@earendil-works/pi-ai/api/openai-codex-responses";
 import { mkdir, mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -74,6 +76,40 @@ test("the production extension loader installs only the Remote compaction protoc
       },
     } as never);
     assert.ok(reachedAuth, notifications.join("\n"));
+
+    const item = { type: "compaction", encrypted_content: "", future_field: { preserved: true } };
+    const encode = (value: unknown) => Buffer.from(JSON.stringify(value)).toString("base64");
+    const apiKey = `${encode({})}.${encode({ "https://api.openai.com/auth": { chatgpt_account_id: "test" } })}.sig`;
+    const fetchMock = mock.method(globalThis, "fetch", async () => new Response([
+      { type: "response.output_item.done", item },
+      { type: "response.done", response: { status: "completed" } },
+    ].map(event => `data: ${JSON.stringify(event)}\n\n`).join("")));
+    try {
+      const result = await handler({
+        type: "session_before_compact",
+        preparation: { firstKeptEntryId: "u1", tokensBefore: 42 },
+        branchEntries: branch, reason: "manual", willRetry: false,
+        signal: new AbortController().signal,
+      } as never, {
+        model: {
+          provider: "custom-codex", api: "openai-codex-responses", id: "gpt-loader",
+          baseUrl: "https://codex.example/backend-api", reasoning: true,
+          input: ["text"], contextWindow: 100_000, maxTokens: 4096,
+          cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+        },
+        hasUI: true, ui: { notify: (message: string) => notifications.push(message) },
+        getSystemPrompt: () => "Be concise.",
+        sessionManager: { getBranch: () => branch, getSessionId: () => "loader-probe" },
+        modelRegistry: {
+          complete: async (model: Model<"openai-codex-responses">, transcript: any, options: any) =>
+            codexStream(model, normalizeContext(transcript), { ...options, apiKey }).result(),
+        },
+      } as never) as any;
+      assert.deepEqual(result.compaction.details.nativeReplayCheckpoint.replacementHistory.at(-1), item);
+      assert.equal(fetchMock.mock.callCount(), 1);
+    } finally {
+      fetchMock.mock.restore();
+    }
   } finally {
     await rm(isolatedRoot, { recursive: true, force: true });
   }

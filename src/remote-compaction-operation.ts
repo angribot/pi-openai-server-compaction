@@ -117,11 +117,11 @@ function throwIfAborted(signal: AbortSignal): void {
   if (signal.aborted) throw abortError(signal);
 }
 
-function terminal(message: string): RemoteCompactionAttemptOutcome {
+function terminal(message: string): Extract<RemoteCompactionAttemptOutcome, { kind: "terminal" }> {
   return { kind: "terminal", error: outcomeError(message) };
 }
 
-function retryable(message: string, retryAfterMs?: number): RemoteCompactionAttemptOutcome {
+function retryable(message: string, retryAfterMs?: number): Extract<RemoteCompactionAttemptOutcome, { kind: "retryable" }> {
   return {
     kind: "retryable",
     error: outcomeError(message),
@@ -273,18 +273,18 @@ function collectCompactionItem(collection: CompactionCollection, event: unknown)
     event.item.type === "compaction"
   ) {
     collection.count += 1;
-    collection.candidate ??= event.item;
+    collection.candidate ??= structuredClone(event.item);
   }
 }
 
 async function readUntilTerminal(
   response: Response,
   signal: AbortSignal,
-): Promise<{ compaction: CompactionCollection; terminal: unknown | undefined }> {
+  onEvent?: (event: unknown) => void,
+): Promise<unknown> {
   if (!response.body) throw outcomeError("response body was empty");
   const reader = response.body.getReader();
   const decoder = new TextDecoder();
-  const compaction: CompactionCollection = { count: 0, candidate: undefined };
   let buffer = "";
   let skipLeadingLineFeed = false;
 
@@ -309,7 +309,7 @@ async function readUntilTerminal(
       const event = parseSseBlock(buffer.slice(0, boundary));
       buffer = buffer.slice(boundary + 2);
       if (event !== undefined) {
-        collectCompactionItem(compaction, event);
+        onEvent?.(event);
         if (isTerminalEvent(event)) return event;
       }
       boundary = buffer.indexOf("\n\n");
@@ -324,12 +324,11 @@ async function readUntilTerminal(
       append(decoder.decode(chunk.value, { stream: true }));
       const terminalEvent = drain();
       if (terminalEvent !== undefined) {
-        return { compaction, terminal: terminalEvent };
+        return terminalEvent;
       }
     }
     append(decoder.decode(), true);
-    const terminalEvent = drain();
-    return { compaction, terminal: terminalEvent };
+    return drain();
   } finally {
     // A cloned response shares cancellation with the provider reader. Waiting
     // here would prevent the attempt owner from cancelling that other reader.
@@ -382,11 +381,32 @@ function completedResult(
   };
 }
 
-export async function validateRemoteCompactionResponse(
-  request: RemoteCompactionRequest,
+// The parsed-event observer owns successful output; the raw supervisor below
+// owns framing, liveness, HTTP diagnostics, and explicit wire completion.
+export function observeRemoteCompactionResponse(request: RemoteCompactionRequest, signal: AbortSignal) {
+  const compaction: CompactionCollection = { count: 0, candidate: undefined };
+  let outcome: RemoteCompactionAttemptOutcome | undefined;
+  return {
+    observe(event: unknown): void {
+      if (outcome) return;
+      collectCompactionItem(compaction, event);
+      if (isRecord(event) && (event.type === "response.done" || event.type === "response.completed")) {
+        outcome = completedResult(request, compaction, event, signal);
+      }
+    },
+    result(): RemoteCompactionAttemptOutcome {
+      return outcome ?? terminal("Pi's Codex provider did not observe an explicit response completion");
+    },
+  };
+}
+
+type SupervisedOutcome = Exclude<RemoteCompactionAttemptOutcome, { kind: "accepted" }> | { kind: "completed" };
+
+export async function superviseRemoteCompactionResponse(
   response: Response,
   signal: AbortSignal,
-): Promise<RemoteCompactionAttemptOutcome> {
+  onEvent?: (event: unknown) => void,
+): Promise<SupervisedOutcome> {
   if (signal.aborted) return { kind: "terminal", error: abortError(signal) };
 
   if (!response.ok) {
@@ -410,9 +430,9 @@ export async function validateRemoteCompactionResponse(
     );
   }
 
-  let streamed: { compaction: CompactionCollection; terminal: unknown | undefined };
+  let event: unknown;
   try {
-    streamed = await readUntilTerminal(response, signal);
+    event = await readUntilTerminal(response, signal, onEvent);
     throwIfAborted(signal);
   } catch (error) {
     if (isAbort(error, signal)) {
@@ -421,14 +441,11 @@ export async function validateRemoteCompactionResponse(
     return retryable(errorMessage(error, "stream read or parse failed"));
   }
 
-  if (!isRecord(streamed.terminal)) {
+  if (!isRecord(event)) {
     return retryable("stream ended before an explicit response completion");
   }
-  const event = streamed.terminal;
   if (event.type === "response.done" || event.type === "response.completed") {
-    const outcome = completedResult(request, streamed.compaction, event, signal);
-    if (signal.aborted) return { kind: "terminal", error: abortError(signal) };
-    return outcome;
+    return { kind: "completed" };
   }
   if (event.type === "response.incomplete") {
     const responsePayload = isRecord(event.response) ? event.response : undefined;
@@ -443,4 +460,14 @@ export async function validateRemoteCompactionResponse(
 
   const message = errorMessage(event, "endpoint returned a failed response");
   return classifyFailure(event) === "terminal" ? terminal(message) : retryable(message);
+}
+
+export async function validateRemoteCompactionResponse(
+  request: RemoteCompactionRequest,
+  response: Response,
+  signal: AbortSignal,
+): Promise<RemoteCompactionAttemptOutcome> {
+  const observer = observeRemoteCompactionResponse(request, signal);
+  const outcome = await superviseRemoteCompactionResponse(response, signal, observer.observe);
+  return outcome.kind === "completed" ? observer.result() : outcome;
 }

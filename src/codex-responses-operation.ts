@@ -2,7 +2,8 @@ import type { AssistantMessage, Context } from "@earendil-works/pi-ai";
 import {
   remoteCompactionFailureOutcome,
   remoteCompactionPayload,
-  validateRemoteCompactionResponse,
+  observeRemoteCompactionResponse,
+  superviseRemoteCompactionResponse,
   type RemoteCompactionAttempt,
 } from "./remote-compaction-operation.ts";
 
@@ -59,7 +60,8 @@ export const attemptCodexResponsesOperation: RemoteCompactionAttempt = async (re
   });
 
   try {
-    let rawOutcomePromise: ReturnType<typeof validateRemoteCompactionResponse> | undefined;
+    const observer = observeRemoteCompactionResponse(request, signal);
+    let rawOutcomePromise: ReturnType<typeof superviseRemoteCompactionResponse> | undefined;
     let fetchFailure: unknown;
     const capturingFetch: typeof globalThis.fetch = async (input, init) => {
       try {
@@ -74,12 +76,11 @@ export const attemptCodexResponsesOperation: RemoteCompactionAttempt = async (re
           fetched.body?.pipeThrough(new TransformStream(), { signal: attempt.signal }) ?? null,
           { status: fetched.status, statusText: fetched.statusText, headers: fetched.headers },
         );
-        rawOutcomePromise = validateRemoteCompactionResponse(
-          request,
+        rawOutcomePromise = superviseRemoteCompactionResponse(
           response.clone(),
           attempt.signal,
         ).then((outcome) => {
-          if (outcome.kind !== "accepted") attempt.abort(outcome.error);
+          if (outcome.kind !== "completed") attempt.abort(outcome.error);
           return outcome;
         });
         void rawOutcomePromise.catch(() => {});
@@ -101,6 +102,7 @@ export const attemptCodexResponsesOperation: RemoteCompactionAttempt = async (re
           maxRetries: 0,
           sessionId: context.sessionId,
           onPayload: (payload: unknown) => remoteCompactionPayload(request, payload),
+          onProviderStreamEvent: observer.observe,
           fetch: capturingFetch,
         }),
         aborted,
@@ -151,7 +153,7 @@ export const attemptCodexResponsesOperation: RemoteCompactionAttempt = async (re
         signal,
       );
     }
-    if (rawOutcome.kind !== "accepted") return rawOutcome;
+    if (rawOutcome.kind !== "completed") return rawOutcome;
     if (completionFailure !== undefined) {
       return remoteCompactionFailureOutcome(
         "terminal",
@@ -168,7 +170,7 @@ export const attemptCodexResponsesOperation: RemoteCompactionAttempt = async (re
         signal,
       );
     }
-    return rawOutcome;
+    return observer.result();
   } finally {
     signal.removeEventListener("abort", onAbort);
     attempt.abort();

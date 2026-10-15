@@ -128,7 +128,10 @@ function openStreamResponse(chunks: string[]): Response {
   );
 }
 
-async function consumeProviderStreamThroughTerminal(response: Response): Promise<void> {
+async function consumeProviderStreamThroughTerminal(
+  response: Response,
+  observe: (event: unknown) => void,
+): Promise<void> {
   assert.ok(response.body);
   const reader = response.body.getReader();
   const decoder = new TextDecoder();
@@ -138,6 +141,9 @@ async function consumeProviderStreamThroughTerminal(response: Response): Promise
       const chunk = await reader.read();
       assert.equal(chunk.done, false, "provider stream ended before response.done");
       wire += decoder.decode(chunk.value, { stream: true });
+    }
+    for (const line of wire.split(/\r?\n/)) {
+      if (line.startsWith("data: ")) observe(JSON.parse(line.slice(6)));
     }
     await reader.cancel();
   } finally {
@@ -241,7 +247,9 @@ test("runs built-in Codex without tool declarations while preserving Pi controls
               },
             );
             assert.ok(response);
-            await consumeProviderStreamThroughTerminal(response);
+            await consumeProviderStreamThroughTerminal(response, event => {
+              void options?.onProviderStreamEvent?.(event, selected);
+            });
             return providerCompletion();
           }, signal),
         ),
@@ -305,6 +313,27 @@ test("requires Codex provider completion and raw capture to agree", async () => 
         }),
       );
       assertOutcome(outcome, "terminal");
+    },
+  );
+
+  await withFetch(
+    async () => streamResponse([
+      sse({ type: "response.output_item.done", item: { type: "compaction", encrypted_content: "raw-only" } }),
+      sse({ type: "response.completed", response: {} }),
+    ]),
+    async () => {
+      const outcome = await attemptCodexResponsesOperation(
+        request(selectedModel),
+        codexContext(async (selected, _transcript, options) => {
+          const response = await options?.fetch?.("https://provider.example/codex/responses");
+          await response?.text();
+          // A provider that drops unknown items must not install raw-only state.
+          await options?.onProviderStreamEvent?.({ type: "response.completed", response: {} }, selected);
+          return providerCompletion();
+        }),
+      );
+      assertOutcome(outcome, "terminal");
+      if (outcome.kind !== "accepted") assert.match(outcome.error.message, /0 compaction items/);
     },
   );
 
@@ -853,6 +882,44 @@ function realCodexContext(signal = new AbortController().signal): RemoteCompacti
   return codexContext(async (selected, transcript, options) =>
     codexStream(selected as Model<"openai-codex-responses">, normalizeContext(transcript), { ...options, apiKey } as any).result(), signal);
 }
+
+test("real Codex observation preserves opaque items and usage at either explicit completion without EOF", async () => {
+  for (const type of ["response.completed", "response.done"]) {
+    const item = { type: "compaction", encrypted_content: "", future_field: { preserved: [1, 2] } };
+    await withFetch(async () => openStreamResponse([
+      { type: "response.output_item.done", item: { type: "message", id: "msg_1", role: "assistant", content: [] } },
+      { type: "response.output_item.done", item },
+      { type, response: { status: "completed", output: [], usage: {
+        input_tokens: 10, output_tokens: 4, total_tokens: 14, input_tokens_details: { cached_tokens: 2 },
+      } } },
+    ].map(event => `data: ${JSON.stringify(event)}\n\n`)), async () => {
+      const outcome = await settleWithin(attemptCodexResponsesOperation(request(codexModel()), realCodexContext()), 1_000);
+      assertOutcome(outcome, "accepted");
+      if (outcome.kind !== "accepted") return;
+      assert.deepEqual(outcome.item, item);
+      assert.equal(outcome.usage?.input, 8);
+      assert.equal(outcome.usage?.cacheRead, 2);
+      assert.equal(outcome.usage?.output, 4);
+      assert.equal(outcome.usage?.totalTokens, 14);
+    });
+  }
+});
+
+test("real Codex observation rejects missing, multiple, or invalid items and premature EOF", async () => {
+  for (const [items, complete, expected] of [
+    [[], true, "terminal"],
+    [[{ type: "compaction", encrypted_content: "one" }, { type: "compaction", encrypted_content: "two" }], true, "terminal"],
+    [[{ type: "compaction", encrypted_content: 1 }], true, "terminal"],
+    [[{ type: "compaction", encrypted_content: "partial" }], false, "retryable"],
+  ] as const) {
+    await withFetch(async () => streamResponse([
+      ...items.map(item => ({ type: "response.output_item.done", item })),
+      ...(complete ? [{ type: "response.completed", response: { status: "completed" } }] : []),
+    ].map(event => `data: ${JSON.stringify(event)}\n\n`)), async () => {
+      assertOutcome(await attemptCodexResponsesOperation(request(codexModel()), realCodexContext()), expected);
+    });
+  }
+});
 
 test("real Codex HTTP failures retain raw classification, messages, and Retry-After", async () => {
   for (const [code, kind] of [["invalid_request_error", "terminal"], ["server_error", "retryable"]] as const) {
