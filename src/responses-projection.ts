@@ -16,6 +16,8 @@ import {
   type ThinkingContent,
   type ToolCall,
   type Tool,
+  type TranscriptToolSupport,
+  type TranscriptTools,
   type SystemMessage,
 } from "@earendil-works/pi-ai";
 
@@ -37,14 +39,10 @@ export type CompactableContextOptions = {
    */
   includeSystemPrompt: boolean;
   /**
-   * True when this projection continues Responses items that precede it, such as
-   * replacement history. A system message at the start is then a mid-conversation
-   * update rather than the leading prompt.
-   */
-  hasPrecedingItems?: boolean;
-  /**
-   * Checkpoint-owned declarations inherited by a post-checkpoint suffix. Used
-   * to project inherited active tools and classify historical call/result items.
+   * Checkpoint-owned leading system message inherited by a post-checkpoint suffix.
+   * It supplies inherited declarations and keeps later suffix updates anchored at
+   * the same transcript position as an ordinary request. Its text belongs to the
+   * top-level instructions, so it is never emitted as an input item.
    */
   checkpointSystemMessage?: SystemMessage;
   /** Current ordinary transcript's declaration environment, separate from the span being projected. */
@@ -54,6 +52,34 @@ export type CompactableContextOptions = {
 const NON_VISION_USER_IMAGE_PLACEHOLDER = "(image omitted: model does not support images)";
 const NON_VISION_TOOL_IMAGE_PLACEHOLDER = "(tool image omitted: model does not support images)";
 const OPENAI_TOOL_CALL_PROVIDERS = new Set(["openai", "openai-codex", "opencode"]);
+
+function supportsMidConversationSystemMessages(model: Model<any>): boolean {
+  return (
+    (model.compat as { supportsMidConvoSystemMessages?: boolean } | undefined)
+      ?.supportsMidConvoSystemMessages ?? false
+  );
+}
+
+// Mirrors Pi 1.4.0 `getResponsesToolSupport` (`openai-responses-shared`), which
+// the extension loader cannot resolve through a subpath import.
+function responsesToolSupport(model: Model<any>): TranscriptToolSupport {
+  const compat = model.compat as OpenAIResponsesCompat | undefined;
+  if (supportsMidConversationSystemMessages(model) && (compat?.supportsAdditionalTools ?? false)) {
+    return "changes";
+  }
+  return (compat?.supportsToolSearch ?? false) ? "additions" : "none";
+}
+
+// Mirrors Pi 1.4.0's incremental additional_tools guidance and removal notices.
+function renderIncrementalToolsNotice(unavailable: ReadonlySet<string>): string {
+  const notice =
+    "This is an incremental tools update. Previously declared tools remain available unless explicitly marked unavailable. A tool declared again here is available again, and its latest definition replaces the earlier one.";
+  return unavailable.size > 0 ? `${notice}\nStill unavailable: ${[...unavailable].join(", ")}.` : notice;
+}
+
+function renderToolRemovalNotice(names: readonly string[]): string {
+  return `The following tools are no longer available. Do not call them:\n${names.map((name) => `- ${name}`).join("\n")}`;
+}
 
 // Pi's extension loader cannot resolve api/constrained-sampling. Mirror its
 // grammar selection after capability-dependent transcript resolution, including
@@ -340,7 +366,9 @@ function toolResultOutput(
     .map((block) => block.text)
     .join("\n");
   const images = content.filter((block): block is ImageContent => block.type === "image");
-  const hasText = textResult.length > 0;
+  // Pi 1.4.0 treats whitespace-only output as empty before choosing the
+  // placeholder, including image-bearing results where text is omitted.
+  const hasText = textResult.trim().length > 0;
   if (images.length === 0 || !model.input.includes("image")) {
     return sanitizeSurrogates(
       hasText ? textResult : images.length > 0 ? "(see attached image)" : "(no tool output)",
@@ -358,48 +386,77 @@ function toolResultOutput(
   return output;
 }
 
-// Mirrors Pi 1.2.0 `convertResponsesMessages` for Remote compaction:
+// Mirrors Pi 1.4.0 `convertResponsesMessages` for Remote compaction:
 // message/function/custom-tool items, Pi fallback IDs and phases, foreign
-// item-id normalization, tool outputs, and API-specific leading-system
-// placement, including model-supported in-place tool additions.
+// item-id normalization, tool outputs, anchored declaration changes, and
+// API-specific leading-system placement.
 function projectNormalizedMessages(
   messages: readonly Message[],
   model: Model<any>,
   options: CompactableContextOptions,
   grammarToolInputProperties: ReadonlyMap<string, string>,
-  anchorsAdditions: boolean,
+  transcriptTools: TranscriptTools,
 ): ResponsesItem[] {
   const projected: ResponsesItem[] = [];
   const supportsDeveloperRole =
     (model.compat as { supportsDeveloperRole?: boolean } | undefined)?.supportsDeveloperRole !==
     false;
   const instructionRole = model.reasoning && supportsDeveloperRole ? "developer" : "system";
+  const toolSupport = responsesToolSupport(model);
   let messageIndex = 0;
   let sourceIndex = 0;
+  let systemIndex = 0;
+  let declaredAdditionalTools = false;
+  // Tools announced as removed and not declared again since.
+  const unavailableTools = new Set<string>();
+
+  const appendSystemToolChanges = (message: SystemMessage): void => {
+    const tools = message.toolsAdded ?? [];
+    for (const tool of tools) unavailableTools.delete(tool.name);
+    if (tools.length === 0) return;
+    if (toolSupport === "changes") {
+      if (declaredAdditionalTools) {
+        projected.push({ role: instructionRole, content: renderIncrementalToolsNotice(unavailableTools) });
+      }
+      declaredAdditionalTools = true;
+      projected.push({ type: "additional_tools", role: "developer",
+        tools: projectToolDeclarations(tools, model) });
+      return;
+    }
+    if (toolSupport !== "additions") return;
+    const names = tools.map((tool) => tool.name);
+    const callId = `pi_tool_load_${shortHash(`system:${messageIndex}:${names.join(",")}`)}`;
+    projected.push(
+      { type: "tool_search_call", call_id: callId, execution: "client", status: "completed",
+        arguments: { query: names.join(" "), limit: names.length } },
+      { type: "tool_search_output", call_id: callId, execution: "client", status: "completed",
+        tools: projectToolDeclarations(tools, model, true) },
+    );
+  };
 
   for (const message of messages) {
     const isFirstMessage = sourceIndex++ === 0;
-    const isLeadingSystemMessage =
-      !options.hasPrecedingItems && isFirstMessage && message.role === "system";
+    const isLeadingSystemMessage = isFirstMessage && message.role === "system";
     if (message.role === "system") {
-      if (!isLeadingSystemMessage && anchorsAdditions && message.toolsAdded?.length) {
-        const compat = model.compat as OpenAIResponsesCompat | undefined;
-        if (compat?.supportsAdditionalTools) {
-          projected.push({ type: "additional_tools", role: "developer",
-            tools: projectToolDeclarations(message.toolsAdded, model) });
-        } else if (compat?.supportsToolSearch) {
-          const names = message.toolsAdded.map(tool => tool.name);
-          const callId = `pi_tool_load_${shortHash(`system:${messageIndex}:${names.join(",")}`)}`;
-          projected.push({ type: "tool_search_call", call_id: callId, execution: "client", status: "completed",
-            arguments: { query: names.join(" "), limit: names.length } },
-          { type: "tool_search_output", call_id: callId, execution: "client", status: "completed",
-            tools: projectToolDeclarations(message.toolsAdded, model, true) });
-        }
-      }
+      const anchorsToolChanges = systemIndex++ >= transcriptTools.foldedSystemMessages;
+      if (anchorsToolChanges) appendSystemToolChanges(message);
       if (!isLeadingSystemMessage || options.includeSystemPrompt) {
-        const text = isLeadingSystemMessage
-          ? getSystemMessageText(message)
-          : renderSystemMessageUpdate(message);
+        const parts = [
+          isLeadingSystemMessage
+            ? getSystemMessageText(message)
+            : renderSystemMessageUpdate(message),
+        ];
+        if (anchorsToolChanges) {
+          // A redefinition is a removal plus an addition of the same name; only true removals are announced.
+          const added = new Set((message.toolsAdded ?? []).map((tool) => tool.name));
+          const removed = (message.toolsRemoved ?? [])
+            .map((tool) => tool.name)
+            .filter((name) => !added.has(name));
+          if (removed.length > 0) parts.push(renderToolRemovalNotice(removed));
+          // Recorded after this message's additions, whose notice precedes this removal notice.
+          for (const name of removed) unavailableTools.add(name);
+        }
+        const text = parts.filter((part) => part.length > 0).join("\n\n");
         if (text.length > 0) {
           projected.push({ role: instructionRole, content: sanitizeSurrogates(text) });
         }
@@ -505,24 +562,24 @@ export function projectCompactableContext(
   model: Model<any>,
   options: CompactableContextOptions = { includeSystemPrompt: true },
 ): ProjectedContext {
-  const supportsMidConvoSystemMessages =
-    (model.compat as { supportsMidConvoSystemMessages?: boolean } | undefined)
-      ?.supportsMidConvoSystemMessages ?? false;
-  const context = normalizeContext({ messages: convertToLlm([...messages]) });
+  const supportsMidConvoSystemMessages = supportsMidConversationSystemMessages(model);
+  // A checkpoint snapshot is a leading system message of the logical context:
+  // its text lives in the top-level instructions, while its in-place
+  // declarations stay anchored where an ordinary Pi request would place them.
+  const sourceMessages = options.checkpointSystemMessage
+    ? [options.checkpointSystemMessage, ...messages]
+    : messages;
+  const context = normalizeContext({ messages: convertToLlm([...sourceMessages]) });
   const declarationMessages = options.declarationMessages
     ? convertToLlm([...options.declarationMessages])
-    : options.checkpointSystemMessage
-      ? [options.checkpointSystemMessage, ...context.messages]
-      : context.messages;
+    : context.messages;
   const resolved = resolveTranscript(context, supportsMidConvoSystemMessages);
   const toolContext = resolveTranscript(normalizeContext({ messages: declarationMessages }), supportsMidConvoSystemMessages);
   const grammarToolInputProperties = grammarInputProperties(getDeclaredTools(toolContext.messages), model);
-  const compat = model.compat as OpenAIResponsesCompat | undefined;
-  const transcriptTools = resolveTranscriptTools(toolContext.messages,
-    (compat?.supportsAdditionalTools ?? false) || (compat?.supportsToolSearch ?? false));
+  const transcriptTools = resolveTranscriptTools(toolContext.messages, responsesToolSupport(model));
   return {
     input: projectNormalizedMessages(
-      normalizeMessages(resolved.messages, model), model, options, grammarToolInputProperties, transcriptTools.anchorsAdditions,
+      normalizeMessages(resolved.messages, model), model, options, grammarToolInputProperties, transcriptTools,
     ),
     tools: projectToolDeclarations(transcriptTools.requestTools, model),
   };

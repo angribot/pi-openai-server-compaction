@@ -8,7 +8,7 @@ The endpoint returns an opaque compaction item. This extension saves it with bou
 
 ## Quick start
 
-You need Node **22 or newer**, Pi (**1.2.0** is the implementation and validation baseline), and working Pi-managed credentials for an eligible model. The endpoint must support Remote compaction v2, not just ordinary Responses.
+You need Node **22 or newer**, Pi (**1.4.0** is the implementation and validation baseline), and working Pi-managed credentials for an eligible model. The endpoint must support Remote compaction v2, not just ordinary Responses.
 
 Install in your project:
 
@@ -49,7 +49,7 @@ Successful compaction retains recent original user messages and supported images
 
 ### Tool declarations follow Pi
 
-Compaction includes the tools Pi projects for the selected model, including supported grammar tools; it never executes returned tool calls. Endpoint schema rejection remains visible and cancels compaction rather than retrying without tools. This does not guarantee every tool schema works on every backend; see the [tool declaration contract](docs/reference.md#remote-compaction-contract).
+Compaction includes the tools Pi projects for the selected model, including supported grammar tools, and follows Pi's capability-dependent placement: current top-level declarations, in-place tool-search additions, or fully in-place `additional_tools` batches with Pi's incremental and removal notices. It never executes returned tool calls. Endpoint schema rejection remains visible and cancels compaction rather than retrying without tools. This does not guarantee every tool schema works on every backend; see the [tool declaration contract](docs/reference.md#remote-compaction-contract).
 
 ### Failures do not produce a backup text summary
 
