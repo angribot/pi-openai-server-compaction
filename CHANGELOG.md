@@ -4,6 +4,10 @@ This changelog intentionally starts at **0.1.0**.
 
 ## Unreleased
 
+- align Remote compaction and Native replay with Pi 1.4.0 Responses payloads: tool declarations now follow Pi's `none`, `additions`, and `changes` support modes, including initial in-place `additional_tools` batches, incremental notices, text-announced removals, and same-name redefinitions for first and repeated compaction across both supported APIs
+- project empty and whitespace-only tool outputs, including image-bearing results, exactly as Pi 1.4.0 does instead of sending raw whitespace through
+- upgrade the Pi development and validation baseline from `^1.2.0` to `^1.4.0` for all three host packages, keeping wildcard unbundled peers
+
 ## 0.15.0 - 2026-10-15
 
 - include Pi-projected active function and grammar tool declarations in Remote compaction, preserving supported in-place additions, removals, redefinitions, and constrained-sampling semantics; schema rejection, including `invalid_function_parameters` without a generic invalid-request type, is terminal with no tool-free retry or tool execution

@@ -450,11 +450,7 @@ export function prepareCompactionReplay(
     const suffix = projectCompactableContext(messages, model, {
       includeSystemPrompt: false,
       ...(state.kind === "valid"
-        ? {
-            checkpointSystemMessage: state.entry.systemMessage,
-            // A leading suffix update continues the compacted transcript.
-            hasPrecedingItems: supportsMidConversationSystemMessages(model),
-          }
+        ? { checkpointSystemMessage: state.entry.systemMessage }
         : {}),
     });
     prepared = {

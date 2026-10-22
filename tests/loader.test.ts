@@ -10,11 +10,11 @@ import { discoverAndLoadExtensions } from "@earendil-works/pi-coding-agent";
 
 const repoRoot = fileURLToPath(new URL("..", import.meta.url));
 
-test("Pi packages use the 1.2 development baseline and unbundled host peers", async () => {
+test("Pi packages use the 1.4 development baseline and unbundled host peers", async () => {
   const manifest = JSON.parse(await readFile(join(repoRoot, "package.json"), "utf8"));
   for (const name of ["pi-agent-core", "pi-ai", "pi-coding-agent"]) {
     const pkg = `@earendil-works/${name}`;
-    assert.equal(manifest.devDependencies[pkg], "^1.2.0");
+    assert.equal(manifest.devDependencies[pkg], "^1.4.0");
     assert.equal(manifest.peerDependencies[pkg], "*");
     assert.equal(manifest.dependencies?.[pkg], undefined);
   }

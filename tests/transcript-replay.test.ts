@@ -25,7 +25,7 @@ import {
 } from "../src/native-replay.ts";
 
 // ---------------------------------------------------------------------------
-// Pi 1.2.0 public-behavior oracle
+// Pi 1.4.0 public-behavior oracle
 //
 // These helpers drive Pi's real Responses providers with a mocked fetch. The
 // captured body is what Pi would send on the wire, so projection and replay
@@ -41,11 +41,6 @@ const READ_TOOL = {
   description: "read tool",
   parameters: { type: "object", properties: {} },
 };
-const TOOL_DECLARATION_TYPES = new Set([
-  "additional_tools",
-  "tool_search_call",
-  "tool_search_output",
-]);
 
 function model(kind: ApiKind, overrides: Partial<Model<any>> = {}): Model<any> {
   return {
@@ -145,7 +140,13 @@ async function realProviderPayload(
  * items must remain wire-equivalent, including their placement.
  */
 function withoutLeadingPrompt(kind: ApiKind, input: readonly any[]): any[] {
-  return kind === "direct" && input[0]?.role === "developer" ? input.slice(1) : [...input];
+  if (kind !== "direct") return [...input];
+  // The leading prompt item has no wire `type`. Tool declarations share its
+  // developer role, so match the text item itself rather than its position.
+  const index = input.findIndex(
+    (item: any) => item?.type === undefined && (item.role === "developer" || item.role === "system"),
+  );
+  return index < 0 ? [...input] : [...input.slice(0, index), ...input.slice(index + 1)];
 }
 
 function leadingText(kind: ApiKind, payload: Record<string, any>): string {
@@ -482,7 +483,7 @@ test("repeated Remote compaction matches the real provider projection of the pos
   }
 });
 
-test("tool additions, removals, and redefinitions preserve Pi declaration placement", async () => {
+test("tool additions, removals, and redefinitions preserve Pi's in-place declaration contract", async () => {
   const selectedModel = model("codex", {
     compat: { supportsMidConvoSystemMessages: true, supportsAdditionalTools: true },
   });
@@ -498,52 +499,107 @@ test("tool additions, removals, and redefinitions preserve Pi declaration placem
     description: "grep tool",
     parameters: { type: "object", properties: {} },
   };
-  const cases: Array<[string, SystemMessage, boolean, boolean]> = [
-    ["addition", { role: "system", content: "", toolsAdded: [grepTool], timestamp: 2 }, true, true],
-    [
-      "removal",
-      {
+  const writeTool = {
+    name: "write",
+    description: "write tool",
+    parameters: { type: "object", properties: {} },
+  };
+  const cases: Array<{
+    name: string;
+    changes: SystemMessage[];
+    declarations: Array<[string, string]>;
+    announcesRemoval: boolean;
+    stillUnavailable?: string;
+  }> = [
+    {
+      name: "addition",
+      changes: [{ role: "system", content: "", toolsAdded: [grepTool], timestamp: 2 }],
+      declarations: [["read", "read tool"], ["grep", "grep tool"]],
+      announcesRemoval: false,
+    },
+    {
+      name: "removal",
+      changes: [{
         role: "system",
         content: "",
         toolsRemoved: [{ name: "read" }],
         toolsAdded: [grepTool],
         timestamp: 3,
-      },
-      false,
-      false,
-    ],
-    [
-      "redefinition",
-      {
+      }],
+      declarations: [["read", "read tool"], ["grep", "grep tool"]],
+      announcesRemoval: true,
+    },
+    {
+      name: "redefinition",
+      changes: [{
         role: "system",
         content: "",
         toolsAdded: [{ ...READ_TOOL, description: "read tool v2" }],
         timestamp: 4,
-      },
-      false,
-      true,
-    ],
+      }],
+      declarations: [["read", "read tool"], ["read", "read tool v2"]],
+      announcesRemoval: false,
+    },
+    {
+      name: "addition after removal",
+      changes: [
+        {
+          role: "system",
+          content: "",
+          toolsRemoved: [{ name: "read" }],
+          toolsAdded: [grepTool],
+          timestamp: 5,
+        },
+        { role: "system", content: "", toolsAdded: [writeTool], timestamp: 6 },
+      ],
+      declarations: [["read", "read tool"], ["grep", "grep tool"], ["write", "write tool"]],
+      announcesRemoval: true,
+      stillUnavailable: "Still unavailable: read.",
+    },
   ];
 
-  for (const [name, change, anchorsAddition, readPresent] of cases) {
+  const additions = (input: readonly any[]) =>
+    input.filter((item: any) => item.type === "additional_tools").flatMap((item: any) => item.tools);
+
+  for (const { name, changes, declarations, announcesRemoval, stillUnavailable } of cases) {
+    let parentId: string | null = "u1";
     const branch: BranchEntry[] = [
       systemEntry("s1", null, leading),
       userEntry("u1", "first", "s1"),
-      systemEntry("s2", "u1", change),
-      userEntry("u2", "second", "s2"),
     ];
+    for (const [index, change] of changes.entries()) {
+      const id = `s${index + 2}`;
+      branch.push(systemEntry(id, parentId, change));
+      parentId = id;
+    }
+    branch.push(userEntry("u2", "second", parentId));
 
     const ordinary = await realProviderPayload("codex", selectedModel, payloadMessages(branch));
-    assert.equal(
-      ordinary.input.some((item: any) => item.type === "additional_tools"),
-      anchorsAddition,
-      `${name}: additive changes are declared in place, non-additive ones at the top level`,
+    // Changes-capable transports never use the top-level field: every tool is
+    // declared in place, starting with the leading system message.
+    assert.equal(ordinary.tools, undefined, `${name}: no top-level declarations`);
+    assert.deepEqual(
+      additions(ordinary.input).map((tool: any) => [tool.name, tool.description]),
+      declarations,
+      `${name}: every declaration stays in place`,
     );
     assert.equal(
-      ordinary.tools?.some((tool: any) => tool.name === "read"),
-      readPresent,
-      `${name}: the current tool set reflects the change`,
+      JSON.stringify(ordinary.input).includes("This is an incremental tools update."),
+      true,
+      `${name}: repeated in-place declarations carry the incremental notice`,
     );
+    assert.equal(
+      JSON.stringify(ordinary.input).includes("The following tools are no longer available."),
+      announcesRemoval,
+      `${name}: only a true removal is announced as text`,
+    );
+    if (stillUnavailable) {
+      assert.equal(
+        JSON.stringify(ordinary.input).includes(stillUnavailable),
+        true,
+        `${name}: later batches retain the removal notice state`,
+      );
+    }
 
     const preparation = prepareCompactionReplay(branch, selectedModel);
     assert.equal(preparation.kind, "ready", name);
@@ -554,12 +610,85 @@ test("tool additions, removals, and redefinitions preserve Pi declaration placem
       [...withoutLeadingPrompt("codex", ordinary.input), { type: "compaction_trigger" }],
       name,
     );
-    assert.equal(
-      input.some((item) => TOOL_DECLARATION_TYPES.has(String(item.type))),
-      anchorsAddition,
-      name,
-    );
     assert.deepEqual(preparation.buildContext().tools, ordinary.tools ?? []);
+  }
+});
+
+test("native replay preserves declarations around the replacement span under changes support", async () => {
+  for (const kind of ["direct", "codex"] as const) {
+    const selected = model(kind, {
+      compat: { supportsMidConvoSystemMessages: true, supportsAdditionalTools: true },
+    });
+    const snapshot = {
+      role: "system", content: "BASE", toolsAdded: [READ_TOOL], timestamp: 1,
+    } as SystemMessage;
+    const redefinition = {
+      role: "system",
+      content: "",
+      toolsAdded: [{ ...READ_TOOL, description: "read tool v2" }],
+      timestamp: 2,
+    } as SystemMessage;
+    const branch: BranchEntry[] = [
+      systemEntry("s1", null, snapshot),
+      userEntry("u1", "before", "s1"),
+      userEntry("u2", "retained pre-checkpoint", "u1"),
+      checkpointEntry("c1", "u2", "u2", checkpointDetails(selected), snapshot),
+      systemEntry("s2", "c1", redefinition),
+      userEntry("u3", "after checkpoint", "s2"),
+    ];
+    const payload = await realProviderPayload(kind, selected, payloadMessages(branch));
+    const markerIndex = indexOfMarker(payload.input);
+    const retainedIndex = payload.input.findIndex((item: any) =>
+      JSON.stringify(item).includes("retained pre-checkpoint"));
+    assert.ok(markerIndex >= 0 && retainedIndex > markerIndex, kind);
+    // The snapshot declaration precedes the span; the post-checkpoint
+    // redefinition and its incremental notice follow it.
+    assert.equal(
+      payload.input.slice(0, markerIndex).some((item: any) => item.type === "additional_tools"),
+      true,
+      `${kind}: the checkpoint declaration stays before the span`,
+    );
+    assert.equal(
+      payload.input.slice(markerIndex, retainedIndex).some((item: any) => item.type === "additional_tools"),
+      false,
+      `${kind}: the replacement span itself carries no declarations`,
+    );
+    assert.equal(
+      payload.input.slice(retainedIndex + 1).some((item: any) => item.type === "additional_tools"),
+      true,
+      `${kind}: the post-checkpoint declaration follows the span`,
+    );
+    const native = prepareNativeReplay(branch, selected);
+    assert.equal(native.kind, "compatible", kind);
+    if (native.kind !== "compatible") continue;
+    const rewrite = native.rewrite(payload);
+    assert.equal(rewrite.kind, "patched", kind);
+    if (rewrite.kind !== "patched") continue;
+    assert.deepEqual(
+      rewrite.payload.input,
+      [
+        ...payload.input.slice(0, markerIndex),
+        COMPACTION_ITEM,
+        ...payload.input.slice(retainedIndex + 1),
+      ],
+      kind,
+    );
+    assert.equal(indexOfMarker(rewrite.payload.input), -1, kind);
+    assert.equal(
+      JSON.stringify(rewrite.payload.input).includes("read tool v2"),
+      true,
+      `${kind}: post-checkpoint declarations are preserved`,
+    );
+    assert.equal(
+      native.rewrite({ ...payload, input: payload.input.filter((_: unknown, index: number) => index !== retainedIndex) }).kind,
+      "span-missing-or-ambiguous",
+      `${kind}: a missing retained entry stays fail-closed`,
+    );
+    assert.equal(
+      native.rewrite({ ...payload, input: [...payload.input, ...payload.input] }).kind,
+      "span-missing-or-ambiguous",
+      `${kind}: an ambiguous span stays fail-closed`,
+    );
   }
 });
 
@@ -600,6 +729,107 @@ test("a system message between a function call and its result is ordered like Pi
     );
     if (!withResult) {
       assert.equal(JSON.stringify(preparation.buildContext().input).includes("No result provided"), true);
+    }
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Tool-output projection
+// ---------------------------------------------------------------------------
+
+test("empty and whitespace-only tool outputs match Pi's projection for compaction and replay", async () => {
+  const image = { type: "image", mimeType: "image/png", data: "aW1n" };
+  const text = (value: string) => ({ type: "text", text: value });
+  const imageItem = { type: "input_image", detail: "auto", image_url: "data:image/png;base64,aW1n" };
+  const cases: Array<{ name: string; content: any[]; visionOutput: unknown }> = [
+    { name: "empty", content: [], visionOutput: "(no tool output)" },
+    { name: "whitespace", content: [text(" \n\t ")], visionOutput: "(no tool output)" },
+    { name: "empty-image", content: [image], visionOutput: [imageItem] },
+    { name: "whitespace-image", content: [text(" \n\t "), image], visionOutput: [imageItem] },
+    {
+      name: "text-image",
+      content: [text("note"), image],
+      visionOutput: [{ type: "input_text", text: "note" }, imageItem],
+    },
+  ];
+
+  for (const kind of ["direct", "codex"] as const) {
+    for (const vision of [false, true]) {
+      for (const { name, content, visionOutput } of cases) {
+        const selected = model(kind, { input: vision ? ["text", "image"] : ["text"] });
+        const snapshot = {
+          role: "system", content: "BASE", toolsAdded: [READ_TOOL], timestamp: 1,
+        } as SystemMessage;
+        const call = assistantEntry("a1", "s1", {
+          provider: selected.provider, api: selected.api, model: selected.id,
+          content: [{ type: "toolCall", id: "call_1|fc_item_1", name: "read", arguments: { path: "/tmp" } }],
+        });
+        const toolResult = toolResultEntry("t1", "a1");
+        toolResult.message = { ...toolResult.message as any, content };
+        const before = [
+          systemEntry("s1", null, snapshot),
+          userEntry("u1", "before", "s1"),
+          call,
+          toolResult,
+        ];
+        const label = `${kind} vision=${vision} ${name}`;
+        const ordinary = await realProviderPayload(kind, selected, payloadMessages(before));
+        const preparation = prepareCompactionReplay(before, selected);
+        assert.equal(preparation.kind, "ready", label);
+        if (preparation.kind !== "ready") continue;
+        const input = preparation.buildContext().input;
+        assert.deepEqual(
+          input,
+          [...withoutLeadingPrompt(kind, ordinary.input), { type: "compaction_trigger" }],
+          label,
+        );
+        const output = input.find((item) => item.type === "function_call_output")?.output;
+        if (vision) {
+          assert.deepEqual(output, visionOutput, label);
+        } else if (content.some((block) => block.type === "image")) {
+          assert.match(String(output), /tool image omitted: model does not support images/, label);
+          if (name === "text-image") assert.match(String(output), /note/, label);
+        } else {
+          assert.equal(output, "(no tool output)", label);
+        }
+
+        // The checkpoint retains the call and its affected output, so native
+        // replay must still find and replace exactly that span.
+        const branch = [
+          ...before,
+          checkpointEntry("c1", "t1", "a1", checkpointDetails(selected), snapshot),
+          userEntry("u2", "after", "c1"),
+        ];
+        const payload = await realProviderPayload(kind, selected, payloadMessages(branch));
+        const markerIndex = indexOfMarker(payload.input);
+        assert.ok(markerIndex >= 0, label);
+        const native = prepareNativeReplay(branch, selected);
+        assert.equal(native.kind, "compatible", label);
+        if (native.kind !== "compatible") continue;
+        const rewrite = native.rewrite(payload);
+        assert.equal(rewrite.kind, "patched", label);
+        if (rewrite.kind !== "patched") continue;
+        assert.deepEqual(
+          rewrite.payload.input,
+          [
+            ...payload.input.slice(0, markerIndex),
+            COMPACTION_ITEM,
+            ...payload.input.slice(markerIndex + 3),
+          ],
+          label,
+        );
+        assert.equal(indexOfMarker(rewrite.payload.input), -1, label);
+        assert.equal(
+          native.rewrite({ ...payload, input: payload.input.filter((_: unknown, index: number) => index !== markerIndex + 2) }).kind,
+          "span-missing-or-ambiguous",
+          `${label}: a missing retained output stays fail-closed`,
+        );
+        assert.equal(
+          native.rewrite({ ...payload, input: [...payload.input, ...payload.input] }).kind,
+          "span-missing-or-ambiguous",
+          `${label}: an ambiguous span stays fail-closed`,
+        );
+      }
     }
   }
 });
