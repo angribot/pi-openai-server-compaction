@@ -104,6 +104,7 @@ async function realProviderPayload(
   messages: readonly Message[],
   systemPrompt?: string,
   onPayload?: (payload: unknown) => unknown,
+  providerOptions: Record<string, unknown> = {},
 ): Promise<Record<string, any>> {
   const transcript = normalizeContext({
     ...(systemPrompt === undefined ? {} : { systemPrompt }),
@@ -115,8 +116,8 @@ async function realProviderPayload(
     return terminalResponse();
   }) as typeof globalThis.fetch;
 
-  const options: Record<string, unknown> = { fetch: fetchMock, onPayload };
-  if (kind === "direct") options.apiKey = "sk-test";
+  const options: Record<string, unknown> = { ...providerOptions, fetch: fetchMock, onPayload };
+  if (kind === "direct") options.apiKey = providerOptions.apiKey ?? "sk-test";
   else {
     options.apiKey = fakeJwt();
     options.transport = "sse";
@@ -874,6 +875,97 @@ for (const kind of ["direct", "codex"] as const) {
     });
   }
 }
+
+test("native replay matches historical effort updates without removing suffix configuration", async () => {
+  for (const enabled of [true, false]) {
+    const selected = model("direct", { compat: { supportsMidConvoEffort: enabled } });
+    const branch = [
+      userEntry("u1", "before"),
+      assistantEntry("a1", "u1", { providerThinkingLevel: "low" }),
+      assistantEntry("a2", "a1", { providerThinkingLevel: "high" }),
+      checkpointEntry("c1", "a2", "a1", checkpointDetails(selected),
+        { role: "system", content: "BASE", timestamp: 1 }),
+      userEntry("u2", "after", "c1"),
+      assistantEntry("a3", "u2", { providerThinkingLevel: "medium" }),
+      userEntry("u3", "continue", "a3"),
+    ];
+    const payload = await realProviderPayload("direct", selected, payloadMessages(branch),
+      undefined, undefined, { reasoningEffort: "high" });
+    assert.equal(payload.input.filter((item: any) => item.type === "configuration_update").length,
+      enabled ? 4 : 0);
+    const preparation = prepareNativeReplay(branch, selected);
+    assert.equal(preparation.kind, "compatible");
+    if (preparation.kind !== "compatible") continue;
+    const rewrite = preparation.rewrite(payload);
+    assert.equal(rewrite.kind, "patched");
+    if (rewrite.kind !== "patched") continue;
+    const suffixIndex = payload.input.findIndex((item: any) =>
+      item.role === "user" && item.content[0]?.text === "after");
+    assert.deepEqual(rewrite.payload.input, [
+      ...payload.input.slice(0, indexOfMarker(payload.input)), COMPACTION_ITEM,
+      ...payload.input.slice(suffixIndex),
+    ]);
+    if (enabled) {
+      const configurationIndex = payload.input.findIndex((item: any) => item.type === "configuration_update");
+      for (const mutation of ["value", "position", "unknown", "duplicate"] as const) {
+        const changed = structuredClone(payload);
+        if (mutation === "value") changed.input[configurationIndex].reasoning.effort = "medium";
+        if (mutation === "position") {
+          const [item] = changed.input.splice(configurationIndex, 1);
+          changed.input.splice(configurationIndex + 1, 0, item);
+        }
+        if (mutation === "unknown") changed.input[configurationIndex].extra = true;
+        if (mutation === "duplicate") changed.input.splice(configurationIndex, 0, changed.input[configurationIndex]);
+        assert.equal(preparation.rewrite(changed).kind, "span-missing-or-ambiguous", mutation);
+      }
+    }
+  }
+});
+
+test("native replay follows provider effort mode and exact historical identity", async () => {
+  const selected = model("direct", { compat: { supportsMidConvoEffort: true } });
+  const details: NativeReplayCheckpointDetails = { nativeReplayCheckpoint: {
+    ...checkpointDetails(selected).nativeReplayCheckpoint,
+    format: "native-replay-checkpoint/2",
+    replacementHistory: [{ role: "user", content: [{ type: "input_text", text: "retained original" }] }, COMPACTION_ITEM],
+  } };
+  const branch = [
+    userEntry("u1", "before"),
+    assistantEntry("a1", "u1", { providerThinkingLevel: "low" }),
+    assistantEntry("a2", "a1", { provider: "other", providerThinkingLevel: "high" }),
+    assistantEntry("a3", "a2", { model: "gpt-other", providerThinkingLevel: "high" }),
+    assistantEntry("a4", "a3", { content: [], providerThinkingLevel: "high" }),
+    toolCallAssistantEntry("a5", "a4"),
+    toolResultEntry("t1", "a5"),
+    checkpointEntry("c1", "t1", "a1", details, { role: "system", content: "BASE", timestamp: 1 }),
+    userEntry("u2", "after", "c1"),
+  ];
+  const call = branch.find(e => e.id === "a5")!.message as AssistantMessage;
+  call.providerThinkingLevel = "medium";
+  for (const scenario of [
+    { selected, options: {}, updates: 0 },
+    { selected, options: { reasoningEffort: "high" }, updates: 3 },
+    { selected: { ...selected, baseUrl: "https://api.openai.com/v1" },
+      options: { reasoningEffort: "high", apiKey: "synthetic-oauth-token" }, updates: 0 },
+  ]) {
+    const payload = await realProviderPayload("direct", scenario.selected, payloadMessages(branch),
+      undefined, undefined, scenario.options);
+    assert.equal(payload.input.filter((item: any) => item.type === "configuration_update").length,
+      scenario.updates);
+    const preparation = prepareNativeReplay(branch, scenario.selected);
+    assert.equal(preparation.kind, "compatible");
+    if (preparation.kind !== "compatible") continue;
+    const rewritten = preparation.rewrite(payload);
+    assert.equal(rewritten.kind, "patched");
+    if (rewritten.kind !== "patched") continue;
+    const suffixIndex = payload.input.findIndex((item: any) =>
+      item.role === "user" && item.content[0]?.text === "after");
+    assert.deepEqual(rewritten.payload.input, [
+      ...payload.input.slice(0, indexOfMarker(payload.input)),
+      ...details.nativeReplayCheckpoint.replacementHistory, ...payload.input.slice(suffixIndex),
+    ]);
+  }
+});
 
 test("native replay follows a reloaded SessionManager branch after navigation", async (t) => {
   const selectedModel = model("codex", { provider: "custom-codex", id: "gpt-future" });

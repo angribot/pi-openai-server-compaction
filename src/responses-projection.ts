@@ -38,6 +38,8 @@ export type CompactableContextOptions = {
    * omits the leading system message; later system updates remain in place.
    */
   includeSystemPrompt: boolean;
+  /** Replay-only historical effort updates; the provider owns the terminal current effort. */
+  includeHistoricalEffortUpdates?: boolean;
   /**
    * Checkpoint-owned leading system message inherited by a post-checkpoint suffix.
    * It supplies inherited declarations and keeps later suffix updates anchored at
@@ -525,6 +527,10 @@ function projectNormalizedMessages(
         }
       }
       if (output.length === 0) continue;
+      if (options.includeHistoricalEffortUpdates && isSameModel &&
+          message.providerThinkingLevel !== undefined) {
+        projected.push({ type: "configuration_update", reasoning: { effort: message.providerThinkingLevel } });
+      }
       projected.push(...output);
     } else {
       const [callId] = message.toolCallId.split("|");

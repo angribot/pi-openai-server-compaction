@@ -339,6 +339,7 @@ function checkpointSpan(
   branch: readonly BranchEntry[],
   state: ValidReplayState,
   model: Model<any>,
+  includeHistoricalEffortUpdates: boolean,
 ): ResponsesItem[] | undefined {
   if (
     typeof state.entry.firstKeptEntryId !== "string" ||
@@ -358,6 +359,7 @@ function checkpointSpan(
     // marker instead of assuming it is the first projected item.
     const projected = projectCompactableContext(context.messages, model, {
       includeSystemPrompt: false,
+      includeHistoricalEffortUpdates,
       // Pi selects historical function/custom wire forms from all declarations
       // in the current request, including persisted post-checkpoint redefinitions.
       declarationMessages: buildSessionContext(
@@ -506,7 +508,15 @@ export function prepareNativeReplay(
       if (!isRecord(payload) || !Array.isArray(payload.input)) {
         return { kind: "payload-not-full-array" };
       }
-      const expected = checkpointSpan(branch, state, model);
+      // Pi's direct Responses provider appends the current effort when this
+      // request uses configuration updates. Capability alone is insufficient:
+      // OAuth and requests without an effort option do not enable that mode.
+      const tail = payload.input.at(-1);
+      const includeHistoricalEffortUpdates = model.api === "openai-responses" &&
+        (model.compat as { supportsMidConvoEffort?: boolean } | undefined)?.supportsMidConvoEffort === true &&
+        isRecord(tail) && tail.type === "configuration_update" &&
+        isRecord(tail.reasoning) && typeof tail.reasoning.effort === "string";
+      const expected = checkpointSpan(branch, state, model, includeHistoricalEffortUpdates);
       if (!expected) return { kind: "span-unavailable" };
       const matchStart = findUniqueSpan(payload.input, expected);
       if (matchStart === undefined) return { kind: "span-missing-or-ambiguous" };
