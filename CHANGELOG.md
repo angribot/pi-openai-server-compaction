@@ -4,6 +4,8 @@ This changelog intentionally starts at **0.1.0**.
 
 ## Unreleased
 
+- preserve Native replay after compaction when Pi sends mid-conversation reasoning-effort updates: match historical configuration items strictly while leaving suffix and current-effort updates untouched, without changing checkpoint formats or Remote compaction requests
+
 ## 0.15.1 - 2026-10-22
 
 - align Remote compaction and Native replay with Pi 1.4.0 Responses payloads: tool declarations now follow Pi's `none`, `additions`, and `changes` support modes, including initial in-place `additional_tools` batches, incremental notices, text-announced removals, and same-name redefinitions for first and repeated compaction across both supported APIs
