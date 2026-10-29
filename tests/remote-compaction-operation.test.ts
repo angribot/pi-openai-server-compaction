@@ -575,7 +575,6 @@ test("requires response.completed and classifies pre-completion stream failures 
       ],
     ],
     ["malformed JSON", ["data: {not-json}\n\n"]],
-    ["incomplete", [sse({ type: "response.incomplete", response: {} })]],
   ];
 
   for (const [_name, chunks] of cases) {
@@ -777,12 +776,58 @@ test("equivalent flat and nested wire errors retain classification and diagnosti
   }
 });
 
-test("returns standard Retry-After values on retryable HTTP outcomes", async () => {
+test("classifies incomplete reasons through both production adapters without accepting partial items", async () => {
+  for (const codex of [false, true]) {
+    for (const [reason, expected] of [
+      ["max_output_tokens", "terminal"], ["context_length_exceeded", "terminal"],
+      ["content_filter", "retryable"], ["interrupted", "retryable"],
+      ["future_reason", "terminal"], [undefined, "terminal"], [42, "terminal"], ["", "terminal"],
+    ] as const) {
+      await withFetch(async () => streamResponse([
+        sse({ type: "response.output_item.done", item: { type: "compaction", encrypted_content: "partial" } }),
+        sse({ type: "response.incomplete", response: {
+          status: "incomplete", incomplete_details: { reason, message: "server diagnostic" }, usage: { input_tokens: 10, output_tokens: 2 },
+        } }),
+      ]), async () => {
+        const outcome = codex
+          ? await attemptCodexResponsesOperation(request(codexModel()), realCodexContext())
+          : await attemptDirectResponsesOperation(request(), context());
+        assertOutcome(outcome, expected);
+        assert.equal("item" in outcome, false);
+        assert.equal("usage" in outcome, false);
+        if (outcome.kind !== "accepted") {
+          assert.ok(outcome.error.message.includes(typeof reason === "string" && reason ? reason : "unknown"));
+          assert.match(outcome.error.message, /server diagnostic/);
+        }
+      });
+    }
+  }
+});
+
+test("both adapters preserve Retry-After when the HTTP error body cannot be read", async () => {
+  for (const codex of [false, true]) {
+    await withFetch(async () => new Response(new ReadableStream({
+      start(controller) { controller.error(new Error("body read failed")); },
+    }), { status: 503, headers: { "retry-after": "3600" } }), async () => {
+      const outcome = codex
+        ? await attemptCodexResponsesOperation(request(codexModel()), realCodexContext())
+        : await attemptDirectResponsesOperation(request(), context());
+      assertOutcome(outcome, "retryable");
+      if (outcome.kind === "retryable") assert.equal(outcome.retryAfterMs, 3_600_000);
+    });
+  }
+});
+
+test("returns standard Retry-After values on retryable HTTP outcomes", async (t) => {
+  t.mock.timers.enable({ apis: ["Date"], now: Date.UTC(2026, 0, 1) });
   const future = new Date(Date.now() + 60_000).toUTCString();
   const cases: Array<[string, number | undefined]> = [
     ["1.5", 1_500],
     [future, 60_000],
-    ["invalid", undefined],
+    ["invalid", undefined], ["", undefined], ["   ", undefined],
+    ["-1", undefined], ["0x10", undefined], ["1e3", undefined],
+    ["0", 0], [new Date(Date.now() - 60_000).toUTCString(), 0],
+    ["3600", 3_600_000],
   ];
 
   for (const [header, expected] of cases) {
@@ -797,7 +842,7 @@ test("returns standard Retry-After values on retryable HTTP outcomes", async () 
         assert.equal(outcome.kind, "retryable");
         if (outcome.kind !== "retryable") return;
         if (expected === undefined) assert.equal(outcome.retryAfterMs, undefined);
-        else assert.ok(Math.abs((outcome.retryAfterMs ?? 0) - expected) < 2_000);
+        else assert.equal(outcome.retryAfterMs, expected);
       },
     );
   }

@@ -62,7 +62,7 @@ function retryDelay(
   retry: number,
 ): number {
   if (typeof outcome.retryAfterMs === "number" && Number.isFinite(outcome.retryAfterMs)) {
-    return Math.min(MAX_RETRY_DELAY_MS, Math.max(0, outcome.retryAfterMs));
+    return Math.max(0, outcome.retryAfterMs);
   }
   const base = Math.min(MAX_RETRY_DELAY_MS, BASE_RETRY_DELAY_MS * 2 ** Math.max(0, retry - 1));
   return Math.min(MAX_RETRY_DELAY_MS, Math.floor(base * (0.75 + Math.random() * 0.5)));
@@ -209,6 +209,14 @@ export function installRemoteCompaction(
         reportError(
           context,
           `Remote compaction failed; no text fallback was used. ${outcome.error.message}`,
+        );
+        return { cancel: true };
+      }
+
+      if (outcome.retryAfterMs !== undefined && outcome.retryAfterMs > MAX_RETRY_DELAY_MS) {
+        reportError(
+          context,
+          `Remote compaction cancelled: the server requested a ${outcome.retryAfterMs / 1_000}s retry delay, exceeding the ${MAX_RETRY_DELAY_MS / 1_000}s automatic-wait limit. No checkpoint was written; no text fallback was used. ${outcome.error.message}`,
         );
         return { cancel: true };
       }

@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import { mock, test } from "node:test";
-import { InMemoryCredentialStore, type Model, type SystemMessage } from "@earendil-works/pi-ai";
+import { InMemoryCredentialStore, normalizeContext, type Model, type SystemMessage } from "@earendil-works/pi-ai";
+import { stream as codexStream } from "@earendil-works/pi-ai/api/openai-codex-responses";
+import { attemptCodexResponsesOperation } from "../src/codex-responses-operation.ts";
 import { ModelRegistry, ModelRuntime, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { attemptDirectResponsesOperation } from "../src/direct-responses-operation.ts";
 import {
@@ -431,13 +433,13 @@ test("nested terminal errors cancel at the hook after one dispatch without a che
   }
 });
 
-test("hook retries share one unchanged request and cap Retry-After delays and attempts", async (t) => {
+test("hook retries share one unchanged request and honor the 60s Retry-After limit", async (t) => {
   t.mock.timers.enable({ apis: ["setTimeout"] });
   const requests: string[] = [];
   const network = mock.method(globalThis, "fetch", async (_url: unknown, init?: RequestInit) => {
     requests.push(String(init?.body));
     return new Response(JSON.stringify({ error: { error: { code: "server_error", message: "busy" } } }), {
-      status: 503, headers: { "retry-after": "3600" },
+      status: 503, headers: { "retry-after": "60" },
     });
   });
   try {
@@ -461,6 +463,95 @@ test("hook retries share one unchanged request and cap Retry-After delays and at
     assert.equal(new Set(requests).size, 1);
     assert.match(state.notifications[0]!.message, /busy/);
   } finally { network.mock.restore(); }
+});
+
+test("production adapters obey hook incomplete and excessive-wait decisions without checkpoints", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  for (const codex of [false, true]) {
+    for (const scenario of ["max_output_tokens", "future_reason", "missing", "content_filter", "interrupted", "long-wait", "broken-body"]) {
+      const requests: unknown[] = [];
+      const network = mock.method(globalThis, "fetch", async (_url: unknown, init?: RequestInit) => {
+        requests.push(init?.body);
+        if (scenario === "long-wait" || scenario === "broken-body") {
+          return new Response(scenario === "long-wait" ? "busy" : new ReadableStream({
+            start(controller) { controller.error(new Error("body read failed")); },
+          }), { status: 503, headers: { "retry-after": "3600" } });
+        }
+        return new Response(`data: ${JSON.stringify({ type: "response.incomplete", response: {
+          status: "incomplete", incomplete_details: scenario === "missing" ? {} : { reason: scenario },
+        } })}\n\n`);
+      });
+      try {
+        const selected = model(codex ? { provider: "openai-codex", api: "openai-codex-responses" } : {});
+        const state = makeContext(selected);
+        const encode = (value: unknown) => Buffer.from(JSON.stringify(value)).toString("base64url");
+        const apiKey = `${encode({})}.${encode({ "https://api.openai.com/auth": { chatgpt_account_id: "test" } })}.sig`;
+        Object.assign(state.context as object, { modelRegistry: {
+          isUsingOAuth: () => false,
+          getApiKeyAndHeaders: async () => ({ ok: true, apiKey: "test-key" }),
+          complete: (model: Model<any>, transcript: any, options: any) =>
+            codexStream(model as Model<"openai-codex-responses">, normalizeContext(transcript), { ...options, apiKey }).result(),
+        } });
+        const pending = install(codex ? attemptCodexResponsesOperation : attemptDirectResponsesOperation)(compactEvent(), state.context);
+        // Let both provider and raw-response consumers settle before advancing retry timers.
+        const flush = async () => { for (let i = 0; i < 10; i++) await new Promise(setImmediate); };
+        await flush();
+        const retryable = scenario === "content_filter" || scenario === "interrupted";
+        assert.equal(requests.length, 1);
+        if (retryable) {
+          for (let n = 2; n <= 3; n++) {
+            t.mock.timers.tick(1_000);
+            await flush();
+            assert.equal(requests.length, n);
+          }
+        }
+        assert.deepEqual(await pending, { cancel: true });
+        assert.equal(requests.length, retryable ? 3 : 1);
+        for (const body of requests) assert.deepEqual(body, requests[0]);
+        if (scenario === "long-wait" || scenario === "broken-body") {
+          assert.match(state.notifications[0]!.message, /3600s.*60s automatic-wait limit/);
+          t.mock.timers.tick(60_000);
+          await flush();
+          assert.equal(requests.length, 1);
+        }
+      } finally { network.mock.restore(); }
+    }
+  }
+});
+
+test("zero Retry-After still consumes the bounded retry budget", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  let calls = 0;
+  const pending = install(async () => {
+    calls++;
+    return { kind: "retryable", error: new Error("busy"), retryAfterMs: 0 };
+  })(compactEvent(), makeContext(model()).context);
+  await new Promise(setImmediate);
+  for (let n = 2; n <= 3; n++) {
+    t.mock.timers.tick(1);
+    await new Promise(setImmediate);
+    assert.equal(calls, n);
+  }
+  assert.deepEqual(await pending, { cancel: true });
+});
+
+test("Retry-After waits within budget are cancellable and never dispatch early", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  let calls = 0;
+  const attempt: RemoteCompactionAttempt = async () => {
+    calls++;
+    return { kind: "retryable", error: new Error("busy"), retryAfterMs: 30_000 };
+  };
+  const controller = new AbortController();
+  const pending = install(attempt)({ ...(compactEvent() as object), signal: controller.signal }, makeContext(model()).context);
+  await new Promise(setImmediate);
+  t.mock.timers.tick(29_999);
+  await new Promise(setImmediate);
+  assert.equal(calls, 1);
+  controller.abort();
+  assert.deepEqual(await pending, { cancel: true });
+  t.mock.timers.tick(30_000);
+  assert.equal(calls, 1);
 });
 
 test("cancelling a fallback retry delay prevents later dispatch and checkpoint installation", async (t) => {
