@@ -4,6 +4,8 @@ This changelog intentionally starts at **0.1.0**.
 
 ## Unreleased
 
+- stop retrying Remote compaction incomplete responses except `content_filter` and `interrupted`, preserving reason-specific diagnostics without accepting partial checkpoints or changing success validation
+- cancel Remote compaction when server-advised retry waits exceed 60 seconds instead of retrying early; preserve valid `Retry-After` on unreadable HTTP error bodies and ignore empty or invalid advice
 - preserve Native replay after compaction when Pi sends mid-conversation reasoning-effort updates: match historical configuration items strictly while leaving suffix and current-effort updates untouched, without changing checkpoint formats or Remote compaction requests
 
 ## 0.15.1 - 2026-10-22

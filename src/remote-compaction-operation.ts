@@ -157,10 +157,12 @@ export function remoteCompactionFailureOutcome(
 }
 
 function parseRetryAfter(value: string | null, now = Date.now()): number | undefined {
-  if (value === null) return undefined;
-  const seconds = Number(value);
-  if (Number.isFinite(seconds) && seconds >= 0) return seconds * 1_000;
-  const date = Date.parse(value);
+  const text = value?.trim();
+  if (!text) return undefined;
+  // Preserve fractional-second hints, but reject numeric coercions and date-like numbers.
+  if (/^\d+(?:\.\d+)?$/.test(text)) return Number(text) * 1_000;
+  if (!/[a-z]/i.test(text) || !text.includes(":")) return undefined;
+  const date = Date.parse(text);
   if (!Number.isFinite(date)) return undefined;
   return Math.max(0, date - now);
 }
@@ -414,6 +416,7 @@ export async function superviseRemoteCompactionResponse(
   if (signal.aborted) return { kind: "terminal", error: abortError(signal) };
 
   if (!response.ok) {
+    const retryAfterMs = parseRetryAfter(response.headers.get("retry-after"));
     let text: string;
     try {
       text = await readBodyText(response, signal);
@@ -422,7 +425,7 @@ export async function superviseRemoteCompactionResponse(
       if (isAbort(error, signal)) {
         return { kind: "terminal", error: abortError(signal) };
       }
-      return retryable(errorMessage(error, "HTTP error body read failed"));
+      return retryable(errorMessage(error, "HTTP error body read failed"), retryAfterMs);
     }
     const failure = parseErrorPayload(text);
     const message = errorMessage(failure, text || response.statusText || `HTTP ${response.status}`);
@@ -430,7 +433,7 @@ export async function superviseRemoteCompactionResponse(
     if (classification === "terminal") return terminal(`HTTP ${response.status}: ${message}`);
     return retryable(
       `HTTP ${response.status}: ${message}`,
-      parseRetryAfter(response.headers.get("retry-after")),
+      retryAfterMs,
     );
   }
 
@@ -457,9 +460,15 @@ export async function superviseRemoteCompactionResponse(
       responsePayload && isRecord(responsePayload.incomplete_details)
         ? responsePayload.incomplete_details
         : undefined;
-    return classifyFailure(details) === "terminal"
-      ? terminal(errorMessage(details, "response was incomplete"))
-      : retryable("response was incomplete");
+    const reason = typeof details?.reason === "string" && details.reason.length > 0
+      ? details.reason : "unknown";
+    const diagnostic = errorMessage(details, "");
+    const message = `response incomplete (${reason})${diagnostic ? `: ${diagnostic}` : ""}`;
+    // Interrupted responses remain retryable, not successful checkpoints.
+    return (reason === "content_filter" || reason === "interrupted") &&
+        classifyFailure(details) !== "terminal"
+      ? retryable(message)
+      : terminal(message);
   }
 
   const message = errorMessage(event, "endpoint returned a failed response");
