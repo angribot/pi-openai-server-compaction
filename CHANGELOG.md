@@ -4,6 +4,9 @@ This changelog intentionally starts at **0.1.0**.
 
 ## Unreleased
 
+- match Native replay spans using Pi 1.4.0's exact historical thinking projection, preventing false missing-span aborts after model/provider/API switches without changing ordinary continuation suffixes or checkpoint formats
+- preserve persisted native Responses reasoning groups in first and repeated Remote compaction across models, providers, and supported APIs, including opaque reasoning fields and associated text/tool identities; cancel before dispatch on malformed reasoning envelopes or identity-breaking tool conversion, and never retry by stripping reasoning
+
 ## 0.15.2 - 2026-10-29
 
 - stop retrying Remote compaction incomplete responses except `content_filter` and `interrupted`, preserving reason-specific diagnostics without accepting partial checkpoints or changing success validation

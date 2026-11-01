@@ -9,7 +9,10 @@ import {
 } from "@earendil-works/pi-ai";
 import { buildSessionContext } from "@earendil-works/pi-coding-agent";
 import type { CompactionItem } from "./remote-compaction-operation.ts";
-import { projectCompactableContext, type ProjectedContext, type ResponsesItem } from "./responses-projection.ts";
+import {
+  projectCompactableContext, projectRemoteCompactionContext,
+  type ProjectedContext, type ResponsesItem,
+} from "./responses-projection.ts";
 import {
   isRetainedUserMessage,
   retainUserHistory,
@@ -449,12 +452,8 @@ export function prepareCompactionReplay(
       model,
       { includeSystemPrompt: false },
     ).input.filter(isRetainedUserMessage);
-    const suffix = projectCompactableContext(messages, model, {
-      includeSystemPrompt: false,
-      ...(state.kind === "valid"
-        ? { checkpointSystemMessage: state.entry.systemMessage }
-        : {}),
-    });
+    const suffix = projectRemoteCompactionContext(messages, model,
+      state.kind === "valid" ? { checkpointSystemMessage: state.entry.systemMessage } : {});
     prepared = {
       input: [
         ...(state.kind === "valid" ? state.replacementHistory : []),
