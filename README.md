@@ -43,6 +43,12 @@ Selecting an incompatible model produces a warning and leaves that model's ordin
 
 An eligible endpoint may reject another model, provider, account, or endpoint's opaque item. Ordinary provider errors surface without stripping the item and retrying.
 
+### Reasoning during compaction and continuation
+
+Remote compaction preserves persisted native Responses reasoning and its associated message/tool identities across model switches, rather than turning thinking into ordinary reply text. Endpoint compatibility is still a runtime assumption; malformed native groups or tool-format changes that would break their identities cancel compaction. See the [native reasoning contract](docs/reference.md#native-reasoning-in-remote-compaction).
+
+Ordinary continuation remains Pi-owned: the extension matches Pi's actual checkpoint span and installs replacement history, but does not restore cross-model reasoning that Pi omits from the post-checkpoint suffix.
+
 ### Recent user wording remains explicit
 
 Successful compaction retains recent original user messages and supported images beside the opaque item, using a fixed 64K approximate-token budget independent of Pi's `keepRecentTokens`. Newer messages take priority; an oversized boundary may be truncated. The full supported compactable context still reaches the compaction endpoint first. This budget does not guarantee fit on small-window targets; see [retention details](docs/reference.md#bounded-explicit-user-history).

@@ -26,6 +26,18 @@ import { projectJsonSchemaTool } from "./responses-tool-schema.ts";
 export type ResponsesItem = Record<string, unknown> & { type?: string };
 export type ProjectedContext = { input: ResponsesItem[]; tools: ResponsesItem[] };
 
+type ProjectionPurpose = "ordinary-request" | "remote-compaction";
+
+// Preserve the whole persisted Responses message, not just its reasoning item:
+// the accompanying text and tool item identities can be paired with that item.
+function isNativeReasoningGroup(message: AssistantMessage, purpose: ProjectionPurpose): boolean {
+  return purpose === "remote-compaction" &&
+    (message.api === "openai-responses" || message.api === "openai-codex-responses") &&
+    typeof message.provider === "string" && message.provider.length > 0 &&
+    typeof message.model === "string" && message.model.length > 0 &&
+    message.content.some((block) => block.type === "thinking" && Boolean(block.thinkingSignature));
+}
+
 /**
  * Projection controls mirroring the subset of Pi's Responses conversion this
  * extension owns. The production extension loader cannot resolve Pi's Responses
@@ -54,6 +66,27 @@ export type CompactableContextOptions = {
 const NON_VISION_USER_IMAGE_PLACEHOLDER = "(image omitted: model does not support images)";
 const NON_VISION_TOOL_IMAGE_PLACEHOLDER = "(tool image omitted: model does not support images)";
 const OPENAI_TOOL_CALL_PROVIDERS = new Set(["openai", "openai-codex", "opencode"]);
+
+function parseNativeReasoningItem(signature: string): ResponsesItem {
+  let item: unknown;
+  try {
+    item = JSON.parse(signature);
+  } catch {
+    // Do not include opaque signature bytes in preparation diagnostics.
+    throw new Error("Invalid native reasoning signature JSON.");
+  }
+  if (typeof item !== "object" || item === null || Array.isArray(item)) {
+    throw new Error("Invalid native reasoning item.");
+  }
+  const record = item as ResponsesItem;
+  if (record.type !== "reasoning" || !Array.isArray(record.summary) ||
+      (record.id != null && typeof record.id !== "string") ||
+      (record.encrypted_content != null && typeof record.encrypted_content !== "string") ||
+      (record.content != null && !Array.isArray(record.content))) {
+    throw new Error("Invalid native reasoning item envelope.");
+  }
+  return record;
+}
 
 function supportsMidConversationSystemMessages(model: Model<any>): boolean {
   return (
@@ -205,11 +238,12 @@ function replaceImagesWithPlaceholder(
   return result;
 }
 
-// Mirrors Pi 0.99.1 `transformMessages` (`openai-responses-shared` reuses it):
-// null-content normalization, image downgrade, foreign thinking/tool
-// normalization, and synthetic missing tool results. System messages that land
-// between a tool call and its results are held back until after those results.
-function normalizeMessages(messages: readonly Message[], model: Model<any>): Message[] {
+// Ordinary requests mirror Pi 1.4.0 transformMessages. Remote compaction keeps
+// native reasoning groups while sharing image downgrade and call/result repair.
+// System messages between calls and results stay behind the matching results.
+function normalizeMessages(
+  messages: readonly Message[], model: Model<any>, purpose: ProjectionPurpose,
+): Message[] {
   const toolCallIdMap = new Map<string, string>();
   const normalizedMessages = messages.map((message) =>
     message.content == null ? ({ ...message, content: [] } as Message) : message,
@@ -251,24 +285,27 @@ function normalizeMessages(messages: readonly Message[], model: Model<any>): Mes
       message.provider === model.provider &&
       message.api === model.api &&
       message.model === model.id;
+    const nativeGroup = isNativeReasoningGroup(message, purpose);
     const content = message.content.flatMap(
       (block): (TextContent | ThinkingContent | ToolCall)[] => {
         if (block.type === "thinking") {
-          if (block.redacted) return isSameModel ? [block] : [];
-          if (isSameModel && block.thinkingSignature) return [block];
+          if (nativeGroup && block.thinkingSignature) return [block];
+          // Pi drops foreign thinking instead of turning it into visible reply text.
+          if (!isSameModel) return [];
+          if (block.redacted || block.thinkingSignature) return [block];
           if (!block.thinking || block.thinking.trim() === "") return [];
-          return isSameModel ? [block] : [{ type: "text", text: block.thinking }];
+          return [block];
         }
         if (block.type === "text") {
-          return [isSameModel ? block : { type: "text", text: block.text }];
+          return [isSameModel || nativeGroup ? block : { type: "text", text: block.text }];
         }
         if (block.type === "toolCall") {
           let normalized: ToolCall = block;
-          if (!isSameModel && block.thoughtSignature) {
+          if (!isSameModel && !nativeGroup && block.thoughtSignature) {
             normalized = { ...block };
             delete normalized.thoughtSignature;
           }
-          if (!isSameModel) {
+          if (!isSameModel && !nativeGroup) {
             const normalizedId = normalizeToolCallId(block.id, message, model);
             if (normalizedId !== block.id) {
               toolCallIdMap.set(block.id, normalizedId);
@@ -388,16 +425,15 @@ function toolResultOutput(
   return output;
 }
 
-// Mirrors Pi 1.4.0 `convertResponsesMessages` for Remote compaction:
-// message/function/custom-tool items, Pi fallback IDs and phases, foreign
-// item-id normalization, tool outputs, anchored declaration changes, and
-// API-specific leading-system placement.
+// Shared Responses wire conversion. Only remote compaction preserves native
+// reasoning groups; ordinary-request matching retains Pi's identity rules.
 function projectNormalizedMessages(
   messages: readonly Message[],
   model: Model<any>,
   options: CompactableContextOptions,
   grammarToolInputProperties: ReadonlyMap<string, string>,
   transcriptTools: TranscriptTools,
+  purpose: ProjectionPurpose,
 ): ResponsesItem[] {
   const projected: ResponsesItem[] = [];
   const supportsDeveloperRole =
@@ -471,13 +507,16 @@ function projectNormalizedMessages(
       const isSameProviderAndApi = message.provider === model.provider && message.api === model.api;
       const isSameModel = isSameProviderAndApi && message.model === model.id;
       const isDifferentModel = isSameProviderAndApi && message.model !== model.id;
+      const nativeGroup = isNativeReasoningGroup(message, purpose);
       const output: ResponsesItem[] = [];
       let textBlockIndex = 0;
 
       for (const block of message.content) {
         if (block.type === "thinking") {
           if (block.thinkingSignature) {
-            output.push(JSON.parse(block.thinkingSignature) as ResponsesItem);
+            output.push(nativeGroup
+              ? parseNativeReasoningItem(block.thinkingSignature)
+              : JSON.parse(block.thinkingSignature) as ResponsesItem);
           }
           continue;
         }
@@ -489,6 +528,9 @@ function projectNormalizedMessages(
               : `msg_pi_${messageIndex}_${textBlockIndex}`;
           textBlockIndex++;
           let id = signature?.id || fallbackId;
+          if (nativeGroup && id.length > 64) {
+            throw new Error("Cannot preserve native reasoning group text identity: item ID exceeds 64 characters.");
+          }
           if (id.length > 64) id = `msg_${shortHash(id)}`;
           output.push({
             type: "message",
@@ -511,7 +553,10 @@ function projectNormalizedMessages(
           const inputProperty = grammarToolInputProperties.get(block.name);
           let itemId: string | undefined = rawItemId;
           const itemIdPrefix = inputProperty === undefined ? "fc_" : "ctc_";
-          if (isDifferentModel || !itemId?.startsWith(itemIdPrefix)) {
+          if (nativeGroup && itemId !== undefined && !itemId.startsWith(itemIdPrefix)) {
+            throw new Error("Cannot preserve native reasoning group tool identity under the selected tool wire type.");
+          }
+          if ((!nativeGroup && isDifferentModel) || !itemId?.startsWith(itemIdPrefix)) {
             itemId = undefined;
           }
           output.push({
@@ -522,7 +567,7 @@ function projectNormalizedMessages(
             ...(inputProperty === undefined
               ? { arguments: JSON.stringify(block.arguments) }
               : { input: grammarInput(block, inputProperty) }),
-            ...(isSameModel && block.namespace !== undefined ? { namespace: block.namespace } : {}),
+            ...((isSameModel || nativeGroup) && block.namespace !== undefined ? { namespace: block.namespace } : {}),
           });
         }
       }
@@ -568,6 +613,23 @@ export function projectCompactableContext(
   model: Model<any>,
   options: CompactableContextOptions = { includeSystemPrompt: true },
 ): ProjectedContext {
+  return projectContext(messages, model, options, "ordinary-request");
+}
+
+export function projectRemoteCompactionContext(
+  messages: readonly AgentMessage[],
+  model: Model<any>,
+  options: Pick<CompactableContextOptions, "checkpointSystemMessage"> = {},
+): ProjectedContext {
+  return projectContext(messages, model, { ...options, includeSystemPrompt: false }, "remote-compaction");
+}
+
+function projectContext(
+  messages: readonly AgentMessage[],
+  model: Model<any>,
+  options: CompactableContextOptions,
+  purpose: ProjectionPurpose,
+): ProjectedContext {
   const supportsMidConvoSystemMessages = supportsMidConversationSystemMessages(model);
   // A checkpoint snapshot is a leading system message of the logical context:
   // its text lives in the top-level instructions, while its in-place
@@ -585,7 +647,8 @@ export function projectCompactableContext(
   const transcriptTools = resolveTranscriptTools(toolContext.messages, responsesToolSupport(model));
   return {
     input: projectNormalizedMessages(
-      normalizeMessages(resolved.messages, model), model, options, grammarToolInputProperties, transcriptTools,
+      normalizeMessages(resolved.messages, model, purpose), model, options,
+      grammarToolInputProperties, transcriptTools, purpose,
     ),
     tools: projectToolDeclarations(transcriptTools.requestTools, model),
   };

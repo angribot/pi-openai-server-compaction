@@ -876,6 +876,123 @@ for (const kind of ["direct", "codex"] as const) {
   }
 }
 
+test("native replay matches Pi's thinking projection across historical identities", async (t) => {
+  for (const kind of ["direct", "codex"] as const) {
+    for (const identity of ["same", "provider", "api", "model"] as const) {
+      await t.test(`${kind}: ${identity}`, async () => {
+        const selected = model(kind);
+        const source = {
+          provider: identity === "provider" ? "other-provider" : selected.provider,
+          api: identity === "api"
+            ? (kind === "direct" ? "openai-codex-responses" : "openai-responses")
+            : selected.api,
+          model: identity === "model" ? "gpt-other" : selected.id,
+        };
+        const before = [
+          userEntry("u1", "before"),
+          assistantEntry("a1", "u1", {
+            ...source,
+            content: [{
+              type: "thinking",
+              thinking: "foreign thinking is not visible text",
+              thinkingSignature: JSON.stringify({
+                type: "reasoning", id: "rs_retained", encrypted_content: "opaque-reasoning", summary: [],
+              }),
+            }],
+          }),
+        ];
+        const branch = [
+          ...before,
+          checkpointEntry("c1", "a1", "a1", checkpointDetails(selected),
+            { role: "system", content: "BASE", timestamp: 1 }),
+          userEntry("u2", "after checkpoint", "c1"),
+          assistantEntry("a2", "u2", { ...source, content: [
+            { type: "thinking", thinking: "suffix reasoning", thinkingSignature: JSON.stringify({
+              type: "reasoning", id: "rs_suffix", summary: [], encrypted_content: "opaque-suffix",
+            }) },
+            { type: "text", text: "suffix response" },
+          ] }),
+          userEntry("u3", "continue", "a2"),
+        ];
+        const payload = await realProviderPayload(kind, selected, payloadMessages(branch));
+        const markerIndex = indexOfMarker(payload.input);
+        const suffixIndex = payload.input.findIndex((item: any) =>
+          item.role === "user" && item.content[0]?.text === "after checkpoint");
+        assert.ok(markerIndex >= 0);
+        assert.ok(suffixIndex > markerIndex);
+        const native = prepareNativeReplay(branch, selected);
+        assert.equal(native.kind, "compatible");
+        if (native.kind !== "compatible") return;
+        const rewrite = native.rewrite(payload);
+        assert.equal(rewrite.kind, "patched");
+        if (rewrite.kind !== "patched") return;
+        assert.deepEqual(rewrite.payload.input, [
+          ...payload.input.slice(0, markerIndex), COMPACTION_ITEM,
+          ...payload.input.slice(suffixIndex),
+        ]);
+        assert.equal(
+          native.rewrite({ ...payload, input: [...payload.input, ...payload.input] }).kind,
+          "span-missing-or-ambiguous",
+          "duplicate spans still fail closed",
+        );
+        assert.equal((rewrite.payload.input as any[]).some((item) => item.id === "rs_suffix"),
+          identity === "same", "ordinary suffix reasoning keeps Pi's exact-identity rules");
+      });
+    }
+  }
+});
+
+test("Remote compaction preserves native reasoning groups across historical identities", async (t) => {
+  for (const kind of ["direct", "codex"] as const) {
+    for (const identity of ["same", "provider", "api", "model"] as const) {
+      await t.test(`${kind}: ${identity}`, async () => {
+        const selected = model(kind);
+        const source = {
+          provider: identity === "provider" ? "other-provider" : selected.provider,
+          api: identity === "api"
+            ? (kind === "direct" ? "openai-codex-responses" : "openai-responses")
+            : selected.api,
+          model: identity === "model" ? "gpt-other" : selected.id,
+        };
+        const reasoning = {
+          type: "reasoning", id: "rs_history", encrypted_content: "opaque-reasoning", summary: [],
+        };
+        const branch = [
+          userEntry("u1", "before"),
+          assistantEntry("a1", "u1", {
+            ...source,
+            content: [
+              { type: "thinking", thinking: "unsigned reasoning" },
+              { type: "thinking", thinking: "signed reasoning", thinkingSignature: JSON.stringify(reasoning) },
+              { type: "thinking", thinking: "redacted reasoning", redacted: true },
+              { type: "text", text: "visible response",
+                textSignature: JSON.stringify({ v: 1, id: "msg_history", phase: "final_answer" }) },
+            ],
+          }),
+        ];
+        const original = structuredClone(branch);
+        const preparation = prepareCompactionReplay(branch, selected);
+        assert.equal(preparation.kind, "ready");
+        if (preparation.kind !== "ready") return;
+        const input = preparation.buildContext().input;
+        assert.deepEqual(input, [
+          { role: "user", content: [{ type: "input_text", text: "before" }] },
+          reasoning,
+          { type: "message", role: "assistant", content: [{
+            type: "output_text", text: "visible response", annotations: [],
+          }], status: "completed", id: "msg_history", phase: "final_answer" },
+          { type: "compaction_trigger" },
+        ]);
+        assert.deepEqual(branch, original, "projection does not rewrite persisted source identities");
+        assert.equal(JSON.stringify(input).includes("unsigned reasoning"), false);
+        assert.equal(JSON.stringify(input).includes("signed reasoning"), false);
+        assert.equal(JSON.stringify(input).includes("redacted reasoning"), false);
+        assert.equal(JSON.stringify(input).includes("visible response"), true);
+      });
+    }
+  }
+});
+
 test("native replay matches historical effort updates without removing suffix configuration", async () => {
   for (const enabled of [true, false]) {
     const selected = model("direct", { compat: { supportsMidConvoEffort: enabled } });
@@ -1111,6 +1228,162 @@ async function captureCompactionRequests<T>(run: () => T) {
     network.mock.restore();
   }
 }
+
+function nativeReasoningFixture(kind: ApiKind, grammar = false, repeated = false, withResult = true) {
+  const selected = model(kind, { provider: "custom-responses", id: "gpt-target", compat: {
+    supportsOpenAIGrammarTools: grammar, supportsMidConvoSystemMessages: true,
+    supportsAdditionalTools: true,
+  } });
+  const tool = grammar ? {
+    name: "read", description: "grammar read", parameters: {
+      type: "object", properties: { code: { type: "string" } }, required: ["code"],
+    }, constrainedSampling: { type: "grammar", variants: { openai_regex: ".*" } },
+  } : READ_TOOL;
+  const snapshot = { role: "system", content: "BASE", toolsAdded: [tool], timestamp: 1 } as SystemMessage;
+  const reasoning = { type: "reasoning", id: "rs_source", summary: [],
+    encrypted_content: "opaque-source-reasoning", future_field: { preserved: true } };
+  const itemId = grammar ? "ctc_source" : "fc_source";
+  const callId = `call_source|${itemId}`;
+  const call = assistantEntry("a1", repeated ? "c0" : "u0", {
+    content: [
+      { type: "thinking", thinking: "not visible text", thinkingSignature: JSON.stringify(reasoning) },
+      { type: "text", text: "using a tool", textSignature: JSON.stringify({ v: 1, id: "msg_source", phase: "commentary" }) },
+      { type: "toolCall", id: callId, name: "read", arguments: grammar ? { code: "read file" } : { path: "file" }, namespace: "functions" },
+    ], stopReason: "toolUse",
+  });
+  const details = checkpointDetails(selected);
+  details.nativeReplayCheckpoint.format = "native-replay-checkpoint/2";
+  details.nativeReplayCheckpoint.replacementHistory = [
+    { role: "user", content: [{ type: "input_text", text: "retained original" }] }, COMPACTION_ITEM,
+  ];
+  const branch = [systemEntry("s0", null, snapshot), userEntry("u0", "before", "s0"),
+    ...(repeated ? [checkpointEntry("c0", "u0", "u0", details, snapshot)] : []), call,
+    systemEntry("s1", "a1", { role: "system", content: "LATER", timestamp: 2 }),
+    ...(withResult ? [{ type: "message", id: "t1", parentId: "s1", timestamp: timestamp(), message: {
+      role: "toolResult", toolCallId: callId, toolName: "read", content: [{ type: "text", text: "tool result" }],
+      isError: false, timestamp: 3,
+    } } as BranchEntry] : []),
+    userEntry("u1", "compact now", withResult ? "t1" : "s1"),
+  ];
+  const expectedCall = { type: grammar ? "custom_tool_call" : "function_call", id: itemId,
+    call_id: "call_source", name: "read", namespace: "functions",
+    ...(grammar ? { input: "read file" } : { arguments: '{"path":"file"}' }) };
+  return { selected, branch, reasoning, expectedCall };
+}
+
+test("installed compaction hooks preserve native reasoning and paired items on both APIs", async () => {
+  for (const kind of ["direct", "codex"] as const) {
+    for (const grammar of [false, true]) {
+      for (const repeated of [false, true]) {
+        for (const withResult of [false, true]) {
+          const { selected, branch, reasoning, expectedCall } = nativeReasoningFixture(kind, grammar, repeated, withResult);
+          const original = structuredClone(branch);
+          const h = compactionHarness(kind, branch, selected);
+          const { result, requests } = await captureCompactionRequests(() => h.compact());
+          assert.ok(result.compaction, h.notifications.join("\n"));
+          assert.equal(requests.length, 1);
+          const input = requests[0].input;
+          const index = input.findIndex((item: any) => item.type === "reasoning");
+          assert.ok(index >= 0);
+          assert.deepEqual(input.slice(index, index + 4), [reasoning,
+            { type: "message", role: "assistant", content: [{ type: "output_text", text: "using a tool", annotations: [] }],
+              status: "completed", id: "msg_source", phase: "commentary" },
+            expectedCall,
+            { type: grammar ? "custom_tool_call_output" : "function_call_output", call_id: "call_source",
+              output: withResult ? "tool result" : "No result provided" },
+          ]);
+          assert.equal(input[index + 4].content, "LATER", "system updates stay after the paired result");
+          assert.deepEqual(input.at(-1), { type: "compaction_trigger" });
+          assert.equal(input.filter((item: any) => item.type === "compaction_trigger").length, 1);
+          assert.equal(input.filter((item: any) => item.type === "compaction").length, repeated ? 1 : 0);
+          assert.equal(indexOfMarker(input), -1);
+          assert.equal(JSON.stringify(input).includes("not visible text"), false);
+          if (repeated) assert.deepEqual(input.slice(0, 2), [
+            { role: "user", content: [{ type: "input_text", text: "retained original" }] }, COMPACTION_ITEM,
+          ]);
+          assert.deepEqual(branch, original);
+          assert.equal(result.compaction.details.nativeReplayCheckpoint.format, "native-replay-checkpoint/2");
+          assert.equal(result.compaction.details.nativeReplayCheckpoint.replacementHistory.some((item: any) => item.type === "reasoning"), false);
+        }
+      }
+    }
+  }
+});
+
+test("invalid native reasoning or changed paired wire types cancel before dispatch", async () => {
+  for (const kind of ["direct", "codex"] as const) {
+    for (const failure of ["json", "wrong-item", "array", "ciphertext", "summary", "custom-to-function", "function-to-custom", "text-id"] as const) {
+      const { selected, branch } = nativeReasoningFixture(kind, failure === "custom-to-function" || failure === "function-to-custom");
+      const call = branch.find((entry) => entry.id === "a1")!.message as AssistantMessage;
+      const thinking = call.content[0] as any;
+      const item = JSON.parse(thinking.thinkingSignature);
+      if (failure === "json") thinking.thinkingSignature = "private malformed signature";
+      if (failure === "wrong-item") thinking.thinkingSignature = JSON.stringify({ type: "compaction_trigger" });
+      if (failure === "array") thinking.thinkingSignature = "[]";
+      if (failure === "ciphertext") thinking.thinkingSignature = JSON.stringify({ ...item, encrypted_content: 42 });
+      if (failure === "summary") thinking.thinkingSignature = JSON.stringify({ ...item, summary: null });
+      if (failure === "custom-to-function") selected.compat = { ...selected.compat, supportsOpenAIGrammarTools: false };
+      if (failure === "function-to-custom") (call.content[2] as any).id = "call_source|fc_source";
+      if (failure === "text-id") (call.content[1] as any).textSignature = "m".repeat(65);
+      const h = compactionHarness(kind, branch, selected);
+      const { result, requests } = await captureCompactionRequests(() => h.compact());
+      assert.deepEqual(result, { cancel: true }, `${kind}: ${failure}`);
+      assert.equal(requests.length, 0, failure);
+      assert.match(h.notifications.join("\n"), /native reasoning|native.*identity/i);
+      assert.equal(h.notifications.join("\n").includes("private malformed signature"), false);
+      assert.equal(h.session.getBranch().some((entry) => entry.type === "compaction"), false);
+    }
+  }
+});
+
+test("native compaction does not fabricate reasoning for unsupported or unsuccessful source messages", async () => {
+  for (const kind of ["direct", "codex"] as const) {
+    for (const source of ["other-api", "error", "aborted", "unsigned"] as const) {
+      const { selected, branch } = nativeReasoningFixture(kind);
+      const call = branch.find((entry) => entry.id === "a1")!.message as AssistantMessage;
+      if (source === "other-api") call.api = "anthropic-messages";
+      if (source === "error" || source === "aborted") call.stopReason = source;
+      if (source === "unsigned") delete (call.content[0] as any).thinkingSignature;
+      const h = compactionHarness(kind, branch, selected);
+      const { result, requests } = await captureCompactionRequests(() => h.compact());
+      assert.ok(result.compaction, h.notifications.join("\n"));
+      assert.equal(requests[0].input.some((item: any) => item.type === "reasoning"), false, source);
+      assert.equal(JSON.stringify(requests[0].input).includes("not visible text"), false, source);
+    }
+  }
+});
+
+test("native reasoning rejection is terminal and transient retries keep the original input", async () => {
+  for (const kind of ["direct", "codex"] as const) {
+    for (const status of [400, 503]) {
+      const { selected, branch, reasoning } = nativeReasoningFixture(kind);
+      const requests: Record<string, any>[] = [];
+      const network = mock.method(globalThis, "fetch", async (_url: unknown, init?: RequestInit) => {
+        requests.push(requestBody(init));
+        if (requests.length === 1) return new Response(JSON.stringify({ error: {
+          code: status === 400 ? "invalid_request_error" : "server_error",
+          message: status === 400 ? "encrypted reasoning rejected by target" : "try again",
+        } }), { status, headers: { "retry-after": "0" } });
+        return compactionResponse();
+      });
+      try {
+        const h = compactionHarness(kind, branch, selected);
+        const result = await h.compact();
+        assert.deepEqual(requests[0].input.find((item: any) => item.type === "reasoning"), reasoning);
+        if (status === 400) {
+          assert.deepEqual(result, { cancel: true });
+          assert.equal(requests.length, 1, "no reasoning-stripped retry");
+          assert.match(h.notifications.join("\n"), /encrypted reasoning rejected/);
+        } else {
+          assert.ok(result.compaction, h.notifications.join("\n"));
+          assert.equal(requests.length, 2);
+          assert.deepEqual(requests[1].input, requests[0].input);
+        }
+        assert.equal(h.session.getBranch().some((entry) => entry.type === "compaction"), false);
+      } finally { network.mock.restore(); }
+    }
+  }
+});
 
 test("Remote compaction sends Pi-projected active declarations without repairing regex lookahead schemas", async () => {
   const tool = { name: "tasks", description: "Synthetic lookahead declaration", parameters: {
